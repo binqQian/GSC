@@ -1,5 +1,6 @@
 #include "file_handle.h"
 #include "defs.h"
+#include "logger.h"
 
 
 
@@ -24,6 +25,7 @@ File_Handle_2::~File_Handle_2()
 // ******************************************************************************
 bool File_Handle_2::Open(const string& temp_file2_fname)
 {
+	auto logger = LogManager::Instance().Logger();
 	lock_guard<mutex> lck(mtx);
 
 	if (f)
@@ -35,7 +37,7 @@ bool File_Handle_2::Open(const string& temp_file2_fname)
 	f = fopen(temp_file2_fname.c_str(), input_mode ? "rb" : "wb");
 
 	if (!f){
-        std::cerr<<"Can't Open: "<<temp_file2_fname<<" failed"<<endl;
+        logger->error("Can't open: {} failed", temp_file2_fname);
 		return false;
     }
 	setvbuf(f, nullptr, _IOFBF, 64 << 20);
@@ -104,7 +106,8 @@ bool File_Handle_2::serialize()
 		}
 
 #ifdef LOG_INFO
-		cerr << stream.first << ": " << stream.second.stream_name << "  raw size: " << stream.second.raw_size << "   packed size: " << str_size << endl;
+        auto logger = LogManager::Instance().Logger();
+		logger->info("{}: {}  raw size: {}   packed size: {}", stream.first, stream.second.stream_name, stream.second.raw_size, str_size);
 #endif
 	}
 

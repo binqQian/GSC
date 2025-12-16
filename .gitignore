@@ -2,3 +2,7 @@
 *.d
 gsc
 *.md
+/toy/
+/logs/
+/.vscode/
+*.log

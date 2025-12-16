@@ -1,6 +1,7 @@
 
 #include "defs.h"
 #include "samples.h"
+#include "logger.h"
 #include <iostream>
 #include <cstring>
 #include <fstream>
@@ -10,10 +11,11 @@
 // *****************************************************************************************************************
 int Samples::loadSamples(vector<string>& v_samples)  
 {
+    auto logger = LogManager::Instance().Logger();
     uint32_t c = 0;
     for (size_t i = 0; i < v_samples.size(); i++){
         if (!whichIndMap.insert(std::pair<std::string, uint32_t>(v_samples[i], c++)).second) {
-                std::cout << "Error! Two individuals with the same name!\n";
+                logger->error("Error! Two individuals with the same name!");
                 return 2;
             }
         all_samples  += v_samples[i] + "\t";
@@ -30,12 +32,13 @@ void Samples::get_all_samples(string &str){
 // *****************************************************************************************************************
 uint32_t Samples::getWhich(std::string nm)
 {
+    auto logger = LogManager::Instance().Logger();
     auto it = whichIndMap.find(nm);
     if(it != whichIndMap.end())
              return it->second;
     else
     {
-        std::cout << "There is no sample " << nm << " in the set\n";
+        logger->error("There is no sample {} in the set", nm);
         exit(1);
         
     }
@@ -43,6 +46,7 @@ uint32_t Samples::getWhich(std::string nm)
 // *****************************************************************************************************************
 uint32_t * Samples::setSamples(const std::string & samples, string &str)
 {
+    auto logger = LogManager::Instance().Logger();
     uint32_t * smplIDs = nullptr;
     long size = 0;
     
@@ -52,7 +56,7 @@ uint32_t * Samples::setSamples(const std::string & samples, string &str)
         std::ifstream in_samples(samples.substr(1));
         if(!in_samples.is_open())
         {
-            std::cout << "Error. Cannot open " << samples.substr(1)<< " file with samples.\n";
+            logger->error("Error. Cannot open {} file with samples.", samples.substr(1));
             exit(1);
         }
         
@@ -63,7 +67,7 @@ uint32_t * Samples::setSamples(const std::string & samples, string &str)
             size++;
             
         }
-        cout<<"size:"<<size<<endl;
+        logger->debug("Sample file size: {}", size);
         in_samples.clear();
         in_samples.seekg(0);
         

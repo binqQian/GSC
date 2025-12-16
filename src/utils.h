@@ -18,6 +18,7 @@
 #include "htslib/kstring.h"
 #include "htslib/bgzf.h"
 #include "htslib/vcf.h"
+#include "logger.h"
 using namespace std;
 
 #ifdef OUR_STRTOL
@@ -67,7 +68,8 @@ inline void read(vector<uint8_t>& v_comp, size_t& pos, T& x) {
         x = stoll(t);
     }catch(const std::invalid_argument& e){
         
-        std::cerr << "Invalid argument: " << e.what()<<":"<<v_comp.size()<<":"<<pos<<":"<<(t.size())<< std::endl;
+        auto logger = LogManager::Instance().Logger();
+        logger->error("Invalid argument: {}:{}:{}:{}", e.what(), v_comp.size(), pos, t.size());
     }
 };
 

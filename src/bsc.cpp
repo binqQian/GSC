@@ -8,6 +8,7 @@
 // *******************************************************************************************
 
 #include "bsc.h"
+#include "logger.h"
 
 #include <iostream>
 #include <cstdio>
@@ -102,8 +103,9 @@ bool CBSCWrapper::Decompress(vector<uint8_t>& v_input, vector<uint8_t>& v_output
 	bsc_block_info(ci, LIBBSC_HEADER_SIZE, &p_block_size, &p_data_size, 0);
 
 #ifdef LOG_INFO
-	cout << "Block size " << p_block_size << endl;
-	cout << "Data size  " << p_data_size << endl;
+    auto logger = LogManager::Instance().Logger();
+	logger->info("Block size {}", p_block_size);
+	logger->info("Data size {}", p_data_size);
 #endif
 
 	unsigned char* co = (unsigned char*)malloc(p_data_size);

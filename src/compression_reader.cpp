@@ -1,4 +1,5 @@
 #include "compression_reader.h"
+#include "logger.h"
 #include <iostream>
 #include <fstream>
 #include <sstream>
@@ -6,6 +7,7 @@
 // ***************************************************************************************************************************************
 bool CompressionReader::OpenForReading(string & file_name)
 {
+    auto logger = LogManager::Instance().Logger();
     if(merge_flag){
         bcf_hdr_t * temp_vcf_hdr = nullptr;
         vector<string> merge_file_names;
@@ -16,7 +18,7 @@ bool CompressionReader::OpenForReading(string & file_name)
             std::ifstream directory_file_name(file_name.substr(1));
             if(!directory_file_name.is_open())
             {
-                std::cerr << "Error. Cannot open " << file_name.substr(1)<< " file with samples.\n";
+                logger->error("Cannot open {} file with samples.", file_name.substr(1));
                 exit(1);
             }
             std::string item;
@@ -25,7 +27,7 @@ bool CompressionReader::OpenForReading(string & file_name)
                 merge_file_names.emplace_back(item);
                 size++;        
             }
-            std::cerr<<"size:"<<size<<endl;
+            logger->debug("Merge file list size: {}", size);
             directory_file_name.clear();
         }else{   
             char delim = ',';
@@ -50,7 +52,7 @@ bool CompressionReader::OpenForReading(string & file_name)
                 merge_files[i] = hts_open(merge_file_names[i].c_str(), "rb");
             }
             if(!merge_files[i]){
-                std::cerr << "could not open " << merge_file_names[i] << " file" << std::endl;
+                logger->error("Could not open {} file", merge_file_names[i]);
                 merge_failure_flag = true;
                 return false;
             }
@@ -77,7 +79,7 @@ bool CompressionReader::OpenForReading(string & file_name)
             in_file = hts_open(file_name.c_str(), "rb");
         }
         if(!in_file){
-            std::cerr << "could not open " << in_file_name << " file" << std::endl;
+            logger->error("Could not open {} file", in_file_name);
             return false;
         }
         hts_set_opt(in_file, HTS_OPT_CACHE_SIZE, 32 << 20);
@@ -328,6 +330,7 @@ bool CompressionReader::GetFilterInfoFormatKeys(int &no_flt_keys, int &no_info_k
 // ************************************************************************************
 bool CompressionReader::GetVariantFromRec(bcf1_t *rec, vector<field_desc> &fields)
 {
+    auto logger = LogManager::Instance().Logger();
     vector<int> field_order;
     field_order.reserve(no_keys);
     if (rec->d.n_flt)
@@ -412,7 +415,7 @@ bool CompressionReader::GetVariantFromRec(bcf1_t *rec, vector<field_desc> &field
             }
             else
             {
-                std::cerr << "Error getting variant" << endl;
+                logger->error("Error getting variant.");
                 return false;
             }
         }
@@ -611,6 +614,7 @@ bool CompressionReader::SetVariantOtherFields(vector<field_desc> &fields)
 bool CompressionReader::ProcessInVCF()
 {
     
+    auto logger = LogManager::Instance().Logger();
     if (!vcf_hdr_read)
         ReadFile();
     setBitVector();
@@ -635,19 +639,18 @@ bool CompressionReader::ProcessInVCF()
             variant_desc_t desc;
             if (vcf_record->errcode)
             {
-                std::cerr << "Repair VCF file\n";
+                logger->error("Repair VCF file.");
                 exit(9);
             }
             bcf_unpack(vcf_record, BCF_UN_ALL);
             if (vcf_record->d.fmt->n != (int)ploidy)
             {
-                std::cerr << "Wrong ploidy (not equal to " << ploidy << ") for record at position " << vcf_record->pos << ".\n";
-                std::cerr << "Repair VCF file OR set correct ploidy using -p option\n";
+                logger->error("Wrong ploidy (not equal to {}) for record at position {}.", ploidy, vcf_record->pos);
+                logger->error("Repair VCF file OR set correct ploidy using -p option.");
                 exit(9);
             }
             if (tmpi % 100000 == 0){
-                std::cerr << tmpi << "\r";
-                fflush(stdout);
+                logger->info("Processed {} variants...", tmpi);
             }
             if(compress_mode == compress_mode_t::lossless_mode){
 
@@ -688,7 +691,7 @@ bool CompressionReader::ProcessInVCF()
         delete[] gt_data;
     }
 
-    std::cerr << "Read all the variants and gentotypes" << endl;
+    logger->info("Read all the variants and genotypes.");
     // Last pack (may be smaller than block size）
     
         CloseFiles();

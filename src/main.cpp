@@ -21,6 +21,8 @@
 
 #include "decompressor.h"
 
+#include "logger.h"
+
 // #include <algorithm>
 
 #include <cstdio>
@@ -62,14 +64,12 @@ int usage()
 
 {
 
-    cerr << "Usage: gsc [option] [arguments] " << endl;
+    auto logger = LogManager::Instance().Logger();
+    logger->info("Usage: gsc [option] [arguments]");
+    logger->info("Available options:");
+    logger->info("\tcompress - compress VCF/BCF file");
+    logger->info("\tdecompress - query and decompress to VCF/BCF file");
 
-    cerr << "Available options: " << endl;
-
-    cerr << "\tcompress - compress VCF/BCF file" << endl;
-
-    cerr << "\tdecompress     - query and decompress to VCF/BCF file " << endl;
-    
     exit(0);
 }
 
@@ -77,21 +77,26 @@ int usage_compress()
 
 {
 
-std::cerr << "Usage of gsc compress:\n\n"
-            << "\tgsc compress [options] [--in [in_file]] [--out [out_file]]\n\n"
-            << "Where:\n\n"
-            << "\t[options]              Optional flags and parameters for compression.\n"
-            << "\t-i,  --in [in_file]    Specify the input file (default: VCF or VCF.GZ). If omitted, input is taken from standard input (stdin).\n"
-            << "\t-o,  --out [out_file]  Specify the output file. If omitted, output is sent to standard output (stdout).\n\n"
-              
-            << "Options:\n\n"
-            << "\t-M,  --mode_lossly     Choose lossy compression mode (lossless by default).\n"
-            << "\t-b,  --bcf             Input is a BCF file (default: VCF or VCF.GZ).\n"
-            << "\t-p,  --ploidy [X]      Set ploidy of samples in input VCF to [X] (default: 2).\n"
-            << "\t-t,  --threads [X]     Set number of threads to [X] (default: 1).\n"
-            << "\t-d,  --depth [X]       Set maximum replication depth to [X] (default: 100, 0 means no matches).\n"
-            << "\t-m,  --merge [X]       Specify files to merge, separated by commas (e.g., -m chr1.vcf,chr2.vcf), or '@' followed by a file containing a list of VCF files (e.g., -m @file_with_IDs.txt). By default, all VCF files are compressed.\n"
-            << std::endl;
+    auto logger = LogManager::Instance().Logger();
+    logger->info(R"(Usage of gsc compress:
+
+    gsc compress [options] [--in [in_file]] [--out [out_file]]
+
+Where:
+
+    [options]              Optional flags and parameters for compression.
+    -i,  --in [in_file]    Specify the input file (default: VCF or VCF.GZ). If omitted, input is taken from standard input (stdin).
+    -o,  --out [out_file]  Specify the output file. If omitted, output is sent to standard output (stdout).
+
+Options:
+
+    -M,  --mode_lossly     Choose lossy compression mode (lossless by default).
+    -b,  --bcf             Input is a BCF file (default: VCF or VCF.GZ).
+    -p,  --ploidy [X]      Set ploidy of samples in input VCF to [X] (default: 2).
+    -t,  --threads [X]     Set number of threads to [X] (default: 1).
+    -d,  --depth [X]       Set maximum replication depth to [X] (default: 100, 0 means no matches).
+    -m,  --merge [X]       Specify files to merge, separated by commas (e.g., -m chr1.vcf,chr2.vcf), or '@' followed by a file containing a list of VCF files (e.g., -m @file_with_IDs.txt). By default, all VCF files are compressed.
+)");
 
     exit(0);
 }
@@ -99,35 +104,38 @@ std::cerr << "Usage of gsc compress:\n\n"
 int usage_decompress()
 
 {
-std::cerr << "Usage of gsc decompress and query:\n\n"
-          << "\tgsc decompress [options] --in [in_file] --out [out_file]\n\n"
+    auto logger = LogManager::Instance().Logger();
+    logger->info(R"(Usage of gsc decompress and query:
 
-          << "Where:\n"
-          << "\t[options]              Optional flags and parameters for compression.\n"
-          << "\t-i,  --in [in_file]    Specify the input file . If omitted, input is taken from standard input (stdin).\n"
-          << "\t-o,  --out [out_file]  Specify the output file (default: VCF). If omitted, output is sent to standard output (stdout).\n\n"
+    gsc decompress [options] --in [in_file] --out [out_file]
 
-          << "Options:\n\n"
-          << "    General Options:\n\n"
-          << "\t-M,  --mode_lossly\tChoose lossy compression mode (default: lossless).\n"
-          << "\t-b,  --bcf\t\tOutput a BCF file (default: VCF).\n\n"
+Where:
+    [options]              Optional flags and parameters for compression.
+    -i,  --in [in_file]    Specify the input file . If omitted, input is taken from standard input (stdin).
+    -o,  --out [out_file]  Specify the output file (default: VCF). If omitted, output is sent to standard output (stdout).
 
-          << "    Filter options (applicable in lossy compression mode only): \n\n"
-          << "\t-r,  --range [X]\tSpecify range in format [start],[end] (e.g., -r 4999756,4999852).\n"
-          << "\t-s,  --samples [X]\tSamples separated by comms (e.g., -s HG03861,NA18639) OR '@' sign followed by the name of a file with sample name(s) separated by whitespaces (for exaple: -s @file_with_IDs.txt). By default all samples/individuals are decompressed. \n"
-          << "\t--header-only\t\tOutput only the header of the VCF/BCF.\n"
-          << "\t--no-header\t\tOutput without the VCF/BCF header (only genotypes).\n"
-          << "\t-G,  --no-genotype\tDon't output sample genotypes (only #CHROM, POS, ID, REF, ALT, QUAL, FILTER, and INFO columns).\n"
-          << "\t-C,  --out-ac-an\tWrite AC/AN to the INFO field.\n"
-          << "\t-S,  --split\t\tSplit output into multiple files (one per chromosome).\n"
-          << "\t-I, [ID=^]\t\tInclude only sites with specified ID (e.g., -I \"ID=rs6040355\").\n"
-          << "\t--minAC [X]\t\tInclude only sites with AC <= X.\n"
-          << "\t--maxAC [X]\t\tInclude only sites with AC >= X.\n"
-          << "\t--minAF [X]\t\tInclude only sites with AF >= X (X: 0 to 1).\n"
-          << "\t--maxAF [X]\t\tInclude only sites with AF <= X (X: 0 to 1).\n"
-          << "\t--min-qual [X]\t\tInclude only sites with QUAL >= X.\n"
-          << "\t--max-qual [X]\t\tInclude only sites with QUAL <= X.\n"
-          << std::endl;
+Options:
+
+    General Options:
+        -M,  --mode_lossly    Choose lossy compression mode (default: lossless).
+        -b,  --bcf            Output a BCF file (default: VCF).
+
+    Filter options (applicable in lossy compression mode only):
+        -r,  --range [X]      Specify range in format [start],[end] (e.g., -r 4999756,4999852).
+        -s,  --samples [X]    Samples separated by comms (e.g., -s HG03861,NA18639) OR '@' sign followed by the name of a file with sample name(s) separated by whitespaces (for exaple: -s @file_with_IDs.txt). By default all samples/individuals are decompressed.
+        --header-only         Output only the header of the VCF/BCF.
+        --no-header           Output without the VCF/BCF header (only genotypes).
+        -G,  --no-genotype    Don't output sample genotypes (only #CHROM, POS, ID, REF, ALT, QUAL, FILTER, and INFO columns).
+        -C,  --out-ac-an      Write AC/AN to the INFO field.
+        -S,  --split          Split output into multiple files (one per chromosome).
+        -I, [ID=^]            Include only sites with specified ID (e.g., -I "ID=rs6040355").
+        --minAC [X]           Include only sites with AC <= X.
+        --maxAC [X]           Include only sites with AC >= X.
+        --minAF [X]           Include only sites with AF >= X (X: 0 to 1).
+        --maxAF [X]           Include only sites with AF <= X (X: 0 to 1).
+        --min-qual [X]        Include only sites with QUAL >= X.
+        --max-qual [X]        Include only sites with QUAL <= X.
+)");
 
     // cerr << "Decompress and Query usage:" << endl;
 
@@ -191,6 +199,8 @@ std::cerr << "Usage of gsc decompress and query:\n\n"
 int main(int argc, const char *argv[])
 {
     
+    LogManager::Instance().Initialize();
+    auto logger = LogManager::Instance().Logger();
     high_resolution_clock::time_point start = high_resolution_clock::now();
 
     int result = 0;
@@ -201,20 +211,20 @@ int main(int argc, const char *argv[])
     if(params.task_mode == task_mode_t::mcompress){
         result = compress_entry();
         if (result)
-		    std::cerr << "Compression error!!!\n";
+            logger->error("Compression error.");
     }
 
     else if(params.task_mode == task_mode_t::mdecompress){
         result = decompress_entry();
         if (result)
-		    std::cerr << " Decompression error!!!\n";
+            logger->error("Decompression error.");
     }
 
     high_resolution_clock::time_point end = high_resolution_clock::now();
 
 	duration<double> time_duration = duration_cast<duration<double>>(end - start);
 
-	std::cerr << "Total processing time: " << time_duration.count() << " seconds.\n";
+	logger->info("Total processing time: {:.3f} seconds.", time_duration.count());
 
     return result;
 }
@@ -222,6 +232,8 @@ int main(int argc, const char *argv[])
 // Parse the parameters
 int params_options(int argc, const char *argv[]){
     
+    auto logger = LogManager::Instance().Logger();
+
     if (argc < 2)
 	{
 		return usage();
@@ -257,7 +269,7 @@ int params_options(int argc, const char *argv[]){
                 
                 if(!isatty(STDIN_FILENO)){
 
-                    std::cerr << "Error: Conflicting inputs - both filename and stdin data detected." << std::endl;
+                    logger->error("Error: Conflicting inputs - both filename and stdin data detected.");
                     return usage_compress();
                 }
                 i++;
@@ -342,12 +354,12 @@ int params_options(int argc, const char *argv[]){
         }
         if(isatty(STDIN_FILENO) && params.in_file_name == "-"){
 
-            std::cerr << "Error: No input file specified and no data provided via stdin!" << std::endl;
+            logger->error("Error: No input file specified and no data provided via stdin!");
             return usage_compress();
         }
         if(isatty(STDOUT_FILENO) && params.out_file_name == "-"){
 
-            std::cerr << "Warning: No output file specified and no data provided via stdout!" << std::endl;
+            logger->warn("Warning: No output file specified and no data provided via stdout!");
 
         }
         
@@ -374,7 +386,7 @@ int params_options(int argc, const char *argv[]){
                 
                 if(!isatty(STDIN_FILENO)){
 
-                    std::cerr << "Error: Conflicting inputs - both filename and stdin data detected!" << std::endl;
+                    logger->error("Error: Conflicting inputs - both filename and stdin data detected!");
                     return usage_decompress();
                 }
                 i++;
@@ -618,12 +630,12 @@ int params_options(int argc, const char *argv[]){
 
         if(isatty(STDIN_FILENO) && params.in_file_name == "-"){
 
-            std::cerr << "Error: No input file specified and no data provided via stdin!" << std::endl;
+            logger->error("Error: No input file specified and no data provided via stdin!");
             return usage_decompress();
         }
         if(isatty(STDOUT_FILENO) && params.out_file_name == "-"){
 
-            std::cerr << "Warning: No output file specified and no data provided via stdout!" << std::endl;
+            logger->warn("Warning: No output file specified and no data provided via stdout!");
 
         }        
         

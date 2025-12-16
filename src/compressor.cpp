@@ -1,4 +1,5 @@
 #include "compressor.h"
+#include "logger.h"
 #include <iostream>
 
 
@@ -6,7 +7,8 @@
 //write the compressed file
 bool Compressor::writeCompressFlie()
 {
-    std::cerr << "The BSC algorithm was used to compress the genotype part" << endl;
+    auto logger = LogManager::Instance().Logger();
+    logger->info("The BSC algorithm is used to compress the genotype part.");
     // cout << "Gt_index_original_size:" << toal_all_size<< endl;
 
     uint32_t curr_no_blocks = 0;
@@ -180,7 +182,7 @@ bool Compressor::writeCompressFlie()
     fwrite(&mode_type, sizeof(mode_type), 1, comp);
     fwrite(&other_fields_offset, sizeof(other_fields_offset), 1, comp);
     fwrite(&sdsl_offset, sizeof(sdsl_offset), 1, comp);
-    std::cerr<<int(mode_type) <<" " << other_fields_offset <<" " << sdsl_offset <<endl;
+    logger->debug("mode_type: {} other_fields_offset: {} sdsl_offset: {}", static_cast<int>(mode_type), other_fields_offset, sdsl_offset);
     fseek(comp, 21, SEEK_SET);
     for(auto cur_chunk:chunks_streams)
     {
@@ -211,7 +213,7 @@ bool Compressor::writeCompressFlie()
         sdsl::osfstream out(fname, std::ios::binary | std::ios::app);
         if (!out) {
             if (sdsl::util::verbose) {
-                std::cerr << "ERROR: store_to_file not successful for: `" << fname << "`" << std::endl;
+                logger->error("ERROR: store_to_file not successful for: `{}`", fname);
             }
             exit(1);
         }
@@ -231,7 +233,7 @@ bool Compressor::writeCompressFlie()
     }
 
     if (sdsl::util::verbose) {
-        std::cerr << "INFO: store_to_file: `" << fname << "`" << std::endl;
+        logger->info("store_to_file: `{}`", fname);
     }
     // sdsl::osfstream out(fname, std::ios::binary | std::ios::app);
     // if (!out)
@@ -274,6 +276,7 @@ bool Compressor::writeCompressFlie()
 // *******************************************************************************************************************
 bool Compressor::OpenForWriting(const string &out_file_name)
 {
+    auto logger = LogManager::Instance().Logger();
     if(out_file_name != "-"){
         fname = out_file_name;
         // fname = (char *)malloc(strlen(out_file_name.c_str()) + 5);
@@ -282,7 +285,7 @@ bool Compressor::OpenForWriting(const string &out_file_name)
         if (!comp)
         {
 
-            std::cerr << "ERROR: storing archive not successful for: `" << fname << "`" << std::endl;
+            logger->error("storing archive not successful for: `{}`", fname);
             exit(1);
         }
     }else {
@@ -292,7 +295,7 @@ bool Compressor::OpenForWriting(const string &out_file_name)
         
     }
     if (setvbuf(comp, nullptr, _IOFBF, 64 << 20) != 0) {
-        std::cerr << "ERROR: Buffer setup failed for: `" << fname << "`" << std::endl;
+        logger->error("Buffer setup failed for: `{}`", fname);
         // if (fname != nullptr) {
         //     free(fname);
         // }
@@ -310,7 +313,7 @@ bool Compressor::OpenForWriting(const string &out_file_name)
     sdsl_offset = ftell(comp) + sizeof(uint64_t);
     
     if (fwrite(&sdsl_offset, sizeof(sdsl_offset), 1, comp) != 1) {
-        std::cerr << "ERROR: Write operation failed for: `" << fname << "`" << std::endl;
+        logger->error("Write operation failed for: `{}`", fname);
     }
 
     
@@ -329,6 +332,7 @@ bool Compressor::OpenForWriting(const string &out_file_name)
 //*******************************************************************************************************************
 bool Compressor::OpenTempFile(const string &out_file_name)
 {
+    auto logger = LogManager::Instance().Logger();
     temp_file1_fname = (char *)malloc(strlen(out_file_name.c_str()) + 5);
 
     snprintf(temp_file1_fname, strlen(out_file_name.c_str()) + 5, "%s.temp", out_file_name.c_str());
@@ -337,7 +341,7 @@ bool Compressor::OpenTempFile(const string &out_file_name)
     if (!temp_file)
     {
 
-        std::cerr << "ERROR: storing archive not successful for: `" << temp_file1_fname << "`" << std::endl;
+        logger->error("storing archive not successful for: `{}`", temp_file1_fname);
         exit(1);
     }
     
@@ -353,7 +357,7 @@ bool Compressor::OpenTempFile(const string &out_file_name)
 
         if (!file_handle2->Open(temp_file2_fname))
 	    {
-		    cerr << "Cannot open " << temp_file2_fname << "\n";
+		    logger->error("Cannot open {}", temp_file2_fname);
 		    return false;
 	    }
     }
@@ -364,6 +368,7 @@ bool Compressor::OpenTempFile(const string &out_file_name)
 bool Compressor::CompressProcess()
 {
     //it is important to initialize the library before using it
+    auto logger = LogManager::Instance().Logger();
     CBSCWrapper::InitLibrary(p_bsc_features);
     
     MyBarrier  my_barrier(3);
@@ -372,7 +377,7 @@ bool Compressor::CompressProcess()
 
     if (!compression_reader->OpenForReading(params.in_file_name))
 	{
-		cerr << "Cannot open: " << params.in_file_name << endl;
+		logger->error("Cannot open: {}", params.in_file_name);
 		return false;
 	}
     if (!OpenForWriting(params.out_file_name))
@@ -390,11 +395,11 @@ bool Compressor::CompressProcess()
     uint32_t no_samples = compression_reader->GetSamples(v_samples);
     // for(int i =0;i<v_samples.size();i++)
     //     std::cerr<<v_samples[i]<<endl;
-    std::cerr << "no_samples:" << no_samples << endl;
+    logger->info("Number of samples: {}", no_samples);
 
     if (!no_samples)
     {
-        std::cerr << "The number of genotype samples is zero and cannot be compressed!\n";
+        logger->error("The number of genotype samples is zero and cannot be compressed!");
         return false;
     }
     
@@ -404,7 +409,7 @@ bool Compressor::CompressProcess()
 
     compression_reader->setNoVecBlock(params);
 
-    std::cerr<<"no_gt_threads:"<<params.no_gt_threads<<endl;
+    logger->info("Number of GT threads: {}", params.no_gt_threads);
     GtBlockQueue inGtBlockQueue(max((int)(params.no_blocks*params.no_gt_threads),8));
 
     // VarBlockQueue<fixed_fixed_field_block> inVarBlockQueue(max((int)params.no_threads * 2, 8));
@@ -650,7 +655,7 @@ bool Compressor::CompressProcess()
     if(temp_file)
         fclose(temp_file);
     temp_file = fopen(temp_file1_fname, "rb");
-    std::cerr << "Complete and process the chunking." << std::endl;
+    logger->info("Complete and process the chunking.");
 
 
     compressReplicatedRow();

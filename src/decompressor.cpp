@@ -1,4 +1,5 @@
 #include "decompressor.h"
+#include "logger.h"
 #include <bitset>
 #include <chrono>
 
@@ -37,6 +38,7 @@ bool Decompressor::analyzeInputRange(uint32_t & start_chunk_id,uint32_t & end_ch
 
     size_t prev_chrom_size;
     bool query_flag = false;
+    auto logger = LogManager::Instance().Logger();
 
     // std::cerr << "Begin to extract the genotype sparse matrix" << endl;
     if (range == "")
@@ -70,7 +72,7 @@ bool Decompressor::analyzeInputRange(uint32_t & start_chunk_id,uint32_t & end_ch
             }else{
                 
                 if(matches[3].matched){
-                    std::cerr << "Invalid input format." << std::endl;
+                    logger->error("Invalid input format.");
                     return 0;
                 }else{
                     range_1 = 0;
@@ -86,7 +88,7 @@ bool Decompressor::analyzeInputRange(uint32_t & start_chunk_id,uint32_t & end_ch
             // std::cerr << "End position: " << range_2 << std::endl;
         } else {
             
-            std::cerr << "Invalid input format." << std::endl;
+            logger->error("Invalid input format.");
 
         }
         
@@ -130,7 +132,7 @@ bool Decompressor::analyzeInputRange(uint32_t & start_chunk_id,uint32_t & end_ch
         // }
         if (range_2 < range_1)
         {
-            std::cerr << "error range!" << endl;
+            logger->error("Invalid range selection.");
             return 0;
         }
 
@@ -152,7 +154,7 @@ bool Decompressor::analyzeInputRange(uint32_t & start_chunk_id,uint32_t & end_ch
         
         if (!query_flag)
         {
-            std::cerr << "The specified chromosome wass not found!!!\n";
+            logger->error("The specified chromosome was not found.");
             return 0;
         }
 
@@ -161,7 +163,7 @@ bool Decompressor::analyzeInputRange(uint32_t & start_chunk_id,uint32_t & end_ch
 
         if (end_chunk < 0)
         {
-            std::cerr << "no var int the range!" << endl;
+            logger->warn("No variants in the requested range.");
             return 0;
         }
         start_chunk_id = start_chunk > (int)start_chunk_id ? start_chunk : start_chunk_id;
@@ -1017,6 +1019,7 @@ bool Decompressor::SetVariant(variant_desc_t &desc, vector<uint8_t> &_my_str, si
 //*****************************************************************************************************************
 int Decompressor::BedFormatDecompress(){
 
+    auto logger = LogManager::Instance().Logger();
     done_unique.clear();
     stored_unique.clear();
     uint32_t cur_block_id = 0;
@@ -1177,8 +1180,7 @@ int Decompressor::BedFormatDecompress(){
     //     appendVCFToRec(temp_desc, genotype, static_cast<uint32_t>(standard_block_size), temp_fields, decompression_reader.keys);
     // }
 
-    std::cerr<< cur_chunk_id << "\r";
-    fflush(stdout);
+    logger->info("Processed chunk {}", cur_chunk_id);
 
     for (auto &it : done_unique)
         delete[] it.second;
@@ -1192,6 +1194,7 @@ int Decompressor::BedFormatDecompress(){
 //*****************************************************************************************************************
 int Decompressor::decompressAll(){
 
+    auto logger = LogManager::Instance().Logger();
     done_unique.clear();
     stored_unique.clear();
     uint32_t cur_block_id = 0;
@@ -1285,8 +1288,7 @@ int Decompressor::decompressAll(){
         appendVCFToRec(temp_desc, genotype, static_cast<uint32_t>(standard_block_size), temp_fields, decompression_reader.keys);
     }
     
-    std::cerr<< cur_chunk_id << "\r";
-    fflush(stdout);
+    logger->info("Processed chunk {}", cur_chunk_id);
 
     for (auto &it : done_unique)
         delete[] it.second;
@@ -1301,6 +1303,7 @@ int Decompressor::decompressAll(){
 int Decompressor::decompressRange(const string &range)
 {
 
+    auto logger = LogManager::Instance().Logger();
     done_unique.clear();
     stored_unique.clear();
     uint32_t cur_block_id = 0;
@@ -1548,8 +1551,7 @@ int Decompressor::decompressRange(const string &range)
             delete[] it.second;
         done_unique.clear();
     }
-    std::cerr<< cur_chunk_id << "\r";
-    fflush(stdout);
+    logger->info("Processed chunk {}", cur_chunk_id);
     // if (decomp_data)
     //     delete[] decomp_data;
     // if (decomp_data_perm)
@@ -1562,7 +1564,7 @@ int Decompressor::decompressRange(const string &range)
 // // *****************************************************************************************************************
 int Decompressor::decompressSampleSmart(const string &range)
 {
-    
+    auto logger = LogManager::Instance().Logger();
     
     uint32_t no_var;
 
@@ -1907,8 +1909,7 @@ int Decompressor::decompressSampleSmart(const string &range)
         if(cur_chunk_id == end_chunk_id && count)
             appendVCF(temp_desc, genotype, static_cast<size_t> (no_haplotypes));
     }
-    std::cerr<< cur_chunk_id << "\r";
-    fflush(stdout);
+    logger->info("Processed chunk {}", cur_chunk_id);
     if (resUnique)
         delete[] resUnique;
     if (resAll)
@@ -2296,6 +2297,7 @@ void Decompressor::calculate_end_position(int &_end_block,int &_end_position){
 }
 bool Decompressor::splitFileWriting(int file_num){
 
+    auto logger = LogManager::Instance().Logger();
     split_files.resize(file_num);
     for(int i = 0; i < file_num; i++){
         char write_mode[5] = "wb-";
@@ -2325,7 +2327,7 @@ bool Decompressor::splitFileWriting(int file_num){
 
             // free(out_file_name);
             if (!split_files[i]){
-                std::cerr << "could not open " << split_files[i] << " file" << std::endl;
+                logger->error("Could not open split output file {} (index {})", out_file_name, i);
                 return false;
             }
             else
@@ -2341,6 +2343,7 @@ bool Decompressor::splitFileWriting(int file_num){
 bool Decompressor::OpenForWriting()
 {
     
+    auto logger = LogManager::Instance().Logger();
     char write_mode[5] = "wb-";
     if (out_type == file_type::BCF_File)
     {
@@ -2420,7 +2423,7 @@ bool Decompressor::OpenForWriting()
     }
     if(out_type != file_type::BED_File){
         if (!out_file){
-            std::cerr << "could not open " << out_file << " file" << std::endl;
+            logger->error("Could not open output file {}", out_file_name);
             return false;
         }
         else

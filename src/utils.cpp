@@ -23,7 +23,8 @@ long int strtol(const char* str, char** endptr, int base) noexcept
 {
 	if (base != 10)
 	{
-		std::cerr << "unsuported base " << base << std::endl;
+		auto logger = LogManager::Instance().Logger();
+		logger->error("Unsupported base {}", base);
 		fflush(stdout);
 		exit(1);
 	}
