@@ -4,6 +4,33 @@
 
 using namespace std::chrono;
 
+namespace {
+
+bool ends_with(const std::string &value, const std::string &suffix) {
+    return value.size() >= suffix.size() &&
+           std::equal(suffix.rbegin(), suffix.rend(), value.rbegin());
+}
+
+std::string vcf_write_mode(const std::string &path, char compression_level) {
+    // Use bgzip when the caller asks for a gzipped VCF filename.
+    bool wants_gzip = path != "-" &&
+                      (ends_with(path, ".vcf.gz") || ends_with(path, ".vcf.bgz") ||
+                       ends_with(path, ".vcf.bgzf") || ends_with(path, ".gz"));
+    if (!wants_gzip)
+        return "w";
+
+    if (compression_level == 'u')
+        return "w";
+
+    std::string mode = "wz";
+    if (compression_level >= '0' && compression_level <= '9')
+        mode.push_back(compression_level);
+    return mode;
+}
+
+} // namespace
+
+
 
 
 bool Decompressor::analyzeInputRange(uint32_t & start_chunk_id,uint32_t & end_chunk_id){
@@ -2285,7 +2312,8 @@ bool Decompressor::splitFileWriting(int file_num){
             {
                 // snprintf(gz_fname, strlen((out_file_name + decompression_reader.d_where_chrom[i].first).c_str()) + 5, "%s.vcf", (out_file_name + decompression_reader.d_where_chrom[i].first).c_str());
                 // split_files[i] = hts_open(gz_fname, "w");
-                split_files[i] = hts_open(out_file_name.c_str(), "w");
+                const std::string vcf_mode = vcf_write_mode(out_file_name, compression_level);
+                split_files[i] = hts_open(out_file_name.c_str(), vcf_mode.c_str());
             }
             else
             {
@@ -2329,7 +2357,8 @@ bool Decompressor::OpenForWriting()
         {
             // snprintf(gz_fname, strlen(out_file_name.c_str()) + 5, "%s.vcf", out_file_name.c_str());
             // out_file = hts_open(gz_fname, "w");
-            out_file = hts_open(out_file_name.c_str(), "w");
+            const std::string vcf_mode = vcf_write_mode(out_file_name, compression_level);
+            out_file = hts_open(out_file_name.c_str(), vcf_mode.c_str());
             
         }
         else if(out_type == file_type::BCF_File)
@@ -2363,7 +2392,10 @@ bool Decompressor::OpenForWriting()
     else
     {
         if (out_type == file_type::VCF_File)
-            out_file = hts_open("-", "w");
+        {
+            const std::string vcf_mode = vcf_write_mode(out_file_name, compression_level);
+            out_file = hts_open("-", vcf_mode.c_str());
+        }
 
         else if(out_type == file_type::BCF_File)
             out_file = hts_open("-", write_mode);
