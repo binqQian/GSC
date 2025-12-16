@@ -16,6 +16,12 @@ enum class compress_mode_t
     lossless_mode
     
 };
+enum class compression_backend_t
+{
+    bsc,
+    zstd,
+    brotli
+};
 enum class file_type
 {
     VCF_File,
@@ -38,6 +44,7 @@ struct GSC_Params
 
     task_mode_t task_mode;
     compress_mode_t compress_mode;
+    compression_backend_t backend;
     file_type in_type, out_type;
     uint32_t max_replication_depth, max_MB_memory;
     std::string in_file_name;
@@ -80,6 +87,7 @@ struct GSC_Params
         in_type = file_type::VCF_File;
         out_type = file_type::VCF_File;
         compress_mode = compress_mode_t::lossless_mode;
+        backend = compression_backend_t::bsc;
         max_replication_depth = 100;
         ploidy = 2;
         no_threads = 5;

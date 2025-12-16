@@ -8,7 +8,19 @@
 bool Compressor::writeCompressFlie()
 {
     auto logger = LogManager::Instance().Logger();
-    logger->info("The BSC algorithm is used to compress the genotype part.");
+    const char* backend_name = "bsc";
+    switch (params.backend) {
+    case compression_backend_t::bsc:
+        backend_name = "bsc";
+        break;
+    case compression_backend_t::zstd:
+        backend_name = "zstd";
+        break;
+    case compression_backend_t::brotli:
+        backend_name = "brotli";
+        break;
+    }
+    logger->info("Using {} to compress the genotype part.", backend_name);
     // cout << "Gt_index_original_size:" << toal_all_size<< endl;
 
     uint32_t curr_no_blocks = 0;
@@ -369,7 +381,7 @@ bool Compressor::CompressProcess()
 {
     //it is important to initialize the library before using it
     auto logger = LogManager::Instance().Logger();
-    CBSCWrapper::InitLibrary(p_bsc_features);
+    InitializeCompressionBackend(params.backend);
     
     MyBarrier  my_barrier(3);
 
@@ -639,12 +651,16 @@ bool Compressor::CompressProcess()
 		    append(v_desc, static_cast<uint64_t>(keys[i].keys_type));
 		    append(v_desc, keys[i].type);
 	    }
+        append(v_desc, static_cast<uint32_t>(params.backend));
         vector<uint8_t> v_desc_compressed;
-        CBSCWrapper bsc;
-		bsc.InitCompress(p_bsc_fixed_fields);
-		bsc.Compress(v_desc, v_desc_compressed);
-        // zstd::zstd_compress(v_desc, v_desc_compressed);
-        file_handle2->AddParamsPart(stream_id,v_desc_compressed);
+        auto codec = MakeCompressionStrategy(params.backend, p_bsc_fixed_fields);
+		codec->Compress(v_desc, v_desc_compressed);
+        // prepend backend id for safe detection during decompression
+        std::vector<uint8_t> v_desc_payload;
+        v_desc_payload.reserve(v_desc_compressed.size() + 1);
+        v_desc_payload.push_back(static_cast<uint8_t>(params.backend));
+        v_desc_payload.insert(v_desc_payload.end(), v_desc_compressed.begin(), v_desc_compressed.end());
+        file_handle2->AddParamsPart(stream_id, v_desc_payload);
         file_handle2->Close();
     }
 
@@ -797,14 +813,14 @@ void Compressor::compress_other_fileds(SPackage& pck, vector<uint8_t>& v_compres
 {
     
     lock_coder_compressor(pck);
-    CBSCWrapper *cbsc_size = v_bsc_size[pck.key_id];
+    CompressionStrategy *cbsc_size = field_size_codecs[pck.key_id].get();
 	if (pck.v_data.size())
 	{
         
 		v_compressed.clear();
         // lzma2::lzma2_compress(pck.v_data, v_compressed, 10, 3);
           
-        CBSCWrapper *cbsc = v_bsc_data[pck.key_id];
+        CompressionStrategy *cbsc = field_data_codecs[pck.key_id].get();
         if(keys[pck.key_id].type != BCF_HT_INT){
             cbsc->Compress(pck.v_data, v_compressed);
             // zstd::zstd_compress(pck.v_data, v_compressed);
@@ -972,11 +988,8 @@ bool Compressor::compress_meta(vector<string> v_samples,const string& v_header)
 			make_tuple(ref(all_v_samples), ref(comp_v_samples), "samples"),
 		 })
 	{
-        CBSCWrapper bsc;
-
-		bsc.InitCompress(p_bsc_meta);
-       
-		bsc.Compress(get<0>(data), get<1>(data));
+        auto codec = MakeCompressionStrategy(params.backend, p_bsc_meta);
+		codec->Compress(get<0>(data), get<1>(data));
 
 
         // zstd::zstd_compress(get<0>(data), get<1>(data));
@@ -1000,30 +1013,30 @@ bool Compressor::compress_meta(vector<string> v_samples,const string& v_header)
 void Compressor::InitCompressParams(){
     
     v_coder_part_ids.resize(no_keys, 0);
-    v_bsc_data.resize(no_keys);
-    v_bsc_size.resize(no_keys);
+    field_data_codecs.resize(no_keys);
+    field_size_codecs.resize(no_keys);
    
     for (uint32_t i = 0; i < no_keys; ++i)
     {   
-        v_bsc_data[i] = new CBSCWrapper();
-        v_bsc_size[i] = new CBSCWrapper();
-        v_bsc_size[i]->InitCompress(p_bsc_size);
+        field_size_codecs[i] = MakeCompressionStrategy(params.backend, p_bsc_size);
+        bsc_params_t param = p_bsc_text;
         
         switch (keys[i].type)
 		{
 		case BCF_HT_FLAG:
-			v_bsc_data[i]->InitCompress(p_bsc_flag);
+			param = p_bsc_flag;
 			break;
 		case BCF_HT_INT:
-            v_bsc_data[i]->InitCompress(p_bsc_int);
+            param = p_bsc_int;
 			break;
 		case BCF_HT_REAL:
-			v_bsc_data[i]->InitCompress(p_bsc_real);
+			param = p_bsc_real;
 			break;
 		case BCF_HT_STR:
-			v_bsc_data[i]->InitCompress(p_bsc_text);
+			param = p_bsc_text;
 			break;
 		}
+        field_data_codecs[i] = MakeCompressionStrategy(params.backend, param);
     }
 
  
@@ -1052,6 +1065,7 @@ void Compressor::unlock_gt_block_process()
 bool Compressor::compressFixedFields(fixed_field_block &fixed_field_block_io){
 
     fixed_field_block_compress.no_variants = fixed_field_block_io.no_variants;
+    auto codec = MakeCompressionStrategy(params.backend, p_bsc_fixed_fields);
     for (auto data : {
         make_tuple(ref(fixed_field_block_io.chrom), ref(fixed_field_block_compress.chrom),  "chrom"),
         make_tuple(ref(fixed_field_block_io.id), ref(fixed_field_block_compress.id),  "id"),
@@ -1065,9 +1079,7 @@ bool Compressor::compressFixedFields(fixed_field_block &fixed_field_block_io){
 
         //BSC
 
-        CBSCWrapper cbsc;
-        cbsc.InitCompress(p_bsc_fixed_fields);
-        cbsc.Compress(get<0>(data), get<1>(data));   
+        codec->Compress(get<0>(data), get<1>(data));   
 
         //ZSTD  
 
@@ -1082,17 +1094,24 @@ bool Compressor::compressFixedFields(fixed_field_block &fixed_field_block_io){
 
         // std::cerr<<get<0>(data).size()<<":"<<get<1>(data).size()<<endl;    
     }
-    if(fixed_field_block_io.gt_block.size() < (2<<20)){
-        CBSCWrapper cbsc;
-        cbsc.InitCompress(p_bsc_fixed_fields);
-        cbsc.Compress(fixed_field_block_io.gt_block, fixed_field_block_compress.gt_block);  
-        fixed_field_block_compress.gt_block.emplace_back(0);                  
-    }else{
-                    // std::cerr<<"zstd"<<endl;
-        zstd::zstd_compress(fixed_field_block_io.gt_block,fixed_field_block_compress.gt_block);
-        // std::cerr<<fixed_field_block_compress.no_variants<<":"<<fixed_field_block_io.gt_block.size()<<":"<<fixed_field_block_compress.gt_block.size()<<endl;
-        fixed_field_block_compress.gt_block.emplace_back(1);
+    auto gt_codec = MakeCompressionStrategy(params.backend, p_bsc_fixed_fields);
+    gt_codec->Compress(fixed_field_block_io.gt_block, fixed_field_block_compress.gt_block);
+    uint8_t marker = 0;
+    switch (params.backend) {
+    case compression_backend_t::bsc:
+        marker = 0;
+        break;
+    case compression_backend_t::zstd:
+        marker = 1;
+        break;
+    case compression_backend_t::brotli:
+        marker = 2;
+        break;
+    default:
+        marker = 0;
+        break;
     }
+    fixed_field_block_compress.gt_block.emplace_back(marker);
     writeTempFlie(fixed_field_block_compress);
     // comp_sort_block_queue.Push(fixed_field_block_id,fixed_field_block_compress);
     fixed_field_block_compress.Clear();    

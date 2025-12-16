@@ -21,7 +21,7 @@ VCPKG_LIB_DIR=$(VCPKG_ROOT)/lib
 # -I/usr/include/python3.8 -I/usr/local/lib/python3.8/dist-packages/numpy/core/include/
 CFLAGS=-Wall -O3 -g -m64 -std=c++14 -pthread -I $(INCLUDES_DIR) -I $(VCPKG_INCLUDE_DIR) -mpopcnt 
 #CLINK=-O3 -lm -std=c++11 -lpthread -mpopcnt -lz
-CLINK=-O3 -lm -std=c++14 -lpthread -mavx -mpopcnt -lz -lbz2 -llzma -L$(VCPKG_LIB_DIR) -lspdlog -lfmt
+CLINK=-O3 -lm -std=c++14 -lpthread -mavx -mpopcnt -lz -lbz2 -llzma -L$(VCPKG_LIB_DIR) -lspdlog -lfmt -lbrotlienc -lbrotlidec -lbrotlicommon
 
 ifeq ($(uname_S),Linux)
     CC=g++      
@@ -55,6 +55,7 @@ gsc:	src/bit_memory.o \
 	src/utils.o \
 	src/bsc.o \
 	src/zstd_compress.o \
+	src/compression_strategy.o \
 	src/logger.o \
 	include/cpp-mmf/memory_mapped_file.o
 	$(CC) -o gsc \
@@ -71,6 +72,7 @@ gsc:	src/bit_memory.o \
 	src/utils.o \
 	src/bsc.o \
 	src/zstd_compress.o \
+	src/compression_strategy.o \
 	src/logger.o \
 	include/cpp-mmf/memory_mapped_file.o \
 	$(LIBS_DIR)/libhts.a \

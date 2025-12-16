@@ -39,7 +39,7 @@ bool DecompressionReader::OpenReading(const string &in_file_name, const bool &_d
 {
 
 	auto logger = LogManager::Instance().Logger();
-	CBSCWrapper::InitLibrary(p_bsc_features);
+	InitializeCompressionBackend(backend);
 	fname = in_file_name;
 	if (in_file_name == "-")
 	{
@@ -315,9 +315,18 @@ bool DecompressionReader::OpenReadingPart2(const string &in_file_name)
 		logger->error("Corrupted part2!");
 		exit(0);
 	}
-	CBSCWrapper bsc;
-	bsc.InitDecompress();
-	bsc.Decompress(part2_params_data, v_desc);
+	if (part2_params_data.empty()) {
+		logger->error("Corrupted part2: empty params payload.");
+		return false;
+	}
+	const uint8_t backend_id = part2_params_data[0];
+	if (backend_id <= static_cast<uint8_t>(compression_backend_t::brotli)) {
+		backend = static_cast<compression_backend_t>(backend_id);
+	}
+	InitializeCompressionBackend(backend);
+	auto codec = MakeCompressionStrategy(backend, p_bsc_fixed_fields);
+	std::vector<uint8_t> compressed_payload(part2_params_data.begin() + 1, part2_params_data.end());
+	codec->Decompress(compressed_payload, v_desc);
 	uint32_t actual_variants_size = 0;
 	read(v_desc, pos_part2_params, actual_variants_size);
 	actual_variants.resize(actual_variants_size);
@@ -338,6 +347,13 @@ bool DecompressionReader::OpenReadingPart2(const string &in_file_name)
 		keys[i].keys_type = (key_type_t)temp;
 		read(v_desc, pos_part2_params, keys[i].type);
 		// std::cerr<<keys[i].key_id<<" "<<keys[i].actual_field_id<<endl;
+	}
+	if (pos_part2_params < v_desc.size()) {
+		uint32_t backend_id = 0;
+		read(v_desc, pos_part2_params, backend_id);
+		if (backend_id <= static_cast<uint32_t>(compression_backend_t::brotli)) {
+			backend = static_cast<compression_backend_t>(backend_id);
+		}
 	}
 
 	InitDecompressParams();
@@ -408,9 +424,8 @@ bool DecompressionReader::decompress_other_fileds(SPackage *pck)
 {
 	vector<uint8_t> v_compressed;
 	vector<uint8_t> v_tmp;
-	CBSCWrapper *cbsc_size = v_bsc_size[pck->key_id];
-
-	CBSCWrapper *cbsc = v_bsc_data[pck->key_id];
+	CompressionStrategy *cbsc_size = field_size_codecs[pck->key_id].get();
+	CompressionStrategy *cbsc = field_data_codecs[pck->key_id].get();
 
 	if (!file_handle2->GetPart(pck->stream_id_size, v_compressed))
 		return false;
@@ -473,30 +488,29 @@ void DecompressionReader::InitDecompressParams()
 	v_packages.resize(no_keys, nullptr);
 	decomp_part_queue = new DecompressPartQueue<uint32_t>(1);
 	v_coder_part_ids.resize(no_keys, 0);
-	v_bsc_data.resize(no_keys);
-	v_bsc_size.resize(no_keys);
+	field_data_codecs.resize(no_keys);
+	field_size_codecs.resize(no_keys);
 	v_i_buf.resize(no_keys);
 	for (uint32_t i = 0; i < no_keys; ++i)
 	{
-		v_bsc_data[i] = new CBSCWrapper();
-		v_bsc_size[i] = new CBSCWrapper();
-		v_bsc_size[i]->InitDecompress();
-
+		field_size_codecs[i] = MakeCompressionStrategy(backend, p_bsc_size);
+		bsc_params_t param = p_bsc_text;
 		switch (keys[i].type)
 		{
 		case BCF_HT_FLAG:
-			v_bsc_data[i]->InitDecompress();
+			param = p_bsc_flag;
 			break;
 		case BCF_HT_INT:
-			v_bsc_data[i]->InitDecompress();
+			param = p_bsc_int;
 			break;
 		case BCF_HT_REAL:
-			v_bsc_data[i]->InitDecompress();
+			param = p_bsc_real;
 			break;
 		case BCF_HT_STR:
-			v_bsc_data[i]->InitDecompress();
+			param = p_bsc_text;
 			break;
 		}
+		field_data_codecs[i] = MakeCompressionStrategy(backend, param);
 	}
 }
 //**********************************************************************************************************************
@@ -560,11 +574,8 @@ void DecompressionReader::decompress_meta(vector<string> &v_samples, string &hea
 			 make_tuple(ref(all_v_samples), ref(comp_v_samples), ref(p_samples), "samples"),
 		 })
 	{
-		CBSCWrapper bsc;
-
-		bsc.InitDecompress();
-
-		bsc.Decompress(get<1>(data), get<0>(data));
+		auto codec = MakeCompressionStrategy(backend, p_bsc_meta);
+		codec->Decompress(get<1>(data), get<0>(data));
 		get<2>(data) = 0;
 	}
 	header.clear();
@@ -687,6 +698,7 @@ bool DecompressionReader::Decoder(std::vector<block_t> &v_blocks, std::vector<st
 									   {
         // Code from the original fixed field thread
         // Decompression and processing...
+		auto codec = MakeCompressionStrategy(backend, p_bsc_fixed_fields);
 		for (auto data : {
         	make_tuple(ref(fixed_field_block_io.chrom), ref(fixed_field_block_compress.chrom), p_chrom, "chrom"),
         	make_tuple(ref(fixed_field_block_io.id), ref(fixed_field_block_compress.id), p_id, "id"),
@@ -696,9 +708,7 @@ bool DecompressionReader::Decoder(std::vector<block_t> &v_blocks, std::vector<st
 
     	})
 		{
-			CBSCWrapper bsc;
-			bsc.InitDecompress();
-			bsc.Decompress(get<1>(data), get<0>(data));
+			codec->Decompress(get<1>(data), get<0>(data));
 			// std::cerr<<get<3>(data)<<":"<<get<1>(data).size()<<":"<<get<0>(data).size()<<endl;
 
 		}
@@ -718,6 +728,7 @@ bool DecompressionReader::Decoder(std::vector<block_t> &v_blocks, std::vector<st
 									  {
         // Code from the original sorted field thread
         // Decompression and processing...
+		auto codec = MakeCompressionStrategy(backend, p_bsc_fixed_fields);
 		for (auto data : {
 			
         	make_tuple(ref(fixed_field_block_io.pos), ref(fixed_field_block_compress.pos), p_pos, "pos"),
@@ -726,23 +737,32 @@ bool DecompressionReader::Decoder(std::vector<block_t> &v_blocks, std::vector<st
 
     	})
 		{
-			CBSCWrapper bsc;
-			bsc.InitDecompress();
-			bsc.Decompress(get<1>(data), get<0>(data));
+			codec->Decompress(get<1>(data), get<0>(data));
 			// std::cerr<<get<3>(data)<<":"<<get<1>(data).size()<<":"<<get<0>(data).size()<<endl;
 
 		}
-		if(fixed_field_block_compress.gt_block.back() == 0)
-		{
-			fixed_field_block_compress.gt_block.pop_back();
-			CBSCWrapper bsc;
-			bsc.InitDecompress();
-			bsc.Decompress(fixed_field_block_compress.gt_block, fixed_field_block_io.gt_block);			
-			
-		}else{
-			fixed_field_block_compress.gt_block.pop_back();	
+		uint8_t marker = fixed_field_block_compress.gt_block.back();
+		fixed_field_block_compress.gt_block.pop_back();
+		switch (marker) {
+		case 0: {
+			auto gt_codec = MakeCompressionStrategy(compression_backend_t::bsc, p_bsc_fixed_fields);
+			gt_codec->Decompress(fixed_field_block_compress.gt_block, fixed_field_block_io.gt_block);
+			break;
+		}
+		case 1:
 			zstd::zstd_decompress(fixed_field_block_compress.gt_block, fixed_field_block_io.gt_block);
-			// std::cerr<<"fixed_field_block_io:"<<fixed_field_block_io.gt_block.size()<<endl;		
+			break;
+		case 2: {
+			auto gt_codec = MakeCompressionStrategy(compression_backend_t::brotli, p_bsc_fixed_fields);
+			gt_codec->Decompress(fixed_field_block_compress.gt_block, fixed_field_block_io.gt_block);
+			break;
+		}
+		default:
+			{
+				auto gt_codec = MakeCompressionStrategy(backend, p_bsc_fixed_fields);
+				gt_codec->Decompress(fixed_field_block_compress.gt_block, fixed_field_block_io.gt_block);
+			}
+			break;
 		}
 		uint32_t i_variant;
 		variant_desc_t desc;

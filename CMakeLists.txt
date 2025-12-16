@@ -33,6 +33,13 @@ endif()
 find_package(Threads REQUIRED)
 find_package(spdlog CONFIG REQUIRED)
 find_package(fmt CONFIG REQUIRED)
+find_package(Brotli CONFIG QUIET)
+if(NOT Brotli_FOUND)
+    find_package(unofficial-brotli CONFIG REQUIRED)
+    set(BROTLi_LIBS unofficial::brotli::brotlienc unofficial::brotli::brotlidec unofficial::brotli::brotlicommon)
+else()
+    set(BROTLi_LIBS Brotli::brotlienc Brotli::brotlidec Brotli::brotlicommon)
+endif()
 find_package(ZLIB REQUIRED)
 find_package(BZip2 REQUIRED)
 find_package(LibLZMA REQUIRED)
@@ -64,6 +71,7 @@ set(SOURCES
     src/bsc.cpp
     src/zstd_compress.cpp
     src/logger.cpp
+    src/compression_strategy.cpp
     include/cpp-mmf/memory_mapped_file.cpp
 )
 
@@ -82,6 +90,7 @@ target_link_libraries(gsc
         Threads::Threads
         spdlog::spdlog
         fmt::fmt
+        ${BROTLi_LIBS}
         ZLIB::ZLIB
         BZip2::BZip2
         LibLZMA::LibLZMA

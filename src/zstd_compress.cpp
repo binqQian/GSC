@@ -19,19 +19,39 @@ namespace zstd {
   }
 
   bool zstd_decompress(const std::vector<uint8_t>& cBuff, std::vector<uint8_t>& dBuff) {
+    const size_t hinted_size = ZSTD_getFrameContentSize(cBuff.data(), cBuff.size());
+    if (hinted_size != ZSTD_CONTENTSIZE_ERROR && hinted_size != ZSTD_CONTENTSIZE_UNKNOWN) {
+      dBuff.resize(hinted_size);
+      const size_t actual = ZSTD_decompress(dBuff.data(), hinted_size, cBuff.data(), cBuff.size());
+      if (ZSTD_isError(actual)) {
+        return false;
+      }
+      dBuff.resize(actual);
+      return true;
+    }
 
-    size_t dSizeActual = 0;
-
-    size_t dSize = ZSTD_getDecompressedSize(cBuff.data(), cBuff.size());
-
-
-    dBuff.resize(dSize);
-
-
-    dSizeActual = ZSTD_decompress(dBuff.data(), dSize, cBuff.data(), cBuff.size());
-
-    dBuff.resize(dSizeActual);
-
-    return !ZSTD_isError(dSizeActual);
+    ZSTD_DCtx* dctx = ZSTD_createDCtx();
+    if (!dctx) return false;
+    size_t offset = 0;
+    const size_t chunk = 1 << 16;
+    dBuff.clear();
+    dBuff.resize(chunk);
+    ZSTD_inBuffer input = {cBuff.data(), cBuff.size(), 0};
+    bool ok = true;
+    while (input.pos < input.size) {
+      ZSTD_outBuffer output = {dBuff.data() + offset, dBuff.size() - offset, 0};
+      const size_t ret = ZSTD_decompressStream(dctx, &output, &input);
+      if (ZSTD_isError(ret)) {
+        ok = false;
+        break;
+      }
+      offset += output.pos;
+      if (input.pos < input.size) {
+        dBuff.resize(dBuff.size() + chunk);
+      }
+    }
+    dBuff.resize(offset);
+    ZSTD_freeDCtx(dctx);
+    return ok;
   }
 }

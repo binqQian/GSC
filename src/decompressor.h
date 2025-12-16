@@ -265,7 +265,7 @@ public:
     //htsFile *out;
 
     Decompressor()
-
+        : decompression_reader()
     {
        
         // skip_processing = true;
@@ -302,6 +302,7 @@ public:
     }
 
     Decompressor(GSC_Params & _params)
+        : decompression_reader(_params)
     {
 
         params = _params;

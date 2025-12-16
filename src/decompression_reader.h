@@ -4,6 +4,7 @@
 // #include <filesystem>
 #include <iostream>
 #include <string>
+#include <memory>
 #include <sdsl/bit_vectors.hpp>
 #include<future>
 #include "bit_memory.h"
@@ -14,8 +15,7 @@
 #include "htslib/vcf.h"
 #include "htslib/hts.h"
 #include "utils.h"
-#include "bsc.h"
-#include "zstd_compress.h"
+#include "compression_strategy.h"
 #include "vint_code.h"
 #define MMAP
 
@@ -92,8 +92,9 @@ class DecompressionReader {
 	fixed_field_block fixed_field_block_io;
 
 	vector<uint32_t> v_coder_part_ids;
-    vector<CBSCWrapper*> v_bsc_size;
-    vector<CBSCWrapper*> v_bsc_data;
+    vector<std::unique_ptr<CompressionStrategy>> field_size_codecs;
+    vector<std::unique_ptr<CompressionStrategy>> field_data_codecs;
+    compression_backend_t backend = compression_backend_t::bsc;
 
 	int64_t prev_pos;
 	// int id_block = 0;
@@ -119,6 +120,8 @@ public:
 
 #endif
     }
+
+    DecompressionReader(const GSC_Params &params) : DecompressionReader() { backend = params.backend; }
     
     ~DecompressionReader()
     {
@@ -128,14 +131,6 @@ public:
 
 #endif
 	
-	for (auto p : v_bsc_size)
-		if (p)
-			delete p;
-
-	for (auto p : v_bsc_data)
-		if (p)
-			delete p;
-
 	for (auto p : v_packages)
 		if (p)
 			delete p;

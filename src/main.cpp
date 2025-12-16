@@ -56,6 +56,13 @@ int decompress_entry();
 int params_options(int argc, const char *argv[]);
 
 void decom(Decompressor &decompressor);
+
+compression_backend_t parse_backend(const std::string &name) {
+    if (name == "bsc") return compression_backend_t::bsc;
+    if (name == "zstd") return compression_backend_t::zstd;
+    if (name == "brotli") return compression_backend_t::brotli;
+    return compression_backend_t::bsc;
+}
 //--------------------------------------------------------------------------------
 GSC_Params params;
 // Show execution options
@@ -87,6 +94,7 @@ Where:
     [options]              Optional flags and parameters for compression.
     -i,  --in [in_file]    Specify the input file (default: VCF or VCF.GZ). If omitted, input is taken from standard input (stdin).
     -o,  --out [out_file]  Specify the output file. If omitted, output is sent to standard output (stdout).
+    --compressor [name]    Select compressor: bsc (default), zstd, brotli.
 
 Options:
 
@@ -113,6 +121,7 @@ Where:
     [options]              Optional flags and parameters for compression.
     -i,  --in [in_file]    Specify the input file . If omitted, input is taken from standard input (stdin).
     -o,  --out [out_file]  Specify the output file (default: VCF). If omitted, output is sent to standard output (stdout).
+    --compressor [name]    Select compressor: bsc (default), zstd, brotli.
 
 Options:
 
@@ -309,6 +318,17 @@ int params_options(int argc, const char *argv[]){
                 params.in_file_name = string(argv[i]);
                 
             }
+            else if (strcmp(argv[i], "--compressor") == 0){
+                i++;
+                if (i >= argc)
+                    return usage_compress();
+                std::string backend_name = argv[i];
+                if (backend_name != "bsc" && backend_name != "zstd" && backend_name != "brotli") {
+                    logger->error("Unsupported compressor: {}", backend_name);
+                    return usage_compress();
+                }
+                params.backend = parse_backend(backend_name);
+            }
             else if (strcmp(argv[i], "--ploidy") == 0 || strcmp(argv[i], "-p") == 0){
 
                 i++;
@@ -473,6 +493,17 @@ int params_options(int argc, const char *argv[]){
                     return usage_decompress();
 
                 params.range = string(argv[i]);
+            }
+            else if (strcmp(argv[i], "--compressor") == 0){
+                i++;
+                if (i >= argc)
+                    return usage_decompress();
+                std::string backend_name = argv[i];
+                if (backend_name != "bsc" && backend_name != "zstd" && backend_name != "brotli") {
+                    logger->error("Unsupported compressor: {}", backend_name);
+                    return usage_decompress();
+                }
+                params.backend = parse_backend(backend_name);
             }
 
             else if (strcmp(argv[i], "-n") == 0){

@@ -12,8 +12,7 @@
 #include "block_processing.h"
 #include "queues.h"
 #include <tuple>
-#include "bsc.h"
-#include "zstd_compress.h"
+#include "compression_strategy.h"
 // #include <filesystem>
 using namespace std;
 
@@ -99,8 +98,8 @@ class Compressor
     mutex mtx_v_coder;
 	condition_variable cv_v_coder;
 	vector<uint32_t> v_coder_part_ids;
-    vector<CBSCWrapper*> v_bsc_size;
-    vector<CBSCWrapper*> v_bsc_data;
+    vector<std::unique_ptr<CompressionStrategy>> field_size_codecs;
+    vector<std::unique_ptr<CompressionStrategy>> field_data_codecs;
 
     
     bool input_pos;
@@ -135,14 +134,6 @@ class Compressor
 public:
     ~Compressor()
     {
-        for (auto p : v_bsc_size)
-		    if (p)
-			    delete p;
-
-	    for (auto p : v_bsc_data)
-		    if (p)
-			    delete p;
-
 	    if (file_handle2)
 		    delete file_handle2;
         // if(fname)
