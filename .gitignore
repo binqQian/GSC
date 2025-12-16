@@ -6,3 +6,7 @@ gsc
 /logs/
 /.vscode/
 *.log
+/.claude/
+
+/build/
+
