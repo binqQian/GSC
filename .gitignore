@@ -1,4 +1,4 @@
 *.o
 *.d
 gsc
-CLAUDE.md
+*.md
