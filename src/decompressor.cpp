@@ -420,6 +420,13 @@ bool Decompressor::Close(){
         out_bed.Close();
         out_bim.Close();
     }else{
+        // Finalize parallel writer before closing output file
+        if (parallel_writer_) {
+            parallel_writer_->Finalize();
+            delete parallel_writer_;
+            parallel_writer_ = nullptr;
+        }
+
         if(out_hdr){
             bcf_hdr_destroy(out_hdr);
             out_hdr = nullptr;
@@ -432,7 +439,7 @@ bool Decompressor::Close(){
         if(params.split_flag){
             if(split_files[cur_file]){
                 hts_close(split_files[cur_file]);
-                split_files[cur_file] = nullptr;            
+                split_files[cur_file] = nullptr;
             }
         }
 
@@ -711,12 +718,20 @@ void Decompressor::appendVCF(variant_desc_t &_desc, vector<uint8_t> &_my_str, si
             }
             cur_chrom = _desc.chrom;
             cur_file++;
-            
+
         }
-        
+
         bcf_write1(split_files[cur_file], out_hdr, rec);
-    }else
-        bcf_write1(out_file, out_hdr, rec);
+    }else {
+        // Use parallel writer if enabled
+        if (use_parallel_writing_ && parallel_writer_) {
+            // Duplicate record for parallel writing (writer takes ownership)
+            bcf1_t* rec_copy = bcf_dup(rec);
+            parallel_writer_->WriteRecord(rec_copy);
+        } else {
+            bcf_write1(out_file, out_hdr, rec);
+        }
+    }
     // bcf_write(out_file, out_hdr, rec);
 
 }
@@ -909,12 +924,20 @@ void Decompressor::appendVCFToRec(variant_desc_t &_desc, vector<uint8_t> &_genot
             }
             cur_chrom = _desc.chrom;
             cur_file++;
-            
+
         }
-        
+
         bcf_write1(split_files[cur_file], out_hdr, rec);
-    }else
-        bcf_write1(out_file, out_hdr, rec);
+    }else {
+        // Use parallel writer if enabled
+        if (use_parallel_writing_ && parallel_writer_) {
+            // Duplicate record for parallel writing (writer takes ownership)
+            bcf1_t* rec_copy = bcf_dup(rec);
+            parallel_writer_->WriteRecord(rec_copy);
+        } else {
+            bcf_write1(out_file, out_hdr, rec);
+        }
+    }
 }
 // 
 bool Decompressor::SetVariantToRec(variant_desc_t &desc, vector<field_desc> &fields, vector<key_desc> &keys, vector<uint8_t> &_my_str, size_t _standard_block_size)
@@ -2543,6 +2566,24 @@ int Decompressor::initOut()
 
         if (bcf_hdr_write(out_file, out_hdr) < 0)
             return 1;
+
+        // Initialize parallel writer if enabled
+        if (use_parallel_writing_) {
+            parallel_writer_ = new gsc::ParallelVCFWriter();
+
+            // Use already-opened file handle (avoids duplicate header write and file conflicts)
+            if (!parallel_writer_->InitializeWithHandle(out_file, out_hdr, true)) {
+                LogManager::Instance().Logger()->error("Failed to initialize parallel VCF writer");
+                delete parallel_writer_;
+                parallel_writer_ = nullptr;
+                use_parallel_writing_ = false;
+                // Fall back to direct writing - out_file is still valid
+            } else {
+                LogManager::Instance().Logger()->info("Parallel VCF writer initialized successfully");
+                // Transfer ownership: parallel writer will close the file in Finalize()
+                out_file = nullptr;
+            }
+        }
     // }
     }
     return 0;

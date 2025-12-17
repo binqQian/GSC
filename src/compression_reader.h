@@ -16,6 +16,7 @@
 #include <unordered_set>
 #include <unordered_map>
 #include <stack>
+#include "parallel_vcf_reader.h"
 class CompressionReader {
 
     
@@ -91,8 +92,10 @@ class CompressionReader {
     vector<int64_t> chunks_min_pos;
     bool start_flag;
 
-
-
+    // Parallel VCF reading
+    gsc::ParallelVCFReader* parallel_reader_;
+    int num_parse_threads_;
+    bool use_parallel_reading_;
 
     // int temp_count = 0;
     #ifdef LOG_INFO
@@ -121,6 +124,9 @@ public:
         no_vec = 0;
         start_flag = true;
         field_order_flag = false;
+        parallel_reader_ = nullptr;
+        num_parse_threads_ = 1;
+        use_parallel_reading_ = false;
     }
     CompressionReader(const GSC_Params & params) {
         in_open = false;
@@ -138,6 +144,9 @@ public:
         no_vec = 0;
         start_flag = true;
         field_order_flag = false;
+        parallel_reader_ = nullptr;
+        num_parse_threads_ = params.no_threads;
+        use_parallel_reading_ = (num_parse_threads_ > 1);
     }
     
   
@@ -152,6 +161,11 @@ public:
         in_file = nullptr;
         in_open = false;
         // bcf_destroy1(vcf_record);
+    }
+
+    if (parallel_reader_) {
+        delete parallel_reader_;
+        parallel_reader_ = nullptr;
     }
         // test.close();
     //    var_out.close();

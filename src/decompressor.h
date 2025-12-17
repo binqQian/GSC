@@ -15,6 +15,7 @@
 #include "samples.h"
 
 #include "variant.h"
+#include "parallel_vcf_writer.h"
 
 // #include <deque>
 
@@ -85,7 +86,7 @@ class Decompressor {
 
     // Output and output settings
     htsFile *out_file = nullptr;
-    vector<htsFile*> split_files; 
+    vector<htsFile*> split_files;
 
     bcf_hdr_t * out_hdr = nullptr;
     bcf1_t * rec;
@@ -96,6 +97,10 @@ class Decompressor {
 
     string cur_chrom = "";
     int cur_file = -1;
+
+    // Parallel VCF writing
+    gsc::ParallelVCFWriter* parallel_writer_;
+    bool use_parallel_writing_;
 
 
     uint32_t records_to_process;
@@ -267,7 +272,7 @@ public:
     Decompressor()
         : decompression_reader()
     {
-       
+
         // skip_processing = true;
         // // compression_level = '1';
 
@@ -286,7 +291,7 @@ public:
         records_to_process = UINT32_MAX;
         decompression_mode_type = false;
         // out_genotypes = true;
-        
+
         // out_ohter_fields = false;
 
         // minAC = 0;
@@ -299,6 +304,8 @@ public:
 
         // pos_hash.reserve(50000000);
 
+        parallel_writer_ = nullptr;
+        use_parallel_writing_ = false;
     }
 
     Decompressor(GSC_Params & _params)
@@ -379,6 +386,8 @@ public:
             bits_lut['.']['.'] = {1, 0};
         }
 
+        parallel_writer_ = nullptr;
+        use_parallel_writing_ = (params.no_threads > 1);
     }
 
     ~Decompressor()
@@ -387,7 +396,7 @@ public:
         // // test_out.close();
         // if(!s_perm.empty())
 
-        //     s_perm.clear();    
+        //     s_perm.clear();
         if(decomp_data){
             delete [] decomp_data;
             decomp_data = nullptr;
@@ -404,10 +413,10 @@ public:
 
             delete [] sampleIDs;
 
-        
-        
-        
-
+        if(parallel_writer_) {
+            delete parallel_writer_;
+            parallel_writer_ = nullptr;
+        }
     }
     // bool getChrom();
 

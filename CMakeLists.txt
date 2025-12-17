@@ -66,6 +66,8 @@ set(SOURCES
     src/main.cpp
     src/samples.cpp
     src/compression_reader.cpp
+    src/parallel_vcf_reader.cpp
+    src/parallel_vcf_writer.cpp
     src/file_handle.cpp
     src/utils.cpp
     src/bsc.cpp

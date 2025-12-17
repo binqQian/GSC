@@ -613,7 +613,7 @@ bool CompressionReader::SetVariantOtherFields(vector<field_desc> &fields)
 // Splits multiple alleles sites, reads genotypes, creates blocks of bytes to process, fills out [archive_name].bcf file
 bool CompressionReader::ProcessInVCF()
 {
-    
+
     auto logger = LogManager::Instance().Logger();
     if (!vcf_hdr_read)
         ReadFile();
@@ -628,56 +628,120 @@ bool CompressionReader::ProcessInVCF()
     if(merge_flag){
         file_nums = merge_files.size();
     }
-    
+
     for(int i = 0;i < file_nums;i++){
         if(merge_flag)
             in_file = merge_files[i];
- 
-        while (bcf_read1(in_file, vcf_hdr, vcf_record) >= 0)
-        {
-            // std::cerr<<"no_samples:"<<no_samples<<endl;
-            variant_desc_t desc;
-            if (vcf_record->errcode)
-            {
-                logger->error("Repair VCF file.");
-                exit(9);
+
+        // Use parallel reader if enabled and not merging multiple files
+        if (use_parallel_reading_ && !merge_flag) {
+            logger->info("Using parallel VCF reader with {} threads", num_parse_threads_);
+
+            // Initialize parallel reader
+            parallel_reader_ = new gsc::ParallelVCFReader(num_parse_threads_);
+            if (!parallel_reader_->Initialize(in_file_name.c_str())) {
+                logger->error("Failed to initialize parallel VCF reader");
+                delete parallel_reader_;
+                parallel_reader_ = nullptr;
+                return false;
             }
-            bcf_unpack(vcf_record, BCF_UN_ALL);
-            if (vcf_record->d.fmt->n != (int)ploidy)
-            {
-                logger->error("Wrong ploidy (not equal to {}) for record at position {}.", ploidy, vcf_record->pos);
-                logger->error("Repair VCF file OR set correct ploidy using -p option.");
-                exit(9);
-            }
-            if (tmpi % 100000 == 0){
-                logger->info("Processed {} variants...", tmpi);
-            }
-            if(compress_mode == compress_mode_t::lossless_mode){
 
-                std::vector<field_desc> curr_field(keys.size());
+            // Process variants in batches
+            while (true) {
+                std::vector<bcf1_t*> batch = parallel_reader_->ParseNextBatch();
+                if (batch.empty()) break;
 
-                GetVariantFromRec(vcf_record, curr_field);
-
-                SetVariantOtherFields(curr_field);
-            
-
-                for(size_t j = 0; j < keys.size(); ++j)
-                {
-                    if(curr_field[j].data_size > 0)
-                    {
-                        if(curr_field[j].data)
-                            delete[] curr_field[j].data;
-                        curr_field[j].data = nullptr;
-                        curr_field[j].data_size = 0;
+                for (bcf1_t* vcf_record : batch) {
+                    variant_desc_t desc;
+                    if (vcf_record->errcode) {
+                        logger->error("Repair VCF file.");
+                        exit(9);
                     }
-                } 
-                curr_field.clear();
-            }
-                
-            ++no_actual_variants;
-            ProcessFixedVariants(vcf_record, desc);
+                    bcf_unpack(vcf_record, BCF_UN_ALL);
+                    if (vcf_record->d.fmt->n != (int)ploidy) {
+                        logger->error("Wrong ploidy (not equal to {}) for record at position {}.", ploidy, vcf_record->pos);
+                        logger->error("Repair VCF file OR set correct ploidy using -p option.");
+                        exit(9);
+                    }
+                    if (tmpi % 100000 == 0) {
+                        logger->info("Processed {} variants...", tmpi);
+                    }
+                    if(compress_mode == compress_mode_t::lossless_mode) {
+                        std::vector<field_desc> curr_field(keys.size());
+                        GetVariantFromRec(vcf_record, curr_field);
+                        SetVariantOtherFields(curr_field);
+                        for(size_t j = 0; j < keys.size(); ++j) {
+                            if(curr_field[j].data_size > 0) {
+                                if(curr_field[j].data)
+                                    delete[] curr_field[j].data;
+                                curr_field[j].data = nullptr;
+                                curr_field[j].data_size = 0;
+                            }
+                        }
+                        curr_field.clear();
+                    }
+                    ++no_actual_variants;
+                    ProcessFixedVariants(vcf_record, desc);
+                    tmpi++;
 
-            tmpi++;
+                    // Free the record after processing
+                    bcf_destroy(vcf_record);
+                }
+            }
+
+            // Cleanup parallel reader
+            parallel_reader_->Cleanup();
+            delete parallel_reader_;
+            parallel_reader_ = nullptr;
+        }
+        else {
+            // Fallback to single-threaded bcf_read1() for BCF or merge mode
+            while (bcf_read1(in_file, vcf_hdr, vcf_record) >= 0)
+            {
+                // std::cerr<<"no_samples:"<<no_samples<<endl;
+                variant_desc_t desc;
+                if (vcf_record->errcode)
+                {
+                    logger->error("Repair VCF file.");
+                    exit(9);
+                }
+                bcf_unpack(vcf_record, BCF_UN_ALL);
+                if (vcf_record->d.fmt->n != (int)ploidy)
+                {
+                    logger->error("Wrong ploidy (not equal to {}) for record at position {}.", ploidy, vcf_record->pos);
+                    logger->error("Repair VCF file OR set correct ploidy using -p option.");
+                    exit(9);
+                }
+                if (tmpi % 100000 == 0){
+                    logger->info("Processed {} variants...", tmpi);
+                }
+                if(compress_mode == compress_mode_t::lossless_mode){
+
+                    std::vector<field_desc> curr_field(keys.size());
+
+                    GetVariantFromRec(vcf_record, curr_field);
+
+                    SetVariantOtherFields(curr_field);
+
+
+                    for(size_t j = 0; j < keys.size(); ++j)
+                    {
+                        if(curr_field[j].data_size > 0)
+                        {
+                            if(curr_field[j].data)
+                                delete[] curr_field[j].data;
+                            curr_field[j].data = nullptr;
+                            curr_field[j].data_size = 0;
+                        }
+                    }
+                    curr_field.clear();
+                }
+
+                ++no_actual_variants;
+                ProcessFixedVariants(vcf_record, desc);
+
+                tmpi++;
+            }
         }
     }
     if(compress_mode == compress_mode_t::lossless_mode)
@@ -693,7 +757,7 @@ bool CompressionReader::ProcessInVCF()
 
     logger->info("Read all the variants and genotypes.");
     // Last pack (may be smaller than block size）
-    
+
         CloseFiles();
     return true;
 }

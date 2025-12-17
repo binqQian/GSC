@@ -51,6 +51,8 @@ gsc:	src/bit_memory.o \
 	src/main.o \
 	src/samples.o \
 	src/compression_reader.o \
+	src/parallel_vcf_reader.o \
+	src/parallel_vcf_writer.o \
 	src/file_handle.o \
 	src/utils.o \
 	src/bsc.o \
@@ -68,6 +70,8 @@ gsc:	src/bit_memory.o \
 	src/main.o \
 	src/samples.o \
 	src/compression_reader.o \
+	src/parallel_vcf_reader.o \
+	src/parallel_vcf_writer.o \
 	src/file_handle.o \
 	src/utils.o \
 	src/bsc.o \
