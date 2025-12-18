@@ -982,6 +982,9 @@ bool DecompressionReader::Decoder(std::vector<block_t> &v_blocks, std::vector<st
 	{
 		for (size_t j = 0; j < v_blocks[i].data_compress.size(); j++)
 		{
+			if (i_variant >= v_vcf_fixed_data_io.size()) {
+				break;
+			}
 			v_blocks[i].data_compress[j].chrom = std::move(v_vcf_fixed_data_io[i_variant].chrom);
 			v_blocks[i].data_compress[j].id = std::move(v_vcf_fixed_data_io[i_variant].id);
 			v_blocks[i].data_compress[j].alt = std::move(v_vcf_fixed_data_io[i_variant].alt);

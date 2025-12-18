@@ -848,10 +848,13 @@ bool CompressionReader::ProcessInVCF()
 
 // }
 // ***************************************************************************************************************************************
-void CompressionReader::ProcessFixedVariants(bcf1_t *vcf_record, variant_desc_t &desc)
+void CompressionReader::ProcessFixedVariants(bcf1_t *vcf_rec, variant_desc_t &desc)
 {
+    // IMPORTANT: Update the class member vcf_record to the current record
+    // This is needed because addVariant() uses the class member
+    this->vcf_record = vcf_rec;
 
-    if (vcf_record->n_allele <= 2)
+    if (vcf_rec->n_allele <= 2)
     {
         desc.ref.erase(); // REF
         if (vcf_record->n_allele > 0)
@@ -1142,15 +1145,16 @@ void CompressionReader::addVariant(int *gt_data, int ngt_data, variant_desc_t &d
                     logger->info("  Pushing col_block {}: block_id={}, num_rows={}, buffer_size={}",
                                  col_block_id, block_id, no_vec_in_block, col_bv.mem_buffer_pos);
 
-                    // Use a copy of v_vcf_data_compress for all but the last column block
+                    // Only the last column block carries the variant descriptors
+                    // Other column blocks get empty vectors to avoid duplicate storage
                     if (col_block_id < n_col_blocks - 1)
                     {
-                        vector<variant_desc_t> v_copy = v_vcf_data_compress;
-                        Gt_queue->Push(block_id, col_block_id, col_bv.mem_buffer, no_vec_in_block, v_copy);
+                        vector<variant_desc_t> empty_v;
+                        Gt_queue->Push(block_id, col_block_id, col_bv.mem_buffer, no_vec_in_block, empty_v);
                     }
                     else
                     {
-                        // Last column block can move the data
+                        // Last column block carries the actual variant descriptors
                         Gt_queue->Push(block_id, col_block_id, col_bv.mem_buffer, no_vec_in_block, v_vcf_data_compress);
                     }
 
@@ -1282,10 +1286,11 @@ void CompressionReader::addVariant(int *gt_data, int ngt_data, variant_desc_t &d
                     CBitMemory &col_bv = col_bv_buffers[col_block_id];
                     col_bv.TakeOwnership();
 
+                    // Only the last column block carries the variant descriptors
                     if (col_block_id < n_col_blocks - 1)
                     {
-                        vector<variant_desc_t> v_copy = v_vcf_data_compress;
-                        Gt_queue->Push(block_id, col_block_id, col_bv.mem_buffer, no_vec_in_block, v_copy);
+                        vector<variant_desc_t> empty_v;
+                        Gt_queue->Push(block_id, col_block_id, col_bv.mem_buffer, no_vec_in_block, empty_v);
                     }
                     else
                     {

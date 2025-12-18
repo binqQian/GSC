@@ -208,8 +208,15 @@ class Decompressor {
     int BedFormatDecompress();
 
     int decompressRange(const string & range);
+    int decompressRangeTiled(const string & range);
 
     int decompressSampleSmart(const string & range);
+    int decompressSampleSmartTiled(const string & range);
+
+    // Helper function to decode one variant's GT data in tiled mode
+    void decodeVariantGtTiled(uint32_t block_id, uint32_t var_in_block, uint32_t n_col_blocks,
+                              uint64_t pair_base, uint64_t curr_non_copy_vec_id_offset,
+                              uint32_t full_vec_len, vector<uint8_t> &my_str);
 
 
     uint8_t extract_partial_bytes(uint64_t vec_id, std::vector< std::pair<uint32_t, uint32_t> > & whichByte_whereInRes, uint8_t * resUnique, bool & is_uniqe_id, uint64_t & curr_zeros, uint64_t & curr_copy,uint64_t curr_non_copy_vec_id_offset, uint8_t * resAll, uint32_t unique_pos_first_in_block,  bool full_decode = true); //uint8_t extract_partial_bytes(uint64_t vec_id, std::vector< std::pair<uint32_t, uint8_t> > & whichByte_whereInRes, uint8_t * resUnique, bool & is_uniqe_id, uint64_t & curr_zeros, uint64_t & curr_copy, uint8_t * resAll);

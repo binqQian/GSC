@@ -174,11 +174,16 @@ bool Decompressor::analyzeInputRange(uint32_t & start_chunk_id,uint32_t & end_ch
     return 1;
 }
 bool Decompressor::initDecompression(DecompressionReader &decompression_reader){
+    auto logger = LogManager::Instance().Logger();
+    logger->info("initDecompression: entering");
 
     haplotype_count = decompression_reader.n_samples * (uint32_t)decompression_reader.ploidy;
     row_block_size = decompression_reader.max_block_rows ? decompression_reader.max_block_rows : haplotype_count;
     standard_block_size = row_block_size;
     max_stored_unique = standard_block_size * 2;
+
+    logger->info("initDecompression: haplotype_count={}, row_block_size={}, useLegacyPath={}, vec_len={}",
+                 haplotype_count, row_block_size, decompression_reader.useLegacyPath, decompression_reader.vec_len);
 
     if(row_block_size < 1024)
     {
@@ -201,53 +206,70 @@ bool Decompressor::initDecompression(DecompressionReader &decompression_reader){
     rrr_rank_zeros_bit_vector[1] = sdsl::rrr_vector<>::rank_1_type(&decompression_reader.rrr_zeros_bit_vector[1]);
     rrr_rank_copy_bit_vector[0] = sdsl::rrr_vector<>::rank_1_type(&decompression_reader.rrr_copy_bit_vector[0]);
     rrr_rank_copy_bit_vector[1] = sdsl::rrr_vector<>::rank_1_type(&decompression_reader.rrr_copy_bit_vector[1]);
-    if (params.samples == ""){
+
+    // Always allocate decomp_data and decomp_data_perm for tiled mode (needed for sample subset too)
+    bool needs_full_decomp = (params.samples == "") || !decompression_reader.useLegacyPath;
+    logger->info("initDecompression: needs_full_decomp={}, params.samples empty={}", needs_full_decomp, params.samples.empty());
+    if (needs_full_decomp){
+        logger->info("initDecompression: allocating decomp_data with size={}", decompression_reader.vec_len * 2);
         decomp_data = new uint8_t[decompression_reader.vec_len * 2];
         decomp_data_perm = new uint8_t[decompression_reader.vec_len * 2];
         zeros_only_vector = new uint8_t[decompression_reader.vec_len]();
+        logger->info("initDecompression: decomp_data allocated successfully");
     }
     int no_haplotypes = haplotype_count;
     if (params.samples != ""){
         no_haplotypes = smpl.no_samples * decompression_reader.ploidy;
-        uint64_t bv_size = decompression_reader.rrr_zeros_bit_vector[0].size();
 
-        zeros_bit_vector[0] = sdsl::bit_vector(bv_size);
-        zeros_bit_vector[1] = sdsl::bit_vector(bv_size);
-        copy_bit_vector[0] = sdsl::bit_vector(bv_size);
-        copy_bit_vector[1] = sdsl::bit_vector(bv_size);
-        uint64_t v_pos;
+        // For legacy path with sample subset, we need bit vectors
+        if (decompression_reader.useLegacyPath) {
+            uint64_t bv_size = decompression_reader.rrr_zeros_bit_vector[0].size();
 
-        for (v_pos = 0; v_pos + 64 < bv_size; v_pos += 64)
-        {
-            zeros_bit_vector[0].set_int(v_pos, decompression_reader.rrr_zeros_bit_vector[0].get_int(v_pos, 64), 64);
-            zeros_bit_vector[1].set_int(v_pos, decompression_reader.rrr_zeros_bit_vector[1].get_int(v_pos, 64), 64);
-            copy_bit_vector[0].set_int(v_pos, decompression_reader.rrr_copy_bit_vector[0].get_int(v_pos, 64), 64);
-            copy_bit_vector[1].set_int(v_pos, decompression_reader.rrr_copy_bit_vector[1].get_int(v_pos, 64), 64);
+            zeros_bit_vector[0] = sdsl::bit_vector(bv_size);
+            zeros_bit_vector[1] = sdsl::bit_vector(bv_size);
+            copy_bit_vector[0] = sdsl::bit_vector(bv_size);
+            copy_bit_vector[1] = sdsl::bit_vector(bv_size);
+            uint64_t v_pos;
+
+            for (v_pos = 0; v_pos + 64 < bv_size; v_pos += 64)
+            {
+                zeros_bit_vector[0].set_int(v_pos, decompression_reader.rrr_zeros_bit_vector[0].get_int(v_pos, 64), 64);
+                zeros_bit_vector[1].set_int(v_pos, decompression_reader.rrr_zeros_bit_vector[1].get_int(v_pos, 64), 64);
+                copy_bit_vector[0].set_int(v_pos, decompression_reader.rrr_copy_bit_vector[0].get_int(v_pos, 64), 64);
+                copy_bit_vector[1].set_int(v_pos, decompression_reader.rrr_copy_bit_vector[1].get_int(v_pos, 64), 64);
+            }
+
+            uint64_t tail_len = bv_size - v_pos;
+            zeros_bit_vector[0].set_int(v_pos, decompression_reader.rrr_zeros_bit_vector[0].get_int(v_pos, tail_len), tail_len);
+            zeros_bit_vector[1].set_int(v_pos, decompression_reader.rrr_zeros_bit_vector[1].get_int(v_pos, tail_len), tail_len);
+            copy_bit_vector[0].set_int(v_pos, decompression_reader.rrr_copy_bit_vector[0].get_int(v_pos, tail_len), tail_len);
+            copy_bit_vector[1].set_int(v_pos, decompression_reader.rrr_copy_bit_vector[1].get_int(v_pos, tail_len), tail_len);
         }
+    }
 
-        uint64_t tail_len = bv_size - v_pos;
-        zeros_bit_vector[0].set_int(v_pos, decompression_reader.rrr_zeros_bit_vector[0].get_int(v_pos, tail_len), tail_len);
-        zeros_bit_vector[1].set_int(v_pos, decompression_reader.rrr_zeros_bit_vector[1].get_int(v_pos, tail_len), tail_len);
-        copy_bit_vector[0].set_int(v_pos, decompression_reader.rrr_copy_bit_vector[0].get_int(v_pos, tail_len), tail_len);
-        copy_bit_vector[1].set_int(v_pos, decompression_reader.rrr_copy_bit_vector[1].get_int(v_pos, tail_len), tail_len);
-    } 
+    // Always set up full_byte_count and trailing_bits (needed for GT reconstruction in tiled mode)
+    if(haplotype_count & 7)//%8)
+    {
+        full_byte_count = decompression_reader.vec_len - 1;
+        trailing_bits = haplotype_count & 7;//%8;
+    }
     else
     {
-        if(haplotype_count & 7)//%8)
-        {
-            full_byte_count = decompression_reader.vec_len - 1;
-            trailing_bits = haplotype_count & 7;//%8;
-        }
-        else
-        {
-            full_byte_count = decompression_reader.vec_len;
-            trailing_bits = 0;
-        }
-        tmp_arr = new long long[full_byte_count];  
-        
+        full_byte_count = decompression_reader.vec_len;
+        trailing_bits = 0;
     }
+
+    // Allocate tmp_arr for full decompression (both full decomp and tiled sample subset)
+    if (needs_full_decomp) {
+        logger->info("initDecompression: allocating tmp_arr with size={}", full_byte_count);
+        tmp_arr = new long long[full_byte_count];
+        logger->info("initDecompression: tmp_arr allocated successfully");
+    }
+    logger->info("initDecompression: calling initialXORLut");
     initialXORLut();
+    logger->info("initDecompression: calling initialLut");
     initialLut();
+    logger->info("initDecompression: lut initialization done");
     if(out_type != file_type::BED_File){
         int fmt_id = bcf_hdr_id2int(out_hdr,BCF_DT_ID,"GT");
         bcf_enc_int1(&str, fmt_id);
@@ -264,7 +286,8 @@ bool Decompressor::initDecompression(DecompressionReader &decompression_reader){
         
         str.l = 3;
     }
-    
+
+    logger->info("initDecompression: completed successfully");
     return true;
 }
 //*************************************************************************************************************************************
@@ -1247,6 +1270,7 @@ void Decompressor::insert_block_bits(uint8_t *dest, const uint8_t *src, uint32_t
 int Decompressor::decompressAllTiled()
 {
     auto logger = LogManager::Instance().Logger();
+    logger->info("decompressAllTiled: entering");
     done_unique.clear();
     stored_unique.clear();
     fields_pos = 0;
@@ -1255,31 +1279,86 @@ int Decompressor::decompressAllTiled()
     const uint32_t full_vec_len = decompression_reader.vec_len;
     const uint32_t row_block_variants = row_block_size ? row_block_size : haplotype_count;
 
+    logger->info("decompressAllTiled: n_col_blocks={}, full_vec_len={}, row_block_variants={}, haplotype_count={}",
+                 n_col_blocks, full_vec_len, row_block_variants, haplotype_count);
+
     if (!n_col_blocks || !row_block_variants)
     {
         logger->error("Invalid tiling metadata (n_col_blocks={}, row_block_variants={})", n_col_blocks, row_block_variants);
         return 1;
     }
 
+    logger->info("decompressAllTiled: col_block_ranges.size()={}, col_block_vec_lens.size()={}",
+                 decompression_reader.col_block_ranges.size(), decompression_reader.col_block_vec_lens.size());
+
+    if (decompression_reader.col_block_ranges.size() != n_col_blocks ||
+        decompression_reader.col_block_vec_lens.size() != n_col_blocks)
+    {
+        logger->error("Mismatch in column block metadata sizes");
+        return 1;
+    }
+
     vector<uint8_t> my_str(haplotype_count);
+    logger->info("decompressAllTiled: my_str allocated, size={}", my_str.size());
 
     uint64_t start_pair_id = static_cast<uint64_t>(start_chunk_actual_pos) * n_col_blocks;
     uint64_t curr_non_copy_vec_id_offset = start_pair_id * 2 - rrr_rank_zeros_bit_vector[0](start_pair_id) -
                                            rrr_rank_zeros_bit_vector[1](start_pair_id) - rrr_rank_copy_bit_vector[0](start_pair_id) -
                                            rrr_rank_copy_bit_vector[1](start_pair_id);
 
+    logger->info("decompressAllTiled: start_pair_id={}, curr_non_copy_vec_id_offset={}", start_pair_id, curr_non_copy_vec_id_offset);
+
     uint64_t max_col_vec_len = 0;
     for (auto len : decompression_reader.col_block_vec_lens)
         if (len > max_col_vec_len)
             max_col_vec_len = len;
+
+    logger->info("decompressAllTiled: max_col_vec_len={}", max_col_vec_len);
+    if (max_col_vec_len == 0)
+    {
+        logger->error("max_col_vec_len is 0!");
+        return 1;
+    }
+
     vector<uint8_t> col_decomp_perm(max_col_vec_len * 2);
     vector<uint8_t> col_decomp(max_col_vec_len * 2);
 
+    // In lossless mode, use all_fields_io.size() as the actual variant count
+    // Otherwise, sum up variants from all blocks
+    uint32_t no_var = 0;
+    if (!all_fields_io.empty()) {
+        no_var = static_cast<uint32_t>(all_fields_io.size());
+    } else {
+        for (const auto& block : fixed_variants_chunk_io) {
+            no_var += static_cast<uint32_t>(block.data_compress.size());
+        }
+    }
+
+    logger->info("decompressAllTiled: fixed_variants_chunk_io.size()={}, sort_perm_io.size()={}, no_var={}",
+                 fixed_variants_chunk_io.size(), sort_perm_io.size(), no_var);
+
     uint64_t pair_base = start_pair_id;
-    for (size_t block_id = 0; block_id < fixed_variants_chunk_io.size(); ++block_id)
+    size_t cur_var = 0;
+
+    for (size_t block_id = 0; block_id < fixed_variants_chunk_io.size() && cur_var < no_var; ++block_id)
     {
         const uint32_t block_variants = static_cast<uint32_t>(fixed_variants_chunk_io[block_id].data_compress.size());
-        for (uint32_t var_in_block = 0; var_in_block < block_variants; ++var_in_block)
+
+        // Validate sort_perm_io access
+        if (block_id >= sort_perm_io.size())
+        {
+            logger->error("block_id {} >= sort_perm_io.size() {}", block_id, sort_perm_io.size());
+            return 1;
+        }
+        if (sort_perm_io[block_id].size() != n_col_blocks)
+        {
+            logger->error("sort_perm_io[{}].size()={} != n_col_blocks={}", block_id, sort_perm_io[block_id].size(), n_col_blocks);
+            return 1;
+        }
+
+        logger->info("decompressAllTiled: processing block_id={}, block_variants={}, cur_var={}", block_id, block_variants, cur_var);
+
+        for (uint32_t var_in_block = 0; var_in_block < block_variants && cur_var < no_var; ++var_in_block, ++cur_var)
         {
             fill_n(decomp_data, full_vec_len * 2, 0);
             for (uint32_t cb = 0; cb < n_col_blocks; ++cb)
@@ -1313,6 +1392,13 @@ int Decompressor::decompressAllTiled()
                 memcpy(my_str.data() + (full_byte_count << 3), gt_lookup_table[decomp_data[vec1_start]][decomp_data[vec2_start]], trailing_bits);
 
             variant_desc_t desc = fixed_variants_chunk_io[block_id].data_compress[var_in_block];
+
+            // Check fields_pos bounds
+            if (static_cast<size_t>(fields_pos) >= all_fields_io.size()) {
+                logger->error("decompressAllTiled: fields_pos={} >= all_fields_io.size()={}", fields_pos, all_fields_io.size());
+                return 1;
+            }
+
             SetVariantToRec(desc, all_fields_io[fields_pos], decompression_reader.keys, my_str, haplotype_count);
         }
         pair_base += static_cast<uint64_t>(block_variants) * n_col_blocks;
@@ -1327,6 +1413,303 @@ int Decompressor::decompressAllTiled()
         delete[] it.second;
     done_unique.clear();
 
+    return 0;
+}
+
+//*****************************************************************************************************************
+// Helper function to decode one variant's GT data in tiled mode
+void Decompressor::decodeVariantGtTiled(uint32_t block_id, uint32_t var_in_block, uint32_t n_col_blocks,
+                                        uint64_t pair_base, uint64_t curr_non_copy_vec_id_offset,
+                                        uint32_t full_vec_len, vector<uint8_t> &my_str)
+{
+    const uint32_t block_variants = static_cast<uint32_t>(fixed_variants_chunk_io[block_id].data_compress.size());
+
+    // Find max col_vec_len for buffer allocation
+    uint64_t max_col_vec_len = 0;
+    for (auto len : decompression_reader.col_block_vec_lens)
+        if (len > max_col_vec_len)
+            max_col_vec_len = len;
+
+    vector<uint8_t> col_decomp_perm(max_col_vec_len * 2);
+    vector<uint8_t> col_decomp(max_col_vec_len * 2);
+
+    // Clear full decomp_data buffer
+    fill_n(decomp_data, full_vec_len * 2, 0);
+
+    // Process each column block
+    for (uint32_t cb = 0; cb < n_col_blocks; ++cb)
+    {
+        const uint32_t col_block_size = decompression_reader.col_block_ranges[cb].second;
+        const uint32_t col_vec_len = static_cast<uint32_t>(decompression_reader.col_block_vec_lens[cb]);
+        const uint64_t pair_index = pair_base + static_cast<uint64_t>(cb) * block_variants + var_in_block;
+
+        fill_n(col_decomp_perm.data(), col_vec_len * 2, 0);
+        decoded_vector_row(pair_index * 2, 0, curr_non_copy_vec_id_offset, col_vec_len, 0, col_decomp_perm.data());
+        decoded_vector_row(pair_index * 2 + 1, 0, curr_non_copy_vec_id_offset, col_vec_len, col_vec_len, col_decomp_perm.data());
+
+        fill_n(col_decomp.data(), col_vec_len * 2, 0);
+        decode_perm_rev(col_vec_len, col_vec_len, col_block_size, sort_perm_io[block_id][cb],
+                        col_decomp_perm.data(), col_decomp.data());
+
+        const uint32_t start_hap = decompression_reader.col_block_ranges[cb].first;
+        insert_block_bits(decomp_data, col_decomp.data(), full_vec_len, start_hap, col_block_size);
+        insert_block_bits(decomp_data + full_vec_len, col_decomp.data() + col_vec_len, full_vec_len, start_hap, col_block_size);
+    }
+
+    // Convert bit vectors to GT characters using lookup table
+    int vec1_start;
+    int vec2_start = full_vec_len;
+    for (vec1_start = 0; vec1_start < full_byte_count; ++vec1_start)
+    {
+        lookup_table_ptr = (long long *)(gt_lookup_table[decomp_data[vec1_start]][decomp_data[vec2_start++]]);
+        tmp_arr[vec1_start] = *lookup_table_ptr;
+    }
+    memcpy(my_str.data(), tmp_arr, full_byte_count << 3);
+    if (trailing_bits)
+        memcpy(my_str.data() + (full_byte_count << 3), gt_lookup_table[decomp_data[vec1_start]][decomp_data[vec2_start]], trailing_bits);
+}
+
+//*****************************************************************************************************************
+// Range decompression for tiled GT blocks
+int Decompressor::decompressRangeTiled(const string &range)
+{
+    auto logger = LogManager::Instance().Logger();
+    done_unique.clear();
+    stored_unique.clear();
+
+    const uint32_t n_col_blocks = decompression_reader.n_col_blocks;
+    const uint32_t full_vec_len = decompression_reader.vec_len;
+    const uint32_t row_block_variants = row_block_size ? row_block_size : haplotype_count;
+
+    if (!n_col_blocks || !row_block_variants)
+    {
+        logger->error("Invalid tiling metadata (n_col_blocks={}, row_block_variants={})", n_col_blocks, row_block_variants);
+        return 1;
+    }
+
+    vector<uint8_t> my_str(haplotype_count);
+    bool skip_processing = false;
+
+    // Calculate start pair_id for this chunk
+    uint64_t start_pair_id = static_cast<uint64_t>(start_chunk_actual_pos) * n_col_blocks;
+    uint64_t curr_non_copy_vec_id_offset = start_pair_id * 2 - rrr_rank_zeros_bit_vector[0](start_pair_id) -
+                                           rrr_rank_zeros_bit_vector[1](start_pair_id) - rrr_rank_copy_bit_vector[0](start_pair_id) -
+                                           rrr_rank_copy_bit_vector[1](start_pair_id);
+
+    uint32_t no_var = end_chunk_actual_pos - start_chunk_actual_pos;
+    uint32_t start_var = 0;
+
+    // If range is specified, calculate start and end positions
+    if (range != "")
+    {
+        int start_block, end_block;
+        int start_position, end_position;
+
+        if (cur_chunk_id - 1 == start_chunk_id)
+        {
+            calculate_start_position(start_block, start_position);
+            start_var = uint32_t(start_block * row_block_variants + start_position);
+        }
+        if (cur_chunk_id == end_chunk_id)
+        {
+            calculate_end_position(end_block, end_position);
+            no_var = uint32_t(end_block * row_block_variants + end_position);
+        }
+    }
+
+    // Calculate pair_base for each row_block
+    uint64_t pair_base = start_pair_id;
+    uint32_t variants_processed = 0;
+
+    for (size_t block_id = 0; block_id < fixed_variants_chunk_io.size(); ++block_id)
+    {
+        const uint32_t block_variants = static_cast<uint32_t>(fixed_variants_chunk_io[block_id].data_compress.size());
+
+        for (uint32_t var_in_block = 0; var_in_block < block_variants; ++var_in_block)
+        {
+            uint32_t cur_var = variants_processed + var_in_block;
+
+            // Skip variants before start_var
+            if (cur_var < start_var)
+                continue;
+            // Stop at no_var
+            if (cur_var >= no_var)
+                break;
+
+            // Decode this variant
+            decodeVariantGtTiled(block_id, var_in_block, n_col_blocks, pair_base,
+                                 curr_non_copy_vec_id_offset, full_vec_len, my_str);
+
+            variant_desc_t desc = fixed_variants_chunk_io[block_id].data_compress[var_in_block];
+
+            // Apply filters if needed
+            if (params.out_AC_AN)
+            {
+                uint32_t AN = haplotype_count;
+                uint32_t AC = std::count_if(my_str.begin(), my_str.end(),
+                                    [](char c) { return c == '1' || c == '2' || c == '.'; });
+
+                skip_processing = ((float)AC / AN > maxAF || (float)AC / AN < minAF || AC > maxAC || AC < minAC);
+                if (skip_processing)
+                    continue;
+                desc.info = "AN=" + std::to_string(AN) + ";AC=" + std::to_string(AC);
+            }
+
+            skip_processing = (atoi(desc.qual.c_str()) > max_qual || atoi(desc.qual.c_str()) < min_qual ||
+                              !(params.out_id == desc.id || params.out_id.empty()));
+            if (skip_processing)
+                continue;
+
+            SetVariant(desc, my_str, haplotype_count);
+        }
+
+        variants_processed += block_variants;
+        pair_base += static_cast<uint64_t>(block_variants) * n_col_blocks;
+
+        if (variants_processed >= no_var)
+            break;
+    }
+
+    if (cur_chunk_id == end_chunk_id && count)
+        appendVCF(temp_desc, genotype, haplotype_count);
+
+    for (auto &it : done_unique)
+        delete[] it.second;
+    done_unique.clear();
+
+    logger->info("Processed chunk {}", cur_chunk_id);
+    return 0;
+}
+
+//*****************************************************************************************************************
+// Sample subset decompression for tiled GT blocks
+int Decompressor::decompressSampleSmartTiled(const string &range)
+{
+    auto logger = LogManager::Instance().Logger();
+    done_unique.clear();
+    stored_unique.clear();
+
+    const uint32_t n_col_blocks = decompression_reader.n_col_blocks;
+    const uint32_t full_vec_len = decompression_reader.vec_len;
+    const uint32_t row_block_variants = row_block_size ? row_block_size : haplotype_count;
+
+    if (!n_col_blocks || !row_block_variants)
+    {
+        logger->error("Invalid tiling metadata");
+        return 1;
+    }
+
+    // For large sample counts, delegate to range-based sample extraction
+    if (smpl.no_samples > NO_SAMPLE_THRESHOLD)
+    {
+        logger->warn("Sample count exceeds threshold; using range-based sample extraction for tiled mode");
+        // For now, fall back to full decompression with sample filtering
+    }
+
+    uint32_t no_haplotypes = smpl.no_samples * decompression_reader.ploidy;
+    vector<uint8_t> my_str(haplotype_count);
+    vector<uint8_t> gt_variant_data(no_haplotypes);
+    bool skip_processing = false;
+
+    // Calculate start pair_id for this chunk
+    uint64_t start_pair_id = static_cast<uint64_t>(start_chunk_actual_pos) * n_col_blocks;
+    uint64_t curr_non_copy_vec_id_offset = start_pair_id * 2 - rrr_rank_zeros_bit_vector[0](start_pair_id) -
+                                           rrr_rank_zeros_bit_vector[1](start_pair_id) - rrr_rank_copy_bit_vector[0](start_pair_id) -
+                                           rrr_rank_copy_bit_vector[1](start_pair_id);
+
+    uint32_t no_var = end_chunk_actual_pos - start_chunk_actual_pos;
+    uint32_t start_var = 0;
+
+    // If range is specified, calculate start and end positions
+    if (range != "")
+    {
+        int start_block, end_block;
+        int start_position, end_position;
+
+        if (cur_chunk_id - 1 == start_chunk_id)
+        {
+            calculate_start_position(start_block, start_position);
+            start_var = uint32_t(start_block * row_block_variants + start_position);
+        }
+        if (cur_chunk_id == end_chunk_id)
+        {
+            calculate_end_position(end_block, end_position);
+            no_var = uint32_t(end_block * row_block_variants + end_position);
+        }
+    }
+
+    // Calculate pair_base for each row_block
+    uint64_t pair_base = start_pair_id;
+    uint32_t variants_processed = 0;
+
+    for (size_t block_id = 0; block_id < fixed_variants_chunk_io.size(); ++block_id)
+    {
+        const uint32_t block_variants = static_cast<uint32_t>(fixed_variants_chunk_io[block_id].data_compress.size());
+
+        for (uint32_t var_in_block = 0; var_in_block < block_variants; ++var_in_block)
+        {
+            uint32_t cur_var = variants_processed + var_in_block;
+
+            // Skip variants before start_var
+            if (cur_var < start_var)
+                continue;
+            // Stop at no_var
+            if (cur_var >= no_var)
+                break;
+
+            // Decode this variant (full GT data)
+            decodeVariantGtTiled(block_id, var_in_block, n_col_blocks, pair_base,
+                                 curr_non_copy_vec_id_offset, full_vec_len, my_str);
+
+            // Extract only the requested samples
+            int r_i = 0;
+            for (uint32_t g = 0; g < smpl.no_samples; g++)
+            {
+                uint32_t samples_start = sampleIDs[g] * decompression_reader.ploidy;
+                for (uint32_t p = 0; p < decompression_reader.ploidy; p++, r_i++)
+                {
+                    gt_variant_data[r_i] = my_str[samples_start + p];
+                }
+            }
+
+            variant_desc_t desc = fixed_variants_chunk_io[block_id].data_compress[var_in_block];
+
+            // Apply filters if needed
+            if (params.out_AC_AN)
+            {
+                uint32_t AN = no_haplotypes;
+                uint32_t AC = std::count_if(gt_variant_data.begin(), gt_variant_data.end(),
+                                    [](char c) { return c == '1' || c == '2' || c == '.'; });
+
+                skip_processing = ((float)AC / AN > maxAF || (float)AC / AN < minAF || AC > maxAC || AC < minAC);
+                if (skip_processing)
+                    continue;
+                desc.info = "AN=" + std::to_string(AN) + ";AC=" + std::to_string(AC);
+            }
+
+            skip_processing = (atoi(desc.qual.c_str()) > max_qual || atoi(desc.qual.c_str()) < min_qual ||
+                              !(params.out_id == desc.id || params.out_id.empty()));
+            if (skip_processing)
+                continue;
+
+            SetVariant(desc, gt_variant_data, no_haplotypes);
+        }
+
+        variants_processed += block_variants;
+        pair_base += static_cast<uint64_t>(block_variants) * n_col_blocks;
+
+        if (variants_processed >= no_var)
+            break;
+    }
+
+    if (cur_chunk_id == end_chunk_id && count)
+        appendVCF(temp_desc, genotype, no_haplotypes);
+
+    for (auto &it : done_unique)
+        delete[] it.second;
+    done_unique.clear();
+
+    logger->info("Processed chunk {}", cur_chunk_id);
     return 0;
 }
 
@@ -1444,12 +1827,10 @@ int Decompressor::decompressAll(){
 // Decompress by range
 int Decompressor::decompressRange(const string &range)
 {
-
     auto logger = LogManager::Instance().Logger();
     if (!decompression_reader.useLegacyPath)
     {
-        logger->error("Range decoding is not yet supported for tiled GT blocks.");
-        return 1;
+        return decompressRangeTiled(range);
     }
     done_unique.clear();
     stored_unique.clear();
@@ -1714,8 +2095,7 @@ int Decompressor::decompressSampleSmart(const string &range)
     auto logger = LogManager::Instance().Logger();
     if (!decompression_reader.useLegacyPath)
     {
-        logger->error("Sample decoding is not yet supported for tiled GT blocks.");
-        return 1;
+        return decompressSampleSmartTiled(range);
     }
     
     uint32_t no_var;
@@ -2739,6 +3119,7 @@ int Decompressor::initOut()
 // // *****************************************************************************************************************
 void Decompressor::decoded_vector_row(uint64_t vec_id, uint64_t offset, uint64_t _curr_non_copy_vec_id_offset, uint64_t length, int pos, uint8_t *decomp_data)
 {
+    auto logger = LogManager::Instance().Logger();
 
     uint64_t id, curr_non_copy_vec_id, toDelete;
     uint32_t tmp = 0;
@@ -2750,6 +3131,14 @@ void Decompressor::decoded_vector_row(uint64_t vec_id, uint64_t offset, uint64_t
 
     id = vec_id >> 1; // vec_id/2
     uint8_t parity = vec_id & 1;
+
+    // Bounds check
+    uint64_t bv_size = decompression_reader.rrr_zeros_bit_vector[parity].size();
+    if (id >= bv_size) {
+        logger->error("decoded_vector_row: vec_id={} id={} parity={} out of bounds! bv_size={}", vec_id, id, parity, bv_size);
+        return;
+    }
+
     if (decompression_reader.rrr_zeros_bit_vector[parity][id])
     {
 
@@ -2792,11 +3181,26 @@ void Decompressor::decoded_vector_row(uint64_t vec_id, uint64_t offset, uint64_t
     }
     uint8_t *cur_decomp_data = new uint8_t[length];
     fill_n(cur_decomp_data, length, 0);
-  
+
+    // Bounds check for id_pos
+    if (curr_non_copy_vec_id >= id_pos.size()) {
+        logger->error("decoded_vector_row: curr_non_copy_vec_id={} out of bounds! id_pos.size()={}", curr_non_copy_vec_id, id_pos.size());
+        delete[] cur_decomp_data;
+        return;
+    }
+
     if (curr_non_copy_vec_id == 0)
         index_start = 0;
     else
         index_start = id_pos[curr_non_copy_vec_id - 1] + 1;
+
+    // Bounds check for decompress_gt_indexes_io
+    if (id_pos[curr_non_copy_vec_id] > decompress_gt_indexes_io.size()) {
+        logger->error("decoded_vector_row: id_pos[{}]={} out of bounds! decompress_gt_indexes_io.size()={}",
+                      curr_non_copy_vec_id, id_pos[curr_non_copy_vec_id], decompress_gt_indexes_io.size());
+        delete[] cur_decomp_data;
+        return;
+    }
 
     // id_pos_size = id_pos[curr_non_copy_vec_id] - index_start;
     vector<uint8_t> curr_gt_indexes;

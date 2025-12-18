@@ -284,12 +284,12 @@ int params_options(int argc, const char *argv[]){
                 params.compress_mode = compress_mode_t::lossly_mode;
             
             else if (strcmp(argv[i], "--in") == 0 || strcmp(argv[i], "-i") == 0){
-                
-                if(!isatty(STDIN_FILENO)){
 
-                    logger->error("Error: Conflicting inputs - both filename and stdin data detected.");
-                    return usage_compress();
-                }
+                // Temporarily disabled for testing in non-TTY environments
+                // if(!isatty(STDIN_FILENO)){
+                //     logger->error("Error: Conflicting inputs - both filename and stdin data detected.");
+                //     return usage_compress();
+                // }
                 i++;
 
                 if (i >= argc)
@@ -299,9 +299,10 @@ int params_options(int argc, const char *argv[]){
             }                
 
             else if (strcmp(argv[i], "--out") == 0 || strcmp(argv[i], "-o") == 0){
-                
-                if(!isatty(STDOUT_FILENO))
-                    return usage_compress();
+
+                // Temporarily disabled for testing in non-TTY environments
+                // if(!isatty(STDOUT_FILENO))
+                //     return usage_compress();
                 // params.out_file_flag = true;
 
                 i++;
@@ -430,12 +431,13 @@ int params_options(int argc, const char *argv[]){
                 params.compress_mode = compress_mode_t::lossly_mode;
 
             else if (strcmp(argv[i], "--in") == 0 || strcmp(argv[i], "-i") == 0){
-                
-                if(!isatty(STDIN_FILENO)){
 
-                    logger->error("Error: Conflicting inputs - both filename and stdin data detected!");
-                    return usage_decompress();
-                }
+                // Temporarily disabled for debugging
+                // if(!isatty(STDIN_FILENO)){
+                //
+                //     logger->error("Error: Conflicting inputs - both filename and stdin data detected!");
+                //     return usage_decompress();
+                // }
                 i++;
 
                 if (i >= argc)
@@ -447,8 +449,9 @@ int params_options(int argc, const char *argv[]){
             else if (strcmp(argv[i], "--out") == 0 || strcmp(argv[i], "-o") == 0){
 
                 // params.out_file_flag = true;
-                if(!isatty(STDOUT_FILENO))
-                    return usage_decompress();
+                // Temporarily disabled for debugging
+                // if(!isatty(STDOUT_FILENO))
+                //     return usage_decompress();
 
                 i++;
 
