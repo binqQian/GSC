@@ -1323,24 +1323,26 @@ int Decompressor::decompressAllTiled()
     vector<uint8_t> col_decomp_perm(max_col_vec_len * 2);
     vector<uint8_t> col_decomp(max_col_vec_len * 2);
 
-    // In lossless mode, use all_fields_io.size() as the actual variant count
-    // Otherwise, sum up variants from all blocks
-    uint32_t no_var = 0;
-    if (!all_fields_io.empty()) {
-        no_var = static_cast<uint32_t>(all_fields_io.size());
-    } else {
-        for (const auto& block : fixed_variants_chunk_io) {
-            no_var += static_cast<uint32_t>(block.data_compress.size());
-        }
+    const uint32_t actual_variants = static_cast<uint32_t>(all_fields_io.size());
+    uint32_t total_variants = 0;
+    for (const auto &block : fixed_variants_chunk_io)
+    {
+        total_variants += static_cast<uint32_t>(block.data_compress.size());
     }
 
-    logger->info("decompressAllTiled: fixed_variants_chunk_io.size()={}, sort_perm_io.size()={}, no_var={}",
-                 fixed_variants_chunk_io.size(), sort_perm_io.size(), no_var);
+    if (!total_variants || !actual_variants)
+    {
+        logger->error("Invalid variant counts (total_variants={}, actual_variants={})", total_variants, actual_variants);
+        return 1;
+    }
+
+    logger->info("decompressAllTiled: fixed_variants_chunk_io.size()={}, sort_perm_io.size()={}, total_variants={}, actual_variants={}",
+                 fixed_variants_chunk_io.size(), sort_perm_io.size(), total_variants, actual_variants);
 
     uint64_t pair_base = start_pair_id;
-    size_t cur_var = 0;
+    size_t processed_variants = 0;
 
-    for (size_t block_id = 0; block_id < fixed_variants_chunk_io.size() && cur_var < no_var; ++block_id)
+    for (size_t block_id = 0; block_id < fixed_variants_chunk_io.size(); ++block_id)
     {
         const uint32_t block_variants = static_cast<uint32_t>(fixed_variants_chunk_io[block_id].data_compress.size());
 
@@ -1356,9 +1358,9 @@ int Decompressor::decompressAllTiled()
             return 1;
         }
 
-        logger->info("decompressAllTiled: processing block_id={}, block_variants={}, cur_var={}", block_id, block_variants, cur_var);
+        logger->info("decompressAllTiled: processing block_id={}, block_variants={}, processed_variants={}", block_id, block_variants, processed_variants);
 
-        for (uint32_t var_in_block = 0; var_in_block < block_variants && cur_var < no_var; ++var_in_block, ++cur_var)
+        for (uint32_t var_in_block = 0; var_in_block < block_variants; ++var_in_block, ++processed_variants)
         {
             fill_n(decomp_data, full_vec_len * 2, 0);
             for (uint32_t cb = 0; cb < n_col_blocks; ++cb)
@@ -1393,13 +1395,19 @@ int Decompressor::decompressAllTiled()
 
             variant_desc_t desc = fixed_variants_chunk_io[block_id].data_compress[var_in_block];
 
-            // Check fields_pos bounds
-            if (static_cast<size_t>(fields_pos) >= all_fields_io.size()) {
-                logger->error("decompressAllTiled: fields_pos={} >= all_fields_io.size()={}", fields_pos, all_fields_io.size());
+            // Use the previous fields entry for multi-allelic continuation records (<M>) since fields_pos
+            // was already advanced when the <N> record was seen.
+            int field_index = fields_pos;
+            if (desc.alt.find("<M>") != string::npos && count > 0)
+                field_index = fields_pos - 1;
+
+            if (field_index < 0 || static_cast<uint32_t>(field_index) >= actual_variants) {
+                logger->error("decompressAllTiled: field_index={} outside actual_variants={} (processed_variants={}, fields_pos={}, alt={})",
+                              field_index, actual_variants, processed_variants, fields_pos, desc.alt);
                 return 1;
             }
 
-            SetVariantToRec(desc, all_fields_io[fields_pos], decompression_reader.keys, my_str, haplotype_count);
+            SetVariantToRec(desc, all_fields_io[field_index], decompression_reader.keys, my_str, haplotype_count);
         }
         pair_base += static_cast<uint64_t>(block_variants) * n_col_blocks;
     }
