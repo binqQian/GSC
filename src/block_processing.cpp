@@ -13,14 +13,20 @@ void BlockProcess::SetCurBlock(uint64_t _cur_no_vec, uint8_t *cur_data)
 {
 
     data = cur_data;
+    cur_vec_len = params.vec_len;
 
     cur_no_vec = _cur_no_vec;
 
 }
 
-void BlockProcess::ProcessSquareBlock(vector<uint32_t> &perm, vector<bool> &zeros, vector<bool> &copies, vector<uint32_t> &origin_of_copy, vector<uint8_t> &samples_indexes,bool permute)
+void BlockProcess::ProcessSquareBlock(uint32_t col_block_size, uint32_t col_vec_len, vector<uint32_t> &perm, vector<bool> &zeros, vector<bool> &copies, vector<uint32_t> &origin_of_copy, vector<uint8_t> &samples_indexes,bool permute)
 
 {
+
+    // Use per-column vec_len when tiling; fall back to global params for legacy path.
+    cur_vec_len = col_vec_len ? col_vec_len : params.vec_len;
+    // Clear per-block state to avoid cross-column contamination
+    start = 0;
 
     if (permute)
 
@@ -35,9 +41,9 @@ void BlockProcess::ProcessSquareBlock(vector<uint32_t> &perm, vector<bool> &zero
 
         perm.clear();
 
-        perm.resize(params.vec_len * 8, 0);
+        perm.resize(col_block_size ? col_block_size : params.vec_len * 8, 0);
 
-        for (int i = 0; i < (int)params.vec_len * 8; ++i)
+        for (int i = 0; i < (int)perm.size(); ++i)
 
             perm[i] = i;
     }
@@ -51,8 +57,9 @@ void BlockProcess::permute_range_vec(uint64_t id_start, uint64_t id_stop, vector
 
     size_t n_h_samples = v_perm.size();
 
-    // encode_byte_num = (uint32_t)log2(n_h_samples-1)/8+1;
-    size_t max_no_vec_in_block = n_h_samples*2;
+    // Use number of vectors in this block (rows) to size working buffers.
+    uint64_t part_vec = id_stop - id_start;
+    size_t max_no_vec_in_block = static_cast<size_t>(part_vec);
     
     uint32_t* comp_pos_copy = new uint32_t[max_no_vec_in_block];
 
@@ -67,8 +74,6 @@ void BlockProcess::permute_range_vec(uint64_t id_start, uint64_t id_stop, vector
     
 
     const uint32_t MC_ARRAY_SIZE = (max_no_vec_in_block+63) / 64;          
-
-    uint64_t part_vec = id_stop - id_start;
 
     vector<mc_vec_t> mc_vectors;
     // vector<mc_vec_t> new_mc_vectors;
@@ -94,11 +99,11 @@ void BlockProcess::permute_range_vec(uint64_t id_start, uint64_t id_stop, vector
 
         uint32_t id_cur = i + id_start;
 
-        auto cur_vec = data + id_cur * params.vec_len;
+        auto cur_vec = data + id_cur * cur_vec_len;
 
         bool empty = true;
 
-        for (int j = 0; j < (int)params.vec_len; ++j)
+        for (int j = 0; j < (int)cur_vec_len; ++j)
 
             if (cur_vec[j])
 
@@ -131,7 +136,7 @@ void BlockProcess::permute_range_vec(uint64_t id_start, uint64_t id_stop, vector
 
         uint32_t id_cur = mc_ids[i] + id_start;
 
-        auto cur_vec = data + id_cur * params.vec_len;
+        auto cur_vec = data + id_cur * cur_vec_len;
 
         uint32_t arr_id = i / 64;
 
@@ -323,7 +328,7 @@ void BlockProcess::permute_range_vec(uint64_t id_start, uint64_t id_stop, vector
     }
     perm.shrink_to_fit();
 
-    uint8_t *old_vec = new uint8_t[params.vec_len];
+    uint8_t *old_vec = new uint8_t[cur_vec_len];
 
     size_t mc_tr=0;
 
@@ -342,13 +347,13 @@ void BlockProcess::permute_range_vec(uint64_t id_start, uint64_t id_stop, vector
 
         uint32_t id_cur = i + id_start;
 
-        auto new_vec = data + id_cur * params.vec_len;
+        auto new_vec = data + id_cur * cur_vec_len;
 
-        memcpy(old_vec, new_vec, params.vec_len);
+        memcpy(old_vec, new_vec, cur_vec_len);
 
-        fill_n(new_vec, params.vec_len, 0);
+        fill_n(new_vec, cur_vec_len, 0);
 
-        for (int j = 0; j < (int)params.vec_len; ++j){
+        for (int j = 0; j < (int)cur_vec_len; ++j){
 
             if (old_vec[j])
 
@@ -367,9 +372,9 @@ void BlockProcess::permute_range_vec(uint64_t id_start, uint64_t id_stop, vector
             if(!copies[i]){
                 for(size_t next_copy = i+1 ; next_copy < part_vec && next_copy < i+params.max_replication_depth;next_copy++){
 
-                    auto next_vec = data+ next_copy * params.vec_len;
+                    auto next_vec = data+ next_copy * cur_vec_len;
 
-                    if(memcmp(old_vec,next_vec,params.vec_len) == 0)
+                    if(memcmp(old_vec,next_vec,cur_vec_len) == 0)
                     {
                         copies[next_copy] = 1;
                         f_copy.emplace(next_copy,i);
@@ -460,9 +465,9 @@ void BlockProcess::ProcessLastBlock(vector<bool> &zeros, vector<bool> &copies, v
     map<int,int>f_copy;
     uint32_t* comp_pos_copy = new uint32_t[cur_no_vec];
     // encode_byte_num = (uint32_t)log2(params.n_samples*2-1)/8+1;
-    // uint8_t* comp_samples_indexes = new uint8_t[cur_no_vec*params.vec_len*8*2];
+    // uint8_t* comp_samples_indexes = new uint8_t[cur_no_vec*cur_vec_len*8*2];
     vector<uint32_t> sparse_matrix_cols;
-    sparse_matrix_cols.reserve(cur_no_vec*params.vec_len*8*2);
+    sparse_matrix_cols.reserve(cur_no_vec*cur_vec_len*8*2);
     no_copy = 0;
     no_samples_index = 0;
 
@@ -472,9 +477,9 @@ void BlockProcess::ProcessLastBlock(vector<bool> &zeros, vector<bool> &copies, v
         
         bool empty = true;
 
-        auto cur_vec = data + i * params.vec_len;
+        auto cur_vec = data + i * cur_vec_len;
 
-        for (int j = 0; j < (int)params.vec_len; ++j){
+        for (int j = 0; j < (int)cur_vec_len; ++j){
 
             if (cur_vec[j])
 
@@ -493,9 +498,9 @@ void BlockProcess::ProcessLastBlock(vector<bool> &zeros, vector<bool> &copies, v
             if(!copies[i]){
                 for(size_t next_copy = i+1 ; next_copy < cur_no_vec && next_copy < i+params.max_replication_depth;next_copy++){
 
-                    auto next_vec = data+ next_copy * params.vec_len;
+                    auto next_vec = data+ next_copy * cur_vec_len;
 
-                    if(memcmp(cur_vec,next_vec,params.vec_len) == 0)
+                    if(memcmp(cur_vec,next_vec,cur_vec_len) == 0)
                     {
                         copies[next_copy] = 1;
 
@@ -503,7 +508,7 @@ void BlockProcess::ProcessLastBlock(vector<bool> &zeros, vector<bool> &copies, v
                     }
                 }
                 uint32_t prev_index = 0;
-                for(size_t t = 1 ; t<= params.vec_len*8;t++){
+                for(size_t t = 1 ; t<= cur_vec_len*8;t++){
                     auto cur_arr_pos = (t-1)%8;
                     if(cur_vec[(t-1)/8]&perm_lut8[cur_arr_pos]){
                          
@@ -610,22 +615,26 @@ inline void BlockProcess::get_perm(vector<uint32_t> perm, int n,vector<variant_d
         // cout << v_vcf_data_compress[j].pos << " " << v_vcf_data_compress[j].ref << endl;
     }
 }
+void BlockProcess::AddGtBlock(fixed_field_block &_fixed_field_block_io, vector<bool> &_all_zeros, vector<bool> &_all_copies, vector<uint32_t> &_comp_pos_copy,
+                              vector<bool> &_zeros_only, vector<bool> &_copies, vector<uint32_t> &_origin_of_copy, vector<uint8_t> &_samples_indexes)
+{
+
+    for (size_t i = 0; i < _origin_of_copy.size(); i++)
+    {
+        _origin_of_copy[i] += _all_zeros.size();
+    }
+
+    _all_zeros.insert(_all_zeros.end(), _zeros_only.begin(), _zeros_only.end());
+    _all_copies.insert(_all_copies.end(), _copies.begin(), _copies.end());
+    _comp_pos_copy.insert(_comp_pos_copy.end(), _origin_of_copy.begin(), _origin_of_copy.end());
+    _fixed_field_block_io.gt_block.insert(_fixed_field_block_io.gt_block.end(), _samples_indexes.begin(), _samples_indexes.end());
+}
 void BlockProcess::addSortFieldBlock(fixed_field_block &_fixed_field_block_io,vector<bool> &_all_zeros,vector<bool> &_all_copies,vector<uint32_t> &_comp_pos_copy,
     
     vector<bool> &_zeros_only, vector<bool> &_copies, vector<uint32_t> &_origin_of_copy,vector<uint8_t> &_samples_indexes,vector<variant_desc_t> &_v_vcf_data_io,int64_t &prev_pos)
 {         
 
-    for(size_t i = 0 ;i < _origin_of_copy.size(); i++)
-    {
-       
-        _origin_of_copy[i] += _all_zeros.size();
-        //  cout<<"_origin_of_copy[i]:"<<_origin_of_copy[i]<<endl;
-
-    }
-    _all_zeros.insert(_all_zeros.end(),_zeros_only.begin(),_zeros_only.end());
-    _all_copies.insert(_all_copies.end(),_copies.begin(),_copies.end());
-    _comp_pos_copy.insert(_comp_pos_copy.end(),_origin_of_copy.begin(),_origin_of_copy.end());
-    _fixed_field_block_io.gt_block.insert(_fixed_field_block_io.gt_block.end(), _samples_indexes.begin(), _samples_indexes.end());
+    AddGtBlock(_fixed_field_block_io, _all_zeros, _all_copies, _comp_pos_copy, _zeros_only, _copies, _origin_of_copy, _samples_indexes);
     // start += _zeros_only.size();
     // cout<<"_zeros_only.size():"<<_zeros_only.size()<<":"<<start<<endl;
     _fixed_field_block_io.no_variants += _v_vcf_data_io.size();

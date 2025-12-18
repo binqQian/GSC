@@ -175,26 +175,28 @@ bool Decompressor::analyzeInputRange(uint32_t & start_chunk_id,uint32_t & end_ch
 }
 bool Decompressor::initDecompression(DecompressionReader &decompression_reader){
 
-    standard_block_size = decompression_reader.n_samples *(uint32_t)decompression_reader.ploidy;
-    max_stored_unique = standard_block_size*2;
+    haplotype_count = decompression_reader.n_samples * (uint32_t)decompression_reader.ploidy;
+    row_block_size = decompression_reader.max_block_rows ? decompression_reader.max_block_rows : haplotype_count;
+    standard_block_size = row_block_size;
+    max_stored_unique = standard_block_size * 2;
 
-    if(standard_block_size < 1024)
+    if(row_block_size < 1024)
     {
         chunk_size = CHUNK_SIZE1;
     }
-    else if(standard_block_size < 4096 )
+    else if(row_block_size < 4096 )
     {
         chunk_size = CHUNK_SIZE2;
     }
-    else if(standard_block_size < 8192)
+    else if(row_block_size < 8192)
     {
         chunk_size = CHUNK_SIZE3;
     }
     else
     {
-        chunk_size = standard_block_size;
+        chunk_size = row_block_size;
     }
-    params.no_blocks = chunk_size/standard_block_size;
+    params.no_blocks = chunk_size / row_block_size;
     rrr_rank_zeros_bit_vector[0] = sdsl::rrr_vector<>::rank_1_type(&decompression_reader.rrr_zeros_bit_vector[0]);
     rrr_rank_zeros_bit_vector[1] = sdsl::rrr_vector<>::rank_1_type(&decompression_reader.rrr_zeros_bit_vector[1]);
     rrr_rank_copy_bit_vector[0] = sdsl::rrr_vector<>::rank_1_type(&decompression_reader.rrr_copy_bit_vector[0]);
@@ -204,7 +206,7 @@ bool Decompressor::initDecompression(DecompressionReader &decompression_reader){
         decomp_data_perm = new uint8_t[decompression_reader.vec_len * 2];
         zeros_only_vector = new uint8_t[decompression_reader.vec_len]();
     }
-    int no_haplotypes = standard_block_size;
+    int no_haplotypes = haplotype_count;
     if (params.samples != ""){
         no_haplotypes = smpl.no_samples * decompression_reader.ploidy;
         uint64_t bv_size = decompression_reader.rrr_zeros_bit_vector[0].size();
@@ -231,10 +233,10 @@ bool Decompressor::initDecompression(DecompressionReader &decompression_reader){
     } 
     else
     {
-        if(standard_block_size & 7)//%8)
+        if(haplotype_count & 7)//%8)
         {
             full_byte_count = decompression_reader.vec_len - 1;
-            trailing_bits = standard_block_size & 7;//%8;
+            trailing_bits = haplotype_count & 7;//%8;
         }
         else
         {
@@ -1043,6 +1045,11 @@ bool Decompressor::SetVariant(variant_desc_t &desc, vector<uint8_t> &_my_str, si
 int Decompressor::BedFormatDecompress(){
 
     auto logger = LogManager::Instance().Logger();
+    if (!decompression_reader.useLegacyPath)
+    {
+        logger->error("BED output is not yet supported for tiled GT blocks.");
+        return 1;
+    }
     done_unique.clear();
     stored_unique.clear();
     uint32_t cur_block_id = 0;
@@ -1073,7 +1080,7 @@ int Decompressor::BedFormatDecompress(){
             decoded_vector_row(cur_vec_id++, 0, curr_non_copy_vec_id_offset, decompression_reader.vec_len, 0, decomp_data_perm);
             decoded_vector_row(cur_vec_id++, 0, curr_non_copy_vec_id_offset, decompression_reader.vec_len, vec2_start, decomp_data_perm);
 
-            decode_perm_rev(vec2_start, sort_perm_io[cur_block_id], decomp_data_perm, decomp_data);
+            decode_perm_rev(vec2_start, sort_perm_io[cur_block_id][0], decomp_data_perm, decomp_data);
             
             
             for (vec1_start = 0; vec1_start < full_byte_count; ++vec1_start)
@@ -1136,7 +1143,7 @@ int Decompressor::BedFormatDecompress(){
     if(no_var % standard_block_size)
     {
         cur_block_id = cur_var / standard_block_size;            
-        // reverse_perm(sort_perm_io[cur_block_id], rev_perm, standard_block_size);  //2024.1.16
+        // reverse_perm(sort_perm_io[cur_block_id][0], rev_perm, standard_block_size);  //2024.1.16
         
         for(;cur_var < no_var;++cur_var){
             vec2_start = decompression_reader.vec_len;
@@ -1144,14 +1151,14 @@ int Decompressor::BedFormatDecompress(){
             decoded_vector_row(cur_vec_id++, 0, curr_non_copy_vec_id_offset, decompression_reader.vec_len, 0, decomp_data_perm);
             decoded_vector_row(cur_vec_id++, 0, curr_non_copy_vec_id_offset, decompression_reader.vec_len, vec2_start, decomp_data_perm);
             // if(!(no_var%standard_block_size))
-            //     decode_perm_rev(vec2_start, sort_perm_io[cur_block_id], decomp_data_perm, decomp_data);
+            //     decode_perm_rev(vec2_start, sort_perm_io[cur_block_id][0], decomp_data_perm, decomp_data);
             // else
             //     memcpy(decomp_data, decomp_data_perm, decompression_reader.vec_len*2);
 
             // for(int i = 0;i<rev_perm.size();i++)
             //     std::cerr<<rev_perm[i]<<" ";
             // std::cerr<<endl;
-            decode_perm_rev(vec2_start, sort_perm_io[cur_block_id], decomp_data_perm, decomp_data);//2024.1.16 rev_perm ---> sort_perm_io[cur_block_id]
+            decode_perm_rev(vec2_start, sort_perm_io[cur_block_id][0], decomp_data_perm, decomp_data);//2024.1.16 rev_perm ---> sort_perm_io[cur_block_id][0]
             for (vec1_start = 0; vec1_start < full_byte_count; ++vec1_start)
             {
                 lookup_table_ptr = (long long *)(gt_lookup_table[decomp_data[vec1_start]][decomp_data[vec2_start++]]);
@@ -1215,7 +1222,119 @@ int Decompressor::BedFormatDecompress(){
 }
 
 //*****************************************************************************************************************
+void Decompressor::insert_block_bits(uint8_t *dest, const uint8_t *src, uint32_t dest_vec_len, uint32_t start_hap, uint32_t block_hap)
+{
+    if (!block_hap)
+        return;
+    uint32_t src_vec_len = (block_hap + 7) / 8;
+    uint32_t byte_offset = start_hap / 8;
+    uint32_t bit_offset = start_hap % 8;
+    if (bit_offset == 0)
+    {
+        memcpy(dest + byte_offset, src, src_vec_len);
+        return;
+    }
+    for (uint32_t bit = 0; bit < block_hap; ++bit)
+    {
+        uint32_t src_byte = bit / 8;
+        uint32_t dest_bit = start_hap + bit;
+        if (src[src_byte] & perm_lut8[bit % 8])
+            dest[dest_bit / 8] |= perm_lut8[dest_bit % 8];
+    }
+}
+
+//*****************************************************************************************************************
+int Decompressor::decompressAllTiled()
+{
+    auto logger = LogManager::Instance().Logger();
+    done_unique.clear();
+    stored_unique.clear();
+    fields_pos = 0;
+
+    const uint32_t n_col_blocks = decompression_reader.n_col_blocks;
+    const uint32_t full_vec_len = decompression_reader.vec_len;
+    const uint32_t row_block_variants = row_block_size ? row_block_size : haplotype_count;
+
+    if (!n_col_blocks || !row_block_variants)
+    {
+        logger->error("Invalid tiling metadata (n_col_blocks={}, row_block_variants={})", n_col_blocks, row_block_variants);
+        return 1;
+    }
+
+    vector<uint8_t> my_str(haplotype_count);
+
+    uint64_t start_pair_id = static_cast<uint64_t>(start_chunk_actual_pos) * n_col_blocks;
+    uint64_t curr_non_copy_vec_id_offset = start_pair_id * 2 - rrr_rank_zeros_bit_vector[0](start_pair_id) -
+                                           rrr_rank_zeros_bit_vector[1](start_pair_id) - rrr_rank_copy_bit_vector[0](start_pair_id) -
+                                           rrr_rank_copy_bit_vector[1](start_pair_id);
+
+    uint64_t max_col_vec_len = 0;
+    for (auto len : decompression_reader.col_block_vec_lens)
+        if (len > max_col_vec_len)
+            max_col_vec_len = len;
+    vector<uint8_t> col_decomp_perm(max_col_vec_len * 2);
+    vector<uint8_t> col_decomp(max_col_vec_len * 2);
+
+    uint64_t pair_base = start_pair_id;
+    for (size_t block_id = 0; block_id < fixed_variants_chunk_io.size(); ++block_id)
+    {
+        const uint32_t block_variants = static_cast<uint32_t>(fixed_variants_chunk_io[block_id].data_compress.size());
+        for (uint32_t var_in_block = 0; var_in_block < block_variants; ++var_in_block)
+        {
+            fill_n(decomp_data, full_vec_len * 2, 0);
+            for (uint32_t cb = 0; cb < n_col_blocks; ++cb)
+            {
+                const uint32_t col_block_size = decompression_reader.col_block_ranges[cb].second;
+                const uint32_t col_vec_len = static_cast<uint32_t>(decompression_reader.col_block_vec_lens[cb]);
+                const uint64_t pair_index = pair_base + static_cast<uint64_t>(cb) * block_variants + var_in_block;
+
+                fill_n(col_decomp_perm.data(), col_vec_len * 2, 0);
+                decoded_vector_row(pair_index * 2, 0, curr_non_copy_vec_id_offset, col_vec_len, 0, col_decomp_perm.data());
+                decoded_vector_row(pair_index * 2 + 1, 0, curr_non_copy_vec_id_offset, col_vec_len, col_vec_len, col_decomp_perm.data());
+
+                fill_n(col_decomp.data(), col_vec_len * 2, 0);
+                decode_perm_rev(col_vec_len, col_vec_len, col_block_size, sort_perm_io[block_id][cb],
+                                col_decomp_perm.data(), col_decomp.data());
+
+                const uint32_t start_hap = decompression_reader.col_block_ranges[cb].first;
+                insert_block_bits(decomp_data, col_decomp.data(), full_vec_len, start_hap, col_block_size);
+                insert_block_bits(decomp_data + full_vec_len, col_decomp.data() + col_vec_len, full_vec_len, start_hap, col_block_size);
+            }
+
+            int vec1_start;
+            int vec2_start = full_vec_len;
+            for (vec1_start = 0; vec1_start < full_byte_count; ++vec1_start)
+            {
+                lookup_table_ptr = (long long *)(gt_lookup_table[decomp_data[vec1_start]][decomp_data[vec2_start++]]);
+                tmp_arr[vec1_start] = *lookup_table_ptr;
+            }
+            memcpy(my_str.data(), tmp_arr, full_byte_count << 3);
+            if (trailing_bits)
+                memcpy(my_str.data() + (full_byte_count << 3), gt_lookup_table[decomp_data[vec1_start]][decomp_data[vec2_start]], trailing_bits);
+
+            variant_desc_t desc = fixed_variants_chunk_io[block_id].data_compress[var_in_block];
+            SetVariantToRec(desc, all_fields_io[fields_pos], decompression_reader.keys, my_str, haplotype_count);
+        }
+        pair_base += static_cast<uint64_t>(block_variants) * n_col_blocks;
+    }
+
+    if (cur_chunk_id == end_chunk_id && count)
+        appendVCFToRec(temp_desc, genotype, static_cast<uint32_t>(haplotype_count), temp_fields, decompression_reader.keys);
+
+    logger->info("Processed chunk {}", cur_chunk_id);
+
+    for (auto &it : done_unique)
+        delete[] it.second;
+    done_unique.clear();
+
+    return 0;
+}
+
+//*****************************************************************************************************************
 int Decompressor::decompressAll(){
+
+    if (!decompression_reader.useLegacyPath)
+        return decompressAllTiled();
 
     auto logger = LogManager::Instance().Logger();
     done_unique.clear();
@@ -1247,7 +1366,7 @@ int Decompressor::decompressAll(){
             decoded_vector_row(cur_vec_id++, 0, curr_non_copy_vec_id_offset, decompression_reader.vec_len, 0, decomp_data_perm);
             decoded_vector_row(cur_vec_id++, 0, curr_non_copy_vec_id_offset, decompression_reader.vec_len, vec2_start, decomp_data_perm);
 
-            decode_perm_rev(vec2_start, sort_perm_io[cur_block_id], decomp_data_perm, decomp_data);
+            decode_perm_rev(vec2_start, sort_perm_io[cur_block_id][0], decomp_data_perm, decomp_data);
             
             for (vec1_start = 0; vec1_start < full_byte_count; ++vec1_start)
             {
@@ -1270,7 +1389,7 @@ int Decompressor::decompressAll(){
     if(no_var % standard_block_size)
     {
         cur_block_id = cur_var / standard_block_size;            
-        // reverse_perm(sort_perm_io[cur_block_id], rev_perm, standard_block_size); //2024.1.16
+        // reverse_perm(sort_perm_io[cur_block_id][0], rev_perm, standard_block_size); //2024.1.16
         
         for(;cur_var < no_var;++cur_var){
             vec2_start = decompression_reader.vec_len;
@@ -1278,14 +1397,14 @@ int Decompressor::decompressAll(){
             decoded_vector_row(cur_vec_id++, 0, curr_non_copy_vec_id_offset, decompression_reader.vec_len, 0, decomp_data_perm);
             decoded_vector_row(cur_vec_id++, 0, curr_non_copy_vec_id_offset, decompression_reader.vec_len, vec2_start, decomp_data_perm);
             // if(!(no_var%standard_block_size))
-            //     decode_perm_rev(vec2_start, sort_perm_io[cur_block_id], decomp_data_perm, decomp_data);
+            //     decode_perm_rev(vec2_start, sort_perm_io[cur_block_id][0], decomp_data_perm, decomp_data);
             // else
             //     memcpy(decomp_data, decomp_data_perm, decompression_reader.vec_len*2);
 
             // for(int i = 0;i<rev_perm.size();i++)
             //     std::cerr<<rev_perm[i]<<" ";
             // std::cerr<<endl;
-            decode_perm_rev(vec2_start, sort_perm_io[cur_block_id], decomp_data_perm, decomp_data); //2024.1.16 rev_perm ---> sort_perm_io[cur_block_id]
+            decode_perm_rev(vec2_start, sort_perm_io[cur_block_id][0], decomp_data_perm, decomp_data); //2024.1.16 rev_perm ---> sort_perm_io[cur_block_id][0]
             for (vec1_start = 0; vec1_start < full_byte_count; ++vec1_start)
             {
                 lookup_table_ptr = (long long *)(gt_lookup_table[decomp_data[vec1_start]][decomp_data[vec2_start++]]);
@@ -1327,6 +1446,11 @@ int Decompressor::decompressRange(const string &range)
 {
 
     auto logger = LogManager::Instance().Logger();
+    if (!decompression_reader.useLegacyPath)
+    {
+        logger->error("Range decoding is not yet supported for tiled GT blocks.");
+        return 1;
+    }
     done_unique.clear();
     stored_unique.clear();
     uint32_t cur_block_id = 0;
@@ -1350,13 +1474,13 @@ int Decompressor::decompressRange(const string &range)
         for (cur_var = start_var; cur_var + standard_block_size <= no_var; cur_var += standard_block_size )
         {
             cur_block_id = cur_var / standard_block_size;
-            // reverse_perm(sort_perm_io[cur_block_id], rev_perm, standard_block_size);
+            // reverse_perm(sort_perm_io[cur_block_id][0], rev_perm, standard_block_size);
             for(size_t i = 0; i < standard_block_size; i++){
                 vec2_start = decompression_reader.vec_len;
                 fill_n(decomp_data, decompression_reader.vec_len*2, 0);
                 decoded_vector_row(cur_vec_id++, 0, curr_non_copy_vec_id_offset, decompression_reader.vec_len, 0, decomp_data_perm);
                 decoded_vector_row(cur_vec_id++, 0, curr_non_copy_vec_id_offset, decompression_reader.vec_len, vec2_start, decomp_data_perm);
-                decode_perm_rev(vec2_start, sort_perm_io[cur_block_id], decomp_data_perm, decomp_data);
+                decode_perm_rev(vec2_start, sort_perm_io[cur_block_id][0], decomp_data_perm, decomp_data);
             
                 for (vec1_start = 0; vec1_start < full_byte_count; ++vec1_start)
                 {
@@ -1409,7 +1533,7 @@ int Decompressor::decompressRange(const string &range)
         {
             cur_block_id = cur_var / standard_block_size;
                            
-            // reverse_perm(sort_perm_io[cur_block_id], rev_perm, standard_block_size); 
+            // reverse_perm(sort_perm_io[cur_block_id][0], rev_perm, standard_block_size); 
     
             for(;cur_var < no_var;++cur_var){
                 vec2_start = decompression_reader.vec_len;
@@ -1417,11 +1541,11 @@ int Decompressor::decompressRange(const string &range)
                 decoded_vector_row(cur_vec_id++, 0, curr_non_copy_vec_id_offset, decompression_reader.vec_len, 0, decomp_data_perm);
                 decoded_vector_row(cur_vec_id++, 0, curr_non_copy_vec_id_offset, decompression_reader.vec_len, vec2_start, decomp_data_perm);
                 // if(!(no_var%standard_block_size))
-                //     decode_perm_rev(vec2_start, sort_perm_io[cur_block_id], decomp_data_perm, decomp_data);
+                //     decode_perm_rev(vec2_start, sort_perm_io[cur_block_id][0], decomp_data_perm, decomp_data);
                 // else
                 //     memcpy(decomp_data, decomp_data_perm, decompression_reader.vec_len*2);
 
-                decode_perm_rev(vec2_start, sort_perm_io[cur_block_id], decomp_data_perm, decomp_data); //2024.1.16 rev_perm ---> sort_perm_io[cur_block_id]
+                decode_perm_rev(vec2_start, sort_perm_io[cur_block_id][0], decomp_data_perm, decomp_data); //2024.1.16 rev_perm ---> sort_perm_io[cur_block_id][0]
                 for (vec1_start = 0; vec1_start < full_byte_count; ++vec1_start)
                 {
                     lookup_table_ptr = (long long *)(gt_lookup_table[decomp_data[vec1_start]][decomp_data[vec2_start++]]);
@@ -1511,8 +1635,8 @@ int Decompressor::decompressRange(const string &range)
 
             cur_block_id = cur_var / standard_block_size;
             // if(fixed_variants_chunk_io[cur_block_id].data_compress.size() != standard_block_size && tail_flag){
-            //     reverse_perm(sort_perm_io[cur_block_id], rev_perm, standard_block_size);
-            //     sort_perm_io[cur_block_id] = rev_perm;
+            //     reverse_perm(sort_perm_io[cur_block_id][0], rev_perm, standard_block_size);
+            //     sort_perm_io[cur_block_id][0] = rev_perm;
             //     tail_flag = false;
             // }                                
             
@@ -1524,7 +1648,7 @@ int Decompressor::decompressRange(const string &range)
             //     
             // else
             //     memcpy(decomp_data, decomp_data_perm, decompression_reader.vec_len*2);
-            decode_perm_rev(vec2_start, sort_perm_io[cur_block_id], decomp_data_perm, decomp_data);
+            decode_perm_rev(vec2_start, sort_perm_io[cur_block_id][0], decomp_data_perm, decomp_data);
             for (vec1_start = 0; vec1_start < full_byte_count; ++vec1_start)
             {
                 lookup_table_ptr = (long long *)(gt_lookup_table[decomp_data[vec1_start]][decomp_data[vec2_start++]]);
@@ -1588,6 +1712,11 @@ int Decompressor::decompressRange(const string &range)
 int Decompressor::decompressSampleSmart(const string &range)
 {
     auto logger = LogManager::Instance().Logger();
+    if (!decompression_reader.useLegacyPath)
+    {
+        logger->error("Sample decoding is not yet supported for tiled GT blocks.");
+        return 1;
+    }
     
     uint32_t no_var;
 
@@ -1685,9 +1814,9 @@ int Decompressor::decompressSampleSmart(const string &range)
                 }
                 unique_pos_first_in_block = first_vec_in_block - curr_zeros - curr_copy - curr_non_copy_vec_id_offset;
                 // if(fixed_variants_chunk_io[cur_block_id].data_compress.size() != standard_block_size) 
-                //     rev_perm = sort_perm_io[cur_block_id];
+                //     rev_perm = sort_perm_io[cur_block_id][0];
                 // else
-                reverse_perm(sort_perm_io[cur_block_id], rev_perm, standard_block_size);
+                reverse_perm(sort_perm_io[cur_block_id][0], rev_perm, standard_block_size);
 
             //                 for(int i = 0;i<rev_perm.size();i++)
             //     std::cerr<<rev_perm[i]<<" ";
@@ -1826,9 +1955,9 @@ int Decompressor::decompressSampleSmart(const string &range)
 
                 unique_pos_first_in_block = first_vec_in_block - curr_zeros - curr_copy - curr_non_copy_vec_id_offset;
                 // if(fixed_variants_chunk_io[cur_block_id].data_compress.size() != standard_block_size)  
-                //     rev_perm = sort_perm_io[cur_block_id];                                                  
+                //     rev_perm = sort_perm_io[cur_block_id][0];                                                  
                 // else
-                reverse_perm(sort_perm_io[cur_block_id], rev_perm, standard_block_size);
+                reverse_perm(sort_perm_io[cur_block_id][0], rev_perm, standard_block_size);
 
                 for (uint32_t s = 0; s < smpl.no_samples; s++)
                 {
@@ -2624,7 +2753,7 @@ void Decompressor::decoded_vector_row(uint64_t vec_id, uint64_t offset, uint64_t
     if (decompression_reader.rrr_zeros_bit_vector[parity][id])
     {
 
-        memcpy(decomp_data + pos, zeros_only_vector, decompression_reader.vec_len);
+        memcpy(decomp_data + pos, zeros_only_vector, length);
 
         // pos += decompression_reader.vec_len;
         
@@ -2648,7 +2777,7 @@ void Decompressor::decoded_vector_row(uint64_t vec_id, uint64_t offset, uint64_t
         
         if (got_it != done_unique.end())
         {
-            memcpy(decomp_data + pos, got_it->second, decompression_reader.vec_len);
+            memcpy(decomp_data + pos, got_it->second, length);
             // pos += decompression_reader.vec_len;
             return;
         }
@@ -2661,8 +2790,8 @@ void Decompressor::decoded_vector_row(uint64_t vec_id, uint64_t offset, uint64_t
 
         
     }
-    uint8_t *cur_decomp_data = new uint8_t[decompression_reader.vec_len];
-    fill_n(cur_decomp_data, decompression_reader.vec_len, 0);
+    uint8_t *cur_decomp_data = new uint8_t[length];
+    fill_n(cur_decomp_data, length, 0);
   
     if (curr_non_copy_vec_id == 0)
         index_start = 0;
@@ -2684,7 +2813,7 @@ void Decompressor::decoded_vector_row(uint64_t vec_id, uint64_t offset, uint64_t
         cur_decomp_data[cur_id] += perm_lut8[cur_pos];
     }
 
-    memcpy(decomp_data + pos, cur_decomp_data, decompression_reader.vec_len);
+    memcpy(decomp_data + pos, cur_decomp_data, length);
     // pos += decompression_reader.vec_len;
 
     if (max_stored_unique)
@@ -2700,9 +2829,9 @@ void Decompressor::decoded_vector_row(uint64_t vec_id, uint64_t offset, uint64_t
         }
         else
         {
-            vector = new uint8_t[decompression_reader.vec_len];
+            vector = new uint8_t[length];
         }
-        memcpy(vector, decomp_data + pos ,decompression_reader.vec_len);
+        memcpy(vector, decomp_data + pos ,length);
 
         done_unique[curr_non_copy_vec_id] = vector;
         stored_unique.push_front(curr_non_copy_vec_id);
@@ -2714,11 +2843,18 @@ void Decompressor::decoded_vector_row(uint64_t vec_id, uint64_t offset, uint64_t
 // *****************************************************************************************************************
 void Decompressor::decode_perm_rev(int vec2_start, const vector<uint32_t> &rev_perm, uint8_t *decomp_data_perm, uint8_t *decomp_data) 
 {
-    
-    for(int i = 0;i<(int)decompression_reader.vec_len*2;i++)
+    decode_perm_rev(vec2_start, decompression_reader.vec_len, standard_block_size, rev_perm, decomp_data_perm, decomp_data);
+}
+
+// *****************************************************************************************************************
+void Decompressor::decode_perm_rev(int vec2_start, size_t vec_len, size_t block_haplotypes, const vector<uint32_t> &rev_perm,
+                                   uint8_t *decomp_data_perm, uint8_t *decomp_data)
+{
+
+    for (size_t i = 0; i < vec_len * 2; i++)
         decomp_data_perm[i] = map_t256[decomp_data_perm[i]];
     size_t x;
-    for (x = 0; x + 8 < standard_block_size;)
+    for (x = 0; x + 8 < block_haplotypes;)
     {
         int x8 = x / 8;
         int d_x8 = decomp_data_perm[x8];
@@ -2729,7 +2865,7 @@ void Decompressor::decode_perm_rev(int vec2_start, const vector<uint32_t> &rev_p
             continue;
         }
 
-        int x_p = 1 << 7;   
+        int x_p = 1 << 7;
         for (int i = 0; i < 8; ++i, ++x, x_p >>= 1)
         {
             auto j = rev_perm[x];
@@ -2744,8 +2880,8 @@ void Decompressor::decode_perm_rev(int vec2_start, const vector<uint32_t> &rev_p
     int x8 = x / 8;
     uint8_t d_x8 = decomp_data_perm[x8];
     uint8_t d2_x8 = decomp_data_perm[vec2_start + x8];
-    
-    for (; x < standard_block_size; ++x)
+
+    for (; x < block_haplotypes; ++x)
     {
         auto j = rev_perm[x];
         uint8_t x_p = perm_lut8[x % 8];
@@ -2756,9 +2892,8 @@ void Decompressor::decode_perm_rev(int vec2_start, const vector<uint32_t> &rev_p
         if (d2_x8 & x_p)
             decomp_data[vec2_start + j8] += j_p;
     }
-    
-}
 
+}
 // *****************************************************************************************************************
 void inline Decompressor::reverse_perm(const vector<uint32_t> &perm, vector<uint32_t> &rev_perm, int no_haplotypes)
 {

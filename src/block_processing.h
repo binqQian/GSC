@@ -137,6 +137,7 @@ class BlockProcess
     uint32_t no_copy;
     uint32_t no_samples_index;
     uint8_t *data = nullptr;
+    uint32_t cur_vec_len = 0;
     uint32_t perm_lut8[8];
     uint64_t perm_lut64[64];
     uint64_t start = 0;
@@ -152,6 +153,7 @@ public:
     {
         params = _params;
         no_copy = 0;
+        cur_vec_len = params.vec_len;
         // prev_pos = 0;
         no_samples_index = 0;
         for (int i = 0; i < 8; ++i)
@@ -164,13 +166,14 @@ public:
       
     }
     void SetCurBlock(uint64_t _cur_no_vec, uint8_t *cur_data);
-    void ProcessSquareBlock(vector<uint32_t> &perm,vector<bool> &zeros, vector<bool> &copies, vector<uint32_t> &origin_of_copy, vector<uint8_t> &samples_indexes, bool permute = true);
+    void ProcessSquareBlock(uint32_t col_block_size, uint32_t col_vec_len, vector<uint32_t> &perm,vector<bool> &zeros, vector<bool> &copies, vector<uint32_t> &origin_of_copy, vector<uint8_t> &samples_indexes, bool permute = true);
     void ProcessLastBlock(vector<bool> &zeros, vector<bool> &copies, vector<uint32_t> &origin_of_copy, vector<uint8_t> &samples_indexes);
     void ProcessVariant(vector<uint32_t> &perm,vector<variant_desc_t> &v_vcf_data_io);
+    void AddGtBlock(fixed_field_block &fixed_field_block_io, vector<bool> &all_zeros, vector<bool> &all_copies, vector<uint32_t> &comp_pos_copy,
+                    vector<bool> &zeros_only, vector<bool> &copies, vector<uint32_t> &origin_of_copy, vector<uint8_t> &samples_indexes);
     // void ProcessLastPerm(vector<uint32_t> &perm,vector<vector<uint8_t>> &_vint_last_perm);
     void addSortFieldBlock(fixed_field_block &_fixed_field_block_io,vector<bool> &_all_zeros,vector<bool> &_all_copies,vector<uint32_t> &_comp_pos_copy,
     vector<bool> &_zeros_only, vector<bool> &_copies, vector<uint32_t> &_origin_of_copy,vector<uint8_t> &_samples_indexes,vector<variant_desc_t> &_v_vcf_data_io,int64_t &prev_pos);
     // void addSortFieldBlock(sort_field_block &sort_fixed_field_block_io,vector<bool> &_all_zeros,vector<bool> &_all_copies,vector<uint32_t> &_comp_pos_copy,
     // vector<bool> &_zeros_only, vector<bool> &_copies, vector<uint32_t> &_origin_of_copy,vector<uint8_t> &_samples_indexes,FieldsPackage &fields_pck,int64_t &prev_pos);
 };
-

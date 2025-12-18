@@ -2,14 +2,14 @@
 #include "logger.h"
 #include <iostream>
 
-
 // **************************************************************************************************
-//write the compressed file
+// write the compressed file
 bool Compressor::writeCompressFlie()
 {
     auto logger = LogManager::Instance().Logger();
-    const char* backend_name = "bsc";
-    switch (params.backend) {
+    const char *backend_name = "bsc";
+    switch (params.backend)
+    {
     case compression_backend_t::bsc:
         backend_name = "bsc";
         break;
@@ -28,12 +28,14 @@ bool Compressor::writeCompressFlie()
     uint32_t chunks_streams_size = static_cast<uint32_t>(chunks_streams.size());
     fwrite(&chunks_streams_size, sizeof(uint32_t), 1, comp);
 
-    for(auto cur_chunk:chunks_streams)
+    for (auto cur_chunk : chunks_streams)
     {
         fwrite(&cur_chunk.second.cur_chunk_actual_pos, sizeof(uint32_t), 1, comp);
         fwrite(&cur_chunk.second.offset, sizeof(size_t), 1, comp);
     }
     fwrite(&params.ploidy, sizeof(uint8_t), 1, comp);
+    fwrite(&params.max_block_rows, sizeof(uint32_t), 1, comp);
+    fwrite(&params.max_block_cols, sizeof(uint32_t), 1, comp);
 
     fwrite(&params.vec_len, sizeof(params.vec_len), 1, comp);
 
@@ -48,7 +50,7 @@ bool Compressor::writeCompressFlie()
     fwrite(&params.n_samples, sizeof(params.n_samples), 1, comp);
 
     uint32_t chunks_min_pos_size = static_cast<uint32_t>(chunks_min_pos.size());
-    fwrite(&chunks_min_pos_size,sizeof(uint32_t) , 1, comp);
+    fwrite(&chunks_min_pos_size, sizeof(uint32_t), 1, comp);
     fwrite(&chunks_min_pos[0], sizeof(int64_t), chunks_min_pos_size, comp);
 
     fwrite(&where_chrom_size, sizeof(uint32_t), 1, comp);
@@ -60,20 +62,49 @@ bool Compressor::writeCompressFlie()
         fwrite(elem.first.data(), sizeof(char), chrom_size, comp);
         fwrite(&elem.second, sizeof(int), 1, comp);
     }
-    uint32_t vint_last_perm_size = static_cast<uint32_t>(vint_last_perm.size());
-    fwrite(&vint_last_perm_size, sizeof(uint32_t), 1, comp);
-    for (const auto &data : vint_last_perm)
-    {
 
-        fwrite(&data.first, sizeof(uint32_t), 1, comp);
-        uint32_t data_size = static_cast<uint32_t>(data.second.size());
-        fwrite(&data_size, sizeof(uint32_t), 1, comp);
-        fwrite(data.second.data(), sizeof(uint8_t), data_size, comp);
+    // Write GT column tiling metadata
+    fwrite(&n_col_blocks, sizeof(uint32_t), 1, comp);
+    for (uint32_t cb = 0; cb < n_col_blocks; ++cb)
+    {
+        uint32_t start_hap = cb * max_block_cols;
+        uint32_t block_size = col_block_sizes[cb];
+        fwrite(&start_hap, sizeof(uint32_t), 1, comp);
+        fwrite(&block_size, sizeof(uint32_t), 1, comp);
+    }
+
+    // Write permutations (legacy: chunk-based last block only, tiled: per row/col block)
+    if (!use_legacy_perm)
+    {
+        // New format: 2D permutations
+        uint32_t vint_last_perm_size = static_cast<uint32_t>(vint_last_perm_2d.size());
+        fwrite(&vint_last_perm_size, sizeof(uint32_t), 1, comp);
+        for (auto it = vint_last_perm_2d.begin(); it != vint_last_perm_2d.end(); ++it)
+        {
+            fwrite(&it->first.first, sizeof(uint32_t), 1, comp);  // row_block_id
+            fwrite(&it->first.second, sizeof(uint32_t), 1, comp); // col_block_id
+            uint32_t data_size = static_cast<uint32_t>(it->second.size());
+            fwrite(&data_size, sizeof(uint32_t), 1, comp);
+            fwrite(it->second.data(), sizeof(uint8_t), data_size, comp);
+        }
+    }
+    else
+    {
+        // Legacy format: write row_block_id and data size only (no col_block_id)
+        uint32_t vint_last_perm_size = static_cast<uint32_t>(vint_last_perm.size());
+        fwrite(&vint_last_perm_size, sizeof(uint32_t), 1, comp);
+        for (const auto &data : vint_last_perm)
+        {
+            fwrite(&data.first, sizeof(uint32_t), 1, comp); // row_block_id (chunk_id in legacy)
+            uint32_t data_size = static_cast<uint32_t>(data.second.size());
+            fwrite(&data_size, sizeof(uint32_t), 1, comp);
+            fwrite(data.second.data(), sizeof(uint8_t), data_size, comp);
+        }
     }
 
     bm_comp_copy_orgl_id.Close();
     Meta_comp_size += comp_v_header.size();
-    uint32_t  comp_size = static_cast<uint32_t>(comp_v_header.size());
+    uint32_t comp_size = static_cast<uint32_t>(comp_v_header.size());
     fwrite(&comp_size, sizeof(uint32_t), 1, comp);
     fwrite(comp_v_header.data(), 1, comp_v_header.size(), comp);
 
@@ -81,20 +112,23 @@ bool Compressor::writeCompressFlie()
     comp_size = static_cast<uint32_t>(comp_v_samples.size());
     fwrite(&comp_size, sizeof(uint32_t), 1, comp);
     fwrite(comp_v_samples.data(), 1, comp_v_samples.size(), comp);
-    
+
     uint64_t size;
     uint8_t *temp_buffer = NULL;
-    while (fread(&size, sizeof(size), 1, temp_file) == 1) { 
-        chunks_streams[curr_no_blocks+1].offset = ftell(comp);
-        
-        temp_buffer = (uint8_t*)realloc(temp_buffer, size);
-        if (!temp_buffer) {
+    while (fread(&size, sizeof(size), 1, temp_file) == 1)
+    {
+        chunks_streams[curr_no_blocks + 1].offset = ftell(comp);
+
+        temp_buffer = (uint8_t *)realloc(temp_buffer, size);
+        if (!temp_buffer)
+        {
             perror("Memory allocation failed");
             fclose(temp_file);
             return 1;
         }
 
-        if (fread(temp_buffer, 1, size, temp_file) != size) { 
+        if (fread(temp_buffer, 1, size, temp_file) != size)
+        {
             perror("Error reading data block");
             free(temp_buffer);
             fclose(temp_file);
@@ -110,13 +144,13 @@ bool Compressor::writeCompressFlie()
     //     assert(fixed_field_block_id == curr_no_blocks);
     //     chunks_streams[curr_no_blocks+1].offset = ftell(comp);
     //     curr_no_blocks++;
-        
+
     //     fwrite(&fixed_field_block_io.no_variants, sizeof(uint32_t), 1, comp);
     //     CHORM_comp_size += fixed_field_block_io.chrom.size();
     //     comp_size = static_cast<uint32_t>(fixed_field_block_io.chrom.size());
     //     fwrite(&comp_size, sizeof(uint32_t), 1, comp);
     //     fwrite(fixed_field_block_io.chrom.data(), 1, fixed_field_block_io.chrom.size(), comp);
-        
+
     //     POS_comp_size += fixed_field_block_io.pos.size();
     //     comp_size = static_cast<uint32_t>(fixed_field_block_io.pos.size());
     //     fwrite(&comp_size, sizeof(uint32_t), 1, comp);
@@ -127,19 +161,16 @@ bool Compressor::writeCompressFlie()
     //     fwrite(&comp_size, sizeof(uint32_t), 1, comp);
     //     fwrite(fixed_field_block_io.id.data(), 1, fixed_field_block_io.id.size(), comp);
 
-
     //     REF_comp_size += fixed_field_block_io.ref.size();
     //     comp_size = static_cast<uint32_t>(fixed_field_block_io.ref.size());
     //     fwrite(&comp_size, sizeof(uint32_t), 1, comp);
     //     fwrite(fixed_field_block_io.ref.data(), 1, fixed_field_block_io.ref.size(), comp);
 
-        
     //     ALT_comp_size += fixed_field_block_io.alt.size();
     //     comp_size = static_cast<uint32_t>(fixed_field_block_io.alt.size());
     //     fwrite(&comp_size, sizeof(uint32_t), 1, comp);
     //     fwrite(fixed_field_block_io.alt.data(), 1, fixed_field_block_io.alt.size(), comp);
 
-        
     //     QUAL_comp_size += fixed_field_block_io.qual.size();
     //     comp_size = static_cast<uint32_t>(fixed_field_block_io.qual.size());
     //     fwrite(&comp_size, sizeof(uint32_t), 1, comp);
@@ -160,43 +191,47 @@ bool Compressor::writeCompressFlie()
     // cout << "GT_index_comp_size:      " << GT_comp_size <<"\tByte"<< endl;
     free(temp_buffer);
     fclose(temp_file);
-    if (remove(temp_file1_fname) != 0) {
+    if (remove(temp_file1_fname) != 0)
+    {
         perror("Error deleting temp1 file");
         return EXIT_FAILURE;
     }
     // remove(temp_file1_fname);
     other_fields_offset = ftell(comp);
 
-	FILE *other_f = fopen(temp_file2_fname.c_str(),"rb"); 
-    
-    if (other_f) {
-     
-        const size_t buffer_size = 1024; 
+    FILE *other_f = fopen(temp_file2_fname.c_str(), "rb");
+
+    if (other_f)
+    {
+
+        const size_t buffer_size = 1024;
         char buffer[buffer_size];
         size_t bytes_read;
-        while ((bytes_read = fread(buffer, 1, buffer_size, other_f)) > 0) {
+        while ((bytes_read = fread(buffer, 1, buffer_size, other_f)) > 0)
+        {
             fwrite(buffer, 1, bytes_read, comp);
         }
         fclose(other_f);
         other_f = nullptr;
-        if (remove(temp_file2_fname.c_str()) != 0) {
+        if (remove(temp_file2_fname.c_str()) != 0)
+        {
             perror("Error deleting temp2 file");
             return EXIT_FAILURE;
         }
 
         mode_type = true;
-    }   
-    
+    }
+
     sdsl_offset = ftell(comp);
-    
+
     // sdsl_offset = end_offset;
     fseek(comp, 0, SEEK_SET);
     fwrite(&mode_type, sizeof(mode_type), 1, comp);
     fwrite(&other_fields_offset, sizeof(other_fields_offset), 1, comp);
     fwrite(&sdsl_offset, sizeof(sdsl_offset), 1, comp);
-    logger->debug("mode_type: {} other_fields_offset: {} sdsl_offset: {}", static_cast<int>(mode_type), other_fields_offset, sdsl_offset);
+    logger->info("mode_type: {} other_fields_offset: {} sdsl_offset: {}", static_cast<int>(mode_type), other_fields_offset, sdsl_offset);
     fseek(comp, 21, SEEK_SET);
-    for(auto cur_chunk:chunks_streams)
+    for (auto cur_chunk : chunks_streams)
     {
         fwrite(&cur_chunk.second.cur_chunk_actual_pos, sizeof(uint32_t), 1, comp);
         fwrite(&cur_chunk.second.offset, sizeof(size_t), 1, comp);
@@ -208,34 +243,43 @@ bool Compressor::writeCompressFlie()
         fclose(comp);
         comp = nullptr;
     }
-    if (is_stdout) {
-     
-        for (int v = 0; v < 2; v++) {
+    if (is_stdout)
+    {
+
+        for (int v = 0; v < 2; v++)
+        {
             sdsl::rrr_vector<> rrr_bit_vector(zeros_only_bit_vector[v]);
             rrr_bit_vector.serialize(std::cout);
             sdsl::util::clear(rrr_bit_vector);
         }
-        for (int v = 0; v < 2; v++) {
+        for (int v = 0; v < 2; v++)
+        {
             sdsl::rrr_vector<> rrr_bit_vector(copy_bit_vector[v]);
             rrr_bit_vector.serialize(std::cout);
             sdsl::util::clear(rrr_bit_vector);
         }
-    } else {
-   
+    }
+    else
+    {
+
         sdsl::osfstream out(fname, std::ios::binary | std::ios::app);
-        if (!out) {
-            if (sdsl::util::verbose) {
+        if (!out)
+        {
+            if (sdsl::util::verbose)
+            {
                 logger->error("ERROR: store_to_file not successful for: `{}`", fname);
             }
             exit(1);
         }
         sdsl::rrr_vector<> rrr_bit_vector[5];
-        for (int v = 0; v < 2; v++) {
+        for (int v = 0; v < 2; v++)
+        {
             sdsl::rrr_vector<> rrr_bit_vector(zeros_only_bit_vector[v]);
             rrr_bit_vector.serialize(out);
             sdsl::util::clear(rrr_bit_vector);
         }
-        for (int v = 0; v < 2; v++) {
+        for (int v = 0; v < 2; v++)
+        {
             rrr_bit_vector[v] = sdsl::rrr_vector<>(copy_bit_vector[v]);
             rrr_bit_vector[v].serialize(out);
             sdsl::util::clear(rrr_bit_vector[v]);
@@ -244,7 +288,8 @@ bool Compressor::writeCompressFlie()
         out.close();
     }
 
-    if (sdsl::util::verbose) {
+    if (sdsl::util::verbose)
+    {
         logger->info("store_to_file: `{}`", fname);
     }
     // sdsl::osfstream out(fname, std::ios::binary | std::ios::app);
@@ -257,7 +302,7 @@ bool Compressor::writeCompressFlie()
     //     exit(1);
     // }
     // sdsl::rrr_vector<> rrr_bit_vector[5];
-    
+
     // for (int v = 0; v < 2; v++)
     // {
     //     rrr_bit_vector[v] = sdsl::rrr_vector<>(zeros_only_bit_vector[v]);
@@ -272,24 +317,23 @@ bool Compressor::writeCompressFlie()
     // }
 
     // out.close();
-    
+
     // if (sdsl::util::verbose)
     // {
     // std::cerr << "INFO: store_to_file: `" << fname << "`" << std::endl;
     // }
 
-    
-    // std::cerr << "genotype compress file (" << params.out_file_name + ".gsc"<< ") created." << std::endl;    
-
+    // std::cerr << "genotype compress file (" << params.out_file_name + ".gsc"<< ") created." << std::endl;
 
     return 0;
 }
-//open file for writing
-// *******************************************************************************************************************
+// open file for writing
+//  *******************************************************************************************************************
 bool Compressor::OpenForWriting(const string &out_file_name)
 {
     auto logger = LogManager::Instance().Logger();
-    if(out_file_name != "-"){
+    if (out_file_name != "-")
+    {
         fname = out_file_name;
         // fname = (char *)malloc(strlen(out_file_name.c_str()) + 5);
         // snprintf(fname, strlen(out_file_name.c_str()) + 5, "%s.gsc", out_file_name.c_str());
@@ -300,13 +344,15 @@ bool Compressor::OpenForWriting(const string &out_file_name)
             logger->error("storing archive not successful for: `{}`", fname);
             exit(1);
         }
-    }else {
-        
+    }
+    else
+    {
+
         comp = stdout;
         is_stdout = true;
-        
     }
-    if (setvbuf(comp, nullptr, _IOFBF, 64 << 20) != 0) {
+    if (setvbuf(comp, nullptr, _IOFBF, 64 << 20) != 0)
+    {
         logger->error("Buffer setup failed for: `{}`", fname);
         // if (fname != nullptr) {
         //     free(fname);
@@ -314,31 +360,29 @@ bool Compressor::OpenForWriting(const string &out_file_name)
         exit(1);
     }
 
-
     mode_type = false;
 
     fwrite(&mode_type, sizeof(mode_type), 1, comp);
-    
+
     other_fields_offset = ftell(comp) + sizeof(uint64_t);
     fwrite(&other_fields_offset, sizeof(other_fields_offset), 1, comp);
 
     sdsl_offset = ftell(comp) + sizeof(uint64_t);
-    
-    if (fwrite(&sdsl_offset, sizeof(sdsl_offset), 1, comp) != 1) {
+
+    if (fwrite(&sdsl_offset, sizeof(sdsl_offset), 1, comp) != 1)
+    {
         logger->error("Write operation failed for: `{}`", fname);
     }
 
-    
     // setvbuf(comp, nullptr, _IOFBF, 64 << 20);
     // sdsl_offset = ftell(comp) + sizeof(uint64_t);
-    
+
     // fwrite(&sdsl_offset, sizeof(sdsl_offset), 1, comp);
 
-    int id = (int) chunks_streams.size();
-                                                
-	chunks_streams[id] = chunk_stream(0,0);
+    int id = (int)chunks_streams.size();
 
-    
+    chunks_streams[id] = chunk_stream(0, 0);
+
     return true;
 }
 //*******************************************************************************************************************
@@ -356,54 +400,54 @@ bool Compressor::OpenTempFile(const string &out_file_name)
         logger->error("storing archive not successful for: `{}`", temp_file1_fname);
         exit(1);
     }
-    
+
     setvbuf(temp_file, nullptr, _IOFBF, 64 << 20);
 
-
-    if(params.compress_mode == compress_mode_t::lossless_mode){
+    if (params.compress_mode == compress_mode_t::lossless_mode)
+    {
         if (file_handle2)
-		    delete file_handle2;
-	    file_handle2 = new File_Handle_2(false);
+            delete file_handle2;
+        file_handle2 = new File_Handle_2(false);
 
         temp_file2_fname = out_file_name + ".com_tmp_gsc";
 
         if (!file_handle2->Open(temp_file2_fname))
-	    {
-		    logger->error("Cannot open {}", temp_file2_fname);
-		    return false;
-	    }
+        {
+            logger->error("Cannot open {}", temp_file2_fname);
+            return false;
+        }
     }
     return true;
 }
 // *******************************************************************************************************************
-//compess pragma entry
+// compess pragma entry
 bool Compressor::CompressProcess()
 {
-    //it is important to initialize the library before using it
+    // it is important to initialize the library before using it
     auto logger = LogManager::Instance().Logger();
     InitializeCompressionBackend(params.backend);
-    
-    MyBarrier  my_barrier(3);
+
+    MyBarrier my_barrier(3);
 
     unique_ptr<CompressionReader> compression_reader(new CompressionReader(params));
 
     if (!compression_reader->OpenForReading(params.in_file_name))
-	{
-		logger->error("Cannot open: {}", params.in_file_name);
-		return false;
-	}
+    {
+        logger->error("Cannot open: {}", params.in_file_name);
+        return false;
+    }
     if (!OpenForWriting(params.out_file_name))
-		return false;
-    
+        return false;
+
     if (!OpenTempFile(params.out_file_name))
-		return false;
-        
+        return false;
+
     string header;
-    
+
     vector<string> v_samples;
 
     compression_reader->GetHeader(header);
-    
+
     uint32_t no_samples = compression_reader->GetSamples(v_samples);
     // for(int i =0;i<v_samples.size();i++)
     //     std::cerr<<v_samples[i]<<endl;
@@ -414,247 +458,304 @@ bool Compressor::CompressProcess()
         logger->error("The number of genotype samples is zero and cannot be compressed!");
         return false;
     }
-    
-    //compress meta data
-    compress_meta(v_samples , header);
 
+    // compress meta data
+    compress_meta(v_samples, header);
 
     compression_reader->setNoVecBlock(params);
 
+    // Get column block tiling information BEFORE creating threads
+    n_col_blocks = compression_reader->GetNumColumnBlocks();
+    col_block_sizes = compression_reader->GetColumnBlockSizes();
+    col_block_vec_lens = compression_reader->GetColumnBlockVecLens();
+    total_haplotypes = compression_reader->GetTotalHaplotypes();
+    max_block_cols = compression_reader->GetMaxBlockCols();
+    use_legacy_perm = (n_col_blocks == 1) &&
+                      (params.max_block_cols == 0 || params.max_block_cols >= total_haplotypes) &&
+                      (params.max_block_rows == 0 || params.max_block_rows == total_haplotypes);
+
     logger->info("Number of GT threads: {}", params.no_gt_threads);
-    GtBlockQueue inGtBlockQueue(max((int)(params.no_blocks*params.no_gt_threads),8));
+    GtBlockQueue inGtBlockQueue(max((int)(params.no_blocks * params.no_gt_threads), 8));
 
     // VarBlockQueue<fixed_fixed_field_block> inVarBlockQueue(max((int)params.no_threads * 2, 8));
-    VarBlockQueue<fixed_field_block>  sortVarBlockQueue(max((int)params.no_threads * 2, 8));
+    VarBlockQueue<fixed_field_block> sortVarBlockQueue(max((int)params.no_threads * 2, 8));
     compression_reader->setQueue(&inGtBlockQueue);
 
-    PartQueue<SPackage> part_queue(max((int)params.no_threads * 2, 8)); 
+    PartQueue<SPackage> part_queue(max((int)params.no_threads * 2, 8));
 
-    if(params.compress_mode == compress_mode_t::lossless_mode){
+    if (params.compress_mode == compress_mode_t::lossless_mode)
+    {
 
-        compression_reader->setPartQueue(&part_queue); 
+        compression_reader->setPartQueue(&part_queue);
 
         compression_reader->InitVarinats(file_handle2);
-    
-        compression_reader->GetOtherField(keys,no_keys,key_gt_id);
-        
+
+        compression_reader->GetOtherField(keys, no_keys, key_gt_id);
+
         InitCompressParams();
-        
-        part_compress_thread.reserve(params.no_threads); 
-        
+
+        part_compress_thread.reserve(params.no_threads);
+
         for (uint32_t i = 0; i < params.no_threads; ++i)
         {
-            part_compress_thread.emplace_back(thread([&]() {
+            part_compress_thread.emplace_back(thread([&]()
+                                                     {
+                                                         SPackage pck;
+                                                         vector<uint8_t> v_compressed;
+                                                         vector<uint8_t> v_tmp;
 
-                SPackage pck;
-		        vector<uint8_t> v_compressed;
-		        vector<uint8_t> v_tmp;
-		
-		        auto fo = [this](SPackage& pck)->bool {return check_coder_compressor(pck); };
+                                                         auto fo = [this](SPackage &pck) -> bool
+                                                         { return check_coder_compressor(pck); };
 
-		        while (true)
-		        {
-                    
-			        if (!part_queue.Pop<SPackage>(pck, fo))
-				        break;
-                    compress_other_fileds(pck, v_compressed, v_tmp);
-                
-		        }      
+                                                         while (true)
+                                                         {
 
-
-            }));
+                                                             if (!part_queue.Pop<SPackage>(pck, fo))
+                                                                 break;
+                                                             compress_other_fileds(pck, v_compressed, v_tmp);
+                                                         }
+                                                     }));
         }
-    }    
-    block_size = no_samples * params.ploidy * 2;
-    
-    unique_ptr<thread> compress_thread(new thread([&] {
-        fixed_field_block fixed_field_block_process;
-        while (true)
-        {
+    }
+    block_size = params.var_in_block * 2;
 
-            if (!sortVarBlockQueue.Pop(fixed_field_block_id,fixed_field_block_process)){
-                break;
-            }
-            
-            compressFixedFields(fixed_field_block_process);
+    unique_ptr<thread> compress_thread(new thread([&]
+                                                  {
+                                                      fixed_field_block fixed_field_block_process;
+                                                      while (true)
+                                                      {
 
-        }
+                                                          if (!sortVarBlockQueue.Pop(fixed_field_block_id, fixed_field_block_process))
+                                                          {
+                                                              break;
+                                                          }
 
-    }));
+                                                          compressFixedFields(fixed_field_block_process);
+                                                      }
+                                                  }));
 
     // create multiple threads to handle individual blocks
     block_process_thread.reserve(params.no_gt_threads);
     string prev_chrom = "";
     int chunk_id = 0;
-    for(uint32_t i = 0; i < params.no_gt_threads; ++i)
-        block_process_thread.emplace_back(thread([&]() {
-            
-            int block_id = 0;
-            unsigned long num_rows;
-            unsigned char *data = nullptr;
-            vector<variant_desc_t> v_vcf_data_io;             
-            vector<uint32_t> origin_of_copy;
-            origin_of_copy.reserve(no_variants_in_buf);
-            vector<uint8_t> samples_indexes;   //Index of the location where the block storing 1 is stored.
-            vector<uint32_t> perm;
-            perm.clear();
-            perm.resize(no_samples * params.ploidy, 0);
-            for (size_t i_p = 0; i_p < perm.size(); i_p++)
-                perm[i_p] = i_p;
-            BlockProcess block_process(params);
-                                    
-            while (true)
-            {
-                if (!inGtBlockQueue.Pop(block_id, data, num_rows, v_vcf_data_io)){
-                    break;
-                }
+    for (uint32_t i = 0; i < params.no_gt_threads; ++i)
+        block_process_thread.emplace_back(thread([&]()
+                                                 {
+                                                     auto logger = LogManager::Instance().Logger();
 
-                vector<bool> zeros_only(num_rows, false);
-                vector<bool> copies(num_rows, false);                           
-                block_process.SetCurBlock(num_rows, data);
-                //Gets the sparse encoding for each block        
-                          
-                if (num_rows){    
-                    // if(num_rows == block_size)  
-                        block_process.ProcessSquareBlock(perm, zeros_only, copies, origin_of_copy,samples_indexes,true);
-                    // else
-                    //     block_process.ProcessLastBlock(zeros_only, copies, origin_of_copy,samples_indexes);
+                                                     int block_id = 0;
+                                                     uint32_t col_block_id = 0; // NEW: column block ID
+                                                     unsigned long num_rows;
+                                                     unsigned char *data = nullptr;
+                                                     vector<variant_desc_t> v_vcf_data_io;
+                                                     vector<uint32_t> origin_of_copy;
+                                                     origin_of_copy.reserve(no_variants_in_buf);
+                                                     vector<uint8_t> samples_indexes; // Index of the location where the block storing 1 is stored.
+                                                     vector<uint32_t> perm;
+                                                     BlockProcess block_process(params);
 
-                    if(num_rows == block_size)
+                                                     while (true)
+                                                     {
+                                                         if (!inGtBlockQueue.Pop(block_id, col_block_id, data, num_rows, v_vcf_data_io))
+                                                         {
+                                                             break;
+                                                         }
 
-                        block_process.ProcessVariant(perm , v_vcf_data_io);
+                                                         vector<bool> zeros_only(num_rows, false);
+                                                         vector<bool> copies(num_rows, false);
+                                                         block_process.SetCurBlock(num_rows, data);
+                                                         // Gets the sparse encoding for each block
 
-                }
-                
-                if(data != nullptr)
-                    delete[] data;
-                //Gets the sparse encoding for each block
-                lock_gt_block_process(block_id);
-                {
-                    // if(!cur_block_id)
-                    //     prev_chrom = v_vcf_data_io[0].chrom;
-                    // if(num_rows != block_size)                    
-                    //     block_process.ProcessLastPerm(perm,vint_last_perm); 
+                                                        if (num_rows)
+                                                        {
+                                                            // Calculate column block parameters from precomputed tiling
+                                                            if (col_block_id >= col_block_sizes.size() || col_block_id >= col_block_vec_lens.size())
+                                                            {
+                                                                logger->error("Invalid column block id: {} (n_col_blocks={}, sizes={}, vec_lens={})",
+                                                                              col_block_id, n_col_blocks, col_block_sizes.size(), col_block_vec_lens.size());
+                                                                continue;
+                                                            }
+                                                            uint32_t col_block_size = col_block_sizes[col_block_id];
+                                                            uint32_t col_vec_len = static_cast<uint32_t>(col_block_vec_lens[col_block_id]);
 
-                   
-                    
-                    if(prev_chrom != v_vcf_data_io[0].chrom){
+                                                            if (col_block_size == 0 || col_vec_len == 0)
+                                                            {
+                                                                logger->error("Empty column block detected: block_id={}, col_block_id={}, size={}, vec_len={}",
+                                                                              block_id, col_block_id, col_block_size, col_vec_len);
+                                                                continue;
+                                                            }
 
-                        prev_chrom = v_vcf_data_io[0].chrom;
-                        if(no_curr_chrom_block){
+                                                            logger->info("Processing GT block: block_id={}, col_block_id={}, num_rows={}, col_block_size={}, col_vec_len={}",
+                                                                         block_id, col_block_id, num_rows, col_block_size, col_vec_len);
 
-                            sortVarBlockQueue.Push(chunk_id,fixed_field_block_io);
-                            // compressFixedFields(fixed_field_block_io);
-                            toal_all_size += fixed_field_block_io.gt_block.size();
-                            int id = (int) chunks_streams.size();                
-	                        chunks_streams[id] = chunk_stream(cur_chunk_actual_pos,0);
-                            
-                            no_curr_chrom_block = 0;
-                            prev_pos = 0;
-                            chunk_id++;
-                            fixed_field_block_io.Clear();
-                        }
-                        if(num_rows){
+                                                            // Prepare permutation buffer for this column block
+                                                             perm.resize(col_block_size);
+                                                             for (size_t i_p = 0; i_p < perm.size(); i_p++)
+                                                                 perm[i_p] = static_cast<uint32_t>(i_p);
 
-                            cur_chunk_actual_pos += (uint32_t)v_vcf_data_io.size();
-                            block_process.addSortFieldBlock(fixed_field_block_io,all_zeros,all_copies,comp_pos_copy,zeros_only, copies, origin_of_copy,samples_indexes,v_vcf_data_io,prev_pos);
-                            no_curr_chrom_block++;
-                            if(num_rows % block_size){
-                                vint_last_perm.emplace(chunk_id,vint_code::EncodeArray(perm));
-                            }
+                                                             // if(num_rows == block_size)
+                                                             block_process.ProcessSquareBlock(col_block_size, col_vec_len, perm, zeros_only, copies, origin_of_copy, samples_indexes, true);
+                                                             // else
+                                                             //     block_process.ProcessLastBlock(zeros_only, copies, origin_of_copy,samples_indexes);
 
-                            if(no_curr_chrom_block == params.no_blocks){
-                                sortVarBlockQueue.Push(chunk_id,fixed_field_block_io);
-                                // compressFixedFields(fixed_field_block_io);
-                                toal_all_size += fixed_field_block_io.gt_block.size();
-                                int id = (int) chunks_streams.size();               
-                                chunks_streams[id] = chunk_stream(cur_chunk_actual_pos,0);
-                                no_curr_chrom_block = 0;
-                                prev_pos = 0;
-                                chunk_id++;
-                                fixed_field_block_io.Clear();
-                            }
-                        }
-                        else{
+                                                            if (use_legacy_perm && num_rows == block_size)
+                                                                block_process.ProcessVariant(perm, v_vcf_data_io);
 
-                            sortVarBlockQueue.Complete();
-                        }
-                            
-                    }
-                    else{
+                                                             logger->info("Finished GT block: block_id={}, col_block_id={}, perm_size={}", block_id, col_block_id, perm.size());
+                                                         }
 
-                        cur_chunk_actual_pos += (uint32_t)v_vcf_data_io.size();
-                        block_process.addSortFieldBlock(fixed_field_block_io,all_zeros,all_copies,comp_pos_copy,zeros_only, copies, origin_of_copy,samples_indexes,v_vcf_data_io,prev_pos);
-                        no_curr_chrom_block++;
+                                                         if (data != nullptr)
+                                                             delete[] data;
+                                                         // Gets the sparse encoding for each block
+                                                         lock_gt_block_process(block_id, col_block_id);
+                                                         {
+                                                             if (num_rows)
+                                                             {
+                                                                 if (use_legacy_perm)
+                                                                 {
+                                                                     if (num_rows % block_size)
+                                                                         vint_last_perm.emplace(chunk_id, vint_code::EncodeArray(perm));
+                                                                 }
+                                                                 else
+                                                                 {
+                                                                     vint_last_perm_2d.emplace(make_pair(block_id, col_block_id), vint_code::EncodeArray(perm));
+                                                                 }
+                                                                 if (v_vcf_data_io.empty())
+                                                                     block_process.AddGtBlock(fixed_field_block_io, all_zeros, all_copies, comp_pos_copy,
+                                                                                              zeros_only, copies, origin_of_copy, samples_indexes);
+                                                             }
+                                                             // if(!cur_block_id)
+                                                             //     prev_chrom = v_vcf_data_io[0].chrom;
+                                                             // if(num_rows != block_size)
+                                                             //     block_process.ProcessLastPerm(perm,vint_last_perm);
 
-                        if(num_rows % block_size){
-                            vint_last_perm.emplace(chunk_id,vint_code::EncodeArray(perm));
-                        }
+                                                             // In Tiled mode, only the last column block has variant descriptors
+                                                            // Skip variant descriptor processing for column blocks with empty v_vcf_data_io
+                                                            if (!v_vcf_data_io.empty() && prev_chrom != v_vcf_data_io[0].chrom)
+                                                             {
 
-                        if(no_curr_chrom_block == params.no_blocks){
-                            sortVarBlockQueue.Push(chunk_id,fixed_field_block_io);
-                            // compressFixedFields(fixed_field_block_io);
-                            toal_all_size += fixed_field_block_io.gt_block.size();
-                            int id = (int) chunks_streams.size();               
-	                        chunks_streams[id] = chunk_stream(cur_chunk_actual_pos,0);
-                            no_curr_chrom_block = 0;
-                            prev_pos = 0;
-                            chunk_id++;
-                            fixed_field_block_io.Clear();
-                        }
-                        
+                                                                 prev_chrom = v_vcf_data_io[0].chrom;
+                                                                 if (no_curr_chrom_block)
+                                                                 {
 
-                    }   
-                    
+                                                                     sortVarBlockQueue.Push(chunk_id, fixed_field_block_io);
+                                                                     // compressFixedFields(fixed_field_block_io);
+                                                                     toal_all_size += fixed_field_block_io.gt_block.size();
+                                                                     int id = (int)chunks_streams.size();
+                                                                     chunks_streams[id] = chunk_stream(cur_chunk_actual_pos, 0);
 
-           
-                }         
-                unlock_gt_block_process();                   
-                
-            }                            
-                                    
-        })); 
+                                                                     no_curr_chrom_block = 0;
+                                                                     prev_pos = 0;
+                                                                     chunk_id++;
+                                                                     fixed_field_block_io.Clear();
+                                                                 }
+                                                                 if (num_rows)
+                                                                 {
 
-    
+                                                                     cur_chunk_actual_pos += (uint32_t)v_vcf_data_io.size();
+                                                                     block_process.addSortFieldBlock(fixed_field_block_io, all_zeros, all_copies, comp_pos_copy, zeros_only, copies, origin_of_copy, samples_indexes, v_vcf_data_io, prev_pos);
+                                                                     no_curr_chrom_block++;
+
+                                                                     if (no_curr_chrom_block == params.no_blocks)
+                                                                     {
+                                                                         sortVarBlockQueue.Push(chunk_id, fixed_field_block_io);
+                                                                         // compressFixedFields(fixed_field_block_io);
+                                                                         toal_all_size += fixed_field_block_io.gt_block.size();
+                                                                         int id = (int)chunks_streams.size();
+                                                                         chunks_streams[id] = chunk_stream(cur_chunk_actual_pos, 0);
+                                                                         no_curr_chrom_block = 0;
+                                                                         prev_pos = 0;
+                                                                         chunk_id++;
+                                                                         fixed_field_block_io.Clear();
+                                                                     }
+                                                                 }
+                                                                 // Note: num_rows == 0 is a termination marker
+                                                                 // sortVarBlockQueue.Complete() is now called by the main thread after all workers finish
+                                                             }
+                                                             else if (!v_vcf_data_io.empty())
+                                                             {
+
+                                                                 cur_chunk_actual_pos += (uint32_t)v_vcf_data_io.size();
+                                                                 block_process.addSortFieldBlock(fixed_field_block_io, all_zeros, all_copies, comp_pos_copy, zeros_only, copies, origin_of_copy, samples_indexes, v_vcf_data_io, prev_pos);
+                                                                 no_curr_chrom_block++;
+
+                                                                 if (no_curr_chrom_block == params.no_blocks)
+                                                                 {
+                                                                     sortVarBlockQueue.Push(chunk_id, fixed_field_block_io);
+                                                                     // compressFixedFields(fixed_field_block_io);
+                                                                     toal_all_size += fixed_field_block_io.gt_block.size();
+                                                                     int id = (int)chunks_streams.size();
+                                                                     chunks_streams[id] = chunk_stream(cur_chunk_actual_pos, 0);
+                                                                     no_curr_chrom_block = 0;
+                                                                     prev_pos = 0;
+                                                                     chunk_id++;
+                                                                     fixed_field_block_io.Clear();
+                                                                 }
+                                                             }
+                                                         }
+                                                         unlock_gt_block_process(col_block_id);
+                                                     }
+                                                 }));
+
     if (!compression_reader->ProcessInVCF())
         return false;
 
     no_vec = compression_reader->getNoVec();
 
+    // Wait for all GT processing threads to finish
+    for (uint32_t i = 0; i < params.no_gt_threads; ++i)
+        block_process_thread[i].join();
+
+    // After all GT blocks are processed, push any remaining data and complete the queue
+    {
+        lock_guard<mutex> lock(mtx_gt_block);
+        if (no_curr_chrom_block > 0)
+        {
+            // Push the last chunk if there's remaining data
+            sortVarBlockQueue.Push(chunk_id, fixed_field_block_io);
+            toal_all_size += fixed_field_block_io.gt_block.size();
+            int id = (int)chunks_streams.size();
+            chunks_streams[id] = chunk_stream(cur_chunk_actual_pos, 0);
+            fixed_field_block_io.Clear();
+        }
+        // Always complete the queue to unblock the compress thread
+        sortVarBlockQueue.Complete();
+    }
+
     // obtain the variation description
 
-    compression_reader->GetWhereChrom(where_chrom,chunks_min_pos);
-    
-    if(params.compress_mode == compress_mode_t::lossless_mode){
-        
+    compression_reader->GetWhereChrom(where_chrom, chunks_min_pos);
+
+    if (params.compress_mode == compress_mode_t::lossless_mode)
+    {
+
         for (uint32_t i = 0; i < params.no_threads; ++i)
-		    part_compress_thread[i].join();
-        
+            part_compress_thread[i].join();
+
         auto stream_id = file_handle2->RegisterStream("part2_params");
         vector<uint8_t> v_desc;
         vector<uint32_t> actual_variants = compression_reader->GetActualVariants();
         compression_reader->UpdateKeys(keys);
         append(v_desc, static_cast<uint32_t>(actual_variants.size()));
-        
+
         for (uint32_t i = 0; i < actual_variants.size(); ++i)
         {
             append(v_desc, actual_variants[i]);
-            
         }
         append(v_desc, no_keys);
         append(v_desc, key_gt_id);
-	    for (uint32_t i = 0; i < no_keys; ++i)
-	    {
+        for (uint32_t i = 0; i < no_keys; ++i)
+        {
             // std::cerr<<"key_id:"<<keys[i].key_id<<":"<<keys[i].actual_field_id<<endl;
-		    append(v_desc, keys[i].key_id);
+            append(v_desc, keys[i].key_id);
             append(v_desc, keys[i].actual_field_id);
-		    append(v_desc, static_cast<uint64_t>(keys[i].keys_type));
-		    append(v_desc, keys[i].type);
-	    }
+            append(v_desc, static_cast<uint64_t>(keys[i].keys_type));
+            append(v_desc, keys[i].type);
+        }
         append(v_desc, static_cast<uint32_t>(params.backend));
         vector<uint8_t> v_desc_compressed;
         auto codec = MakeCompressionStrategy(params.backend, p_bsc_fixed_fields);
-		codec->Compress(v_desc, v_desc_compressed);
+        codec->Compress(v_desc, v_desc_compressed);
         // prepend backend id for safe detection during decompression
         std::vector<uint8_t> v_desc_payload;
         v_desc_payload.reserve(v_desc_compressed.size() + 1);
@@ -664,35 +765,33 @@ bool Compressor::CompressProcess()
         file_handle2->Close();
     }
 
-     for(uint32_t i = 0; i < params.no_gt_threads; ++i)
-        block_process_thread[i].join();
+    // GT threads already joined earlier, just wait for compress thread
     compress_thread->join();
 
-    if(temp_file)
+    if (temp_file)
         fclose(temp_file);
     temp_file = fopen(temp_file1_fname, "rb");
     logger->info("Complete and process the chunking.");
 
-
     compressReplicatedRow();
 
     writeCompressFlie();
-    
+
     return true;
 }
-//process the all_zeros and all_copies
-// **************************************************************************************************
+// process the all_zeros and all_copies
+//  **************************************************************************************************
 void Compressor::compressReplicatedRow()
 {
     zeros_only_bit_vector[0] = sdsl::bit_vector(no_vec / 2 + no_vec % 2, 0);
     zeros_only_bit_vector[1] = sdsl::bit_vector(no_vec / 2 + no_vec % 2, 0);
     copy_bit_vector[0] = sdsl::bit_vector(no_vec / 2 + no_vec % 2, 0);
     copy_bit_vector[1] = sdsl::bit_vector(no_vec / 2 + no_vec % 2, 0);
-   
+
     // comp_pos_copy = new uint32_t[all_copy_num]();
- 
+
     unique = sdsl::bit_vector(no_vec, 0);
-    
+
     for (uint64_t i = 0; i < all_zeros.size(); i++)
     {
         zeros_only_bit_vector[i % 2][i / 2] = all_zeros[i];
@@ -700,7 +799,7 @@ void Compressor::compressReplicatedRow()
     }
     comp_pos_copy.shrink_to_fit();
     copy_no = comp_pos_copy.size();
-    
+
     // std::cerr << "no_vec:" << no_vec << endl;
     // rank_copy_bit_vector[0] = sdsl::rank_support_v5<>(&copy_bit_vector[0]);
     // rank_copy_bit_vector[1] = sdsl::rank_support_v5<>(&copy_bit_vector[1]);
@@ -730,7 +829,7 @@ void Compressor::compressReplicatedRow()
     uint64_t curr_non_copy_vec_id = 0;
     uint64_t copy_id = 0, origin_unique_id;
     uint32_t max_diff_copy = 0;
-    
+
     for (uint64_t i = 0; i < no_vec; i++)
     {
         if (zeros_only_bit_vector[i % 2][i / 2])
@@ -738,16 +837,16 @@ void Compressor::compressReplicatedRow()
         if (!copy_bit_vector[i % 2][i / 2])
         {
             curr_non_copy_vec_id++;
-            
+
             continue;
         }
         // Here curr_non_copy_vec_id is a fake curr_non_copy_vec_id (it is ud of the next non_copy_vec_id)
-        
+
         origin_unique_id = rank_unique(comp_pos_copy[copy_id]);
-        
+
         // Store difference -1, to not waste one value
         comp_pos_copy[copy_id] = curr_non_copy_vec_id - origin_unique_id - 1;
-        
+
         if (comp_pos_copy[copy_id] > max_diff_copy)
         {
             max_diff_copy = comp_pos_copy[copy_id];
@@ -767,8 +866,8 @@ void Compressor::compressReplicatedRow()
     sdsl::util::clear(rank_unique);
 }
 
-//get the bits of the number
-// **************************************************************************************************
+// get the bits of the number
+//  **************************************************************************************************
 char Compressor::bits_used(unsigned int n)
 {
     char bits = 0;
@@ -780,86 +879,86 @@ char Compressor::bits_used(unsigned int n)
     return bits;
 }
 // ************************************************************************************
-void Compressor::lock_coder_compressor(SPackage& pck)
+void Compressor::lock_coder_compressor(SPackage &pck)
 {
-	unique_lock<mutex> lck(mtx_v_coder);
-	cv_v_coder.wait(lck, [&, this] {
+    unique_lock<mutex> lck(mtx_v_coder);
+    cv_v_coder.wait(lck, [&, this]
+                    {
 		int sid = pck.key_id;
 
-		return (int) v_coder_part_ids[sid] == pck.part_id;
-		});
+		return (int) v_coder_part_ids[sid] == pck.part_id; });
 }
 
 // ************************************************************************************
-bool Compressor::check_coder_compressor(SPackage& pck)
+bool Compressor::check_coder_compressor(SPackage &pck)
 {
-	unique_lock<mutex> lck(mtx_v_coder);
-	int sid = pck.key_id;
+    unique_lock<mutex> lck(mtx_v_coder);
+    int sid = pck.key_id;
 
-	
-	return (int) v_coder_part_ids[sid] == pck.part_id;
+    return (int)v_coder_part_ids[sid] == pck.part_id;
 }
 
 // ************************************************************************************
-void Compressor::unlock_coder_compressor(SPackage& pck)
+void Compressor::unlock_coder_compressor(SPackage &pck)
 {
-	lock_guard<mutex> lck(mtx_v_coder);
-	int sid = pck.key_id;
+    lock_guard<mutex> lck(mtx_v_coder);
+    int sid = pck.key_id;
 
-	++v_coder_part_ids[sid];
-	cv_v_coder.notify_all();
+    ++v_coder_part_ids[sid];
+    cv_v_coder.notify_all();
 }
-void Compressor::compress_other_fileds(SPackage& pck, vector<uint8_t>& v_compressed, vector<uint8_t>& v_tmp)
+void Compressor::compress_other_fileds(SPackage &pck, vector<uint8_t> &v_compressed, vector<uint8_t> &v_tmp)
 {
-    
+
     lock_coder_compressor(pck);
     CompressionStrategy *cbsc_size = field_size_codecs[pck.key_id].get();
-	if (pck.v_data.size())
-	{
-        
-		v_compressed.clear();
+    if (pck.v_data.size())
+    {
+
+        v_compressed.clear();
         // lzma2::lzma2_compress(pck.v_data, v_compressed, 10, 3);
-          
+
         CompressionStrategy *cbsc = field_data_codecs[pck.key_id].get();
-        if(keys[pck.key_id].type != BCF_HT_INT){
+        if (keys[pck.key_id].type != BCF_HT_INT)
+        {
             cbsc->Compress(pck.v_data, v_compressed);
             // zstd::zstd_compress(pck.v_data, v_compressed);
         }
-        else{
+        else
+        {
             Encoder(pck.v_data, v_tmp);
             cbsc->Compress(v_tmp, v_compressed);
             // zstd::zstd_compress(v_tmp, v_compressed);
         }
-            
-        // cbsc->Compress(pck.v_data, v_compressed);
-        
-		file_handle2->AddPartComplete(pck.stream_id_data, pck.part_id, v_compressed);
-	}
-	else
-	{
-		v_compressed.clear();
 
-		file_handle2->AddPartComplete(pck.stream_id_data, pck.part_id, v_compressed);
-        
-	}
-    
+        // cbsc->Compress(pck.v_data, v_compressed);
+
+        file_handle2->AddPartComplete(pck.stream_id_data, pck.part_id, v_compressed);
+    }
+    else
+    {
+        v_compressed.clear();
+
+        file_handle2->AddPartComplete(pck.stream_id_data, pck.part_id, v_compressed);
+    }
+
     v_compressed.clear();
-    
+
     // lzma2::lzma2_compress(pck.v_size, v_compressed, 10, 1);
     v_tmp.resize(pck.v_size.size() * 4);
 
-	copy_n((uint8_t*)pck.v_size.data(), v_tmp.size(), v_tmp.data());
-    
+    copy_n((uint8_t *)pck.v_size.data(), v_tmp.size(), v_tmp.data());
+
     cbsc_size->Compress(v_tmp, v_compressed);
     // zstd::zstd_compress(v_tmp, v_compressed);
-    
-	file_handle2->AddPartComplete(pck.stream_id_size, pck.part_id, v_compressed);
 
-	unlock_coder_compressor(pck);
+    file_handle2->AddPartComplete(pck.stream_id_size, pck.part_id, v_compressed);
+
+    unlock_coder_compressor(pck);
 }
 // void Compressor::compress_INT_fileds(SPackage& pck, vector<uint8_t>& v_compressed, vector<uint8_t>& v_tmp)
 // {
-    
+
 //     vector<uint32_t> vec_temp1;
 //     vector<uint32_t> vec_temp2;
 //     lock_coder_compressor(pck);
@@ -872,13 +971,12 @@ void Compressor::compress_other_fileds(SPackage& pck, vector<uint8_t>& v_compres
 //                         ((uint32_t)pck.v_data[i*4+1] << 8) |
 //                         ((uint32_t)pck.v_data[i*4+2] << 16) |
 //                         ((uint32_t)pck.v_data[i*4+3]<< 24);
-            
+
 //         }
-        
+
 //         // lzma2::lzma2_compress(pck.v_data, v_compressed, 10, 3);
-        
+
 //         FastPForCompress::FastPFor_Compress(vec_temp1, vec_temp2);
-        
 
 //         v_compressed.resize(vec_temp2.size()*4);
 
@@ -897,21 +995,22 @@ void Compressor::compress_other_fileds(SPackage& pck, vector<uint8_t>& v_compres
 //     // FastPForCompress::FastPFor_Compress(pck.v_size, vec_temp2);
 //     // v_compressed.resize(vec_temp2.size()*4);
 // 	// copy_n((uint8_t*)vec_temp2.data(),vec_temp2.size()*4,v_compressed.data());
-    
+
 // 	file_handle2->AddPartComplete(pck.stream_id_size, pck.part_id, v_compressed);
 
 // 	unlock_coder_compressor(pck);
 // }
 
-void Compressor::Encoder(vector<uint8_t>& v_data, vector<uint8_t>& v_tmp)
+void Compressor::Encoder(vector<uint8_t> &v_data, vector<uint8_t> &v_tmp)
 {
     v_tmp.resize(v_data.size());
-    size_t size = v_data.size()/4;
-    for (size_t i = 0; i < v_data.size()/4; i++) {
-        v_tmp[i] = v_data[i*4];
-        v_tmp[i+size] = v_data[i*4+1];
-        v_tmp[i+size*2]  = v_data[i*4+2];
-        v_tmp[i+size*3]  = v_data[i*4+3];
+    size_t size = v_data.size() / 4;
+    for (size_t i = 0; i < v_data.size() / 4; i++)
+    {
+        v_tmp[i] = v_data[i * 4];
+        v_tmp[i + size] = v_data[i * 4 + 1];
+        v_tmp[i + size * 2] = v_data[i * 4 + 2];
+        v_tmp[i + size * 3] = v_data[i * 4 + 3];
     }
     // v_data = tmp;
     // uint8_t count = 1;
@@ -927,7 +1026,7 @@ void Compressor::Encoder(vector<uint8_t>& v_data, vector<uint8_t>& v_tmp)
     //         v_tmp.emplace_back(v_data[i-1]);
     //         count = 1;
     //     }
-        
+
     // }
     // v_tmp.emplace_back(count);
     // v_tmp.emplace_back(v_data[v_data.size() - 1]);
@@ -973,24 +1072,23 @@ void Compressor::Encoder(vector<uint8_t>& v_data, vector<uint8_t>& v_tmp)
     // std::cerr<<endl;
     // std::cerr<<endl;
 }
-//compressor meta data
-// *******************************************************************************************************************************************
-bool Compressor::compress_meta(vector<string> v_samples,const string& v_header)
+// compressor meta data
+//  *******************************************************************************************************************************************
+bool Compressor::compress_meta(vector<string> v_samples, const string &v_header)
 {
 
-	append_str(all_v_header, v_header);
-    
-	for (auto &x : v_samples)
-		append_str(all_v_samples, x);
-        
-	for (auto data : {
-			make_tuple(ref(all_v_header), ref(comp_v_header), "header"),
-			make_tuple(ref(all_v_samples), ref(comp_v_samples), "samples"),
-		 })
-	{
-        auto codec = MakeCompressionStrategy(params.backend, p_bsc_meta);
-		codec->Compress(get<0>(data), get<1>(data));
+    append_str(all_v_header, v_header);
 
+    for (auto &x : v_samples)
+        append_str(all_v_samples, x);
+
+    for (auto data : {
+             make_tuple(ref(all_v_header), ref(comp_v_header), "header"),
+             make_tuple(ref(all_v_samples), ref(comp_v_samples), "samples"),
+         })
+    {
+        auto codec = MakeCompressionStrategy(params.backend, p_bsc_meta);
+        codec->Compress(get<0>(data), get<1>(data));
 
         // zstd::zstd_compress(get<0>(data), get<1>(data));
 
@@ -998,106 +1096,126 @@ bool Compressor::compress_meta(vector<string> v_samples,const string& v_header)
 
         // lz4:: lz4_compress(get<0>(data), get<1>(data), 12);
         // BrotliUtils::compressData(get<0>(data), get<1>(data));
-        // std::cerr<<get<0>(data).size()<<":"<<get<1>(data).size()<<endl;    
-		// lzma2::lzma2_compress(get<0>(data), get<1>(data), get<2>(data), 10);
-		// std::cerr << get<2>(data) << " size: " << get<1>(data).size() << endl;
+        // std::cerr<<get<0>(data).size()<<":"<<get<1>(data).size()<<endl;
+        // lzma2::lzma2_compress(get<0>(data), get<1>(data), get<2>(data), 10);
+        // std::cerr << get<2>(data) << " size: " << get<1>(data).size() << endl;
 
-		// fh.WriteUInt(get<1>(data).size(), 4, f);
-		// fh.Write(get<1>(data).data(), get<1>(data).size(), f);
-	}
+        // fh.WriteUInt(get<1>(data).size(), 4, f);
+        // fh.Write(get<1>(data).data(), get<1>(data).size(), f);
+    }
 
-	return true;
+    return true;
 }
-//init bsc compress params
+// init bsc compress params
 //******************************************************************************************************************************************
-void Compressor::InitCompressParams(){
-    
+void Compressor::InitCompressParams()
+{
+
     v_coder_part_ids.resize(no_keys, 0);
     field_data_codecs.resize(no_keys);
     field_size_codecs.resize(no_keys);
-   
+
     for (uint32_t i = 0; i < no_keys; ++i)
-    {   
+    {
         field_size_codecs[i] = MakeCompressionStrategy(params.backend, p_bsc_size);
         bsc_params_t param = p_bsc_text;
-        
+
         switch (keys[i].type)
-		{
-		case BCF_HT_FLAG:
-			param = p_bsc_flag;
-			break;
-		case BCF_HT_INT:
+        {
+        case BCF_HT_FLAG:
+            param = p_bsc_flag;
+            break;
+        case BCF_HT_INT:
             param = p_bsc_int;
-			break;
-		case BCF_HT_REAL:
-			param = p_bsc_real;
-			break;
-		case BCF_HT_STR:
-			param = p_bsc_text;
-			break;
-		}
+            break;
+        case BCF_HT_REAL:
+            param = p_bsc_real;
+            break;
+        case BCF_HT_STR:
+            param = p_bsc_text;
+            break;
+        }
         field_data_codecs[i] = MakeCompressionStrategy(params.backend, param);
     }
-
- 
 }
-void Compressor::lock_gt_block_process(int &_block_id)
+void Compressor::lock_gt_block_process(int &_block_id, uint32_t _col_block_id)
 {
-	unique_lock<mutex> lck(mtx_gt_block);
-	cv_gt_block.wait(lck, [&, this] {return cur_block_id == _block_id;});
+    unique_lock<mutex> lck(mtx_gt_block);
+    cv_gt_block.wait(lck, [&, this]
+                     {
+        if (n_col_blocks <= 1) {
+            return cur_block_id == _block_id;
+        }
+        return cur_block_id == _block_id && cur_col_block_id == _col_block_id; });
 }
 
 // ************************************************************************************
 bool Compressor::check_gt_block_process(int &_block_id)
 {
-	unique_lock<mutex> lck(mtx_gt_block);
+    unique_lock<mutex> lck(mtx_gt_block);
 
-	return (int) cur_block_id == _block_id;
+    return (int)cur_block_id == _block_id;
 }
 
 // ************************************************************************************
-void Compressor::unlock_gt_block_process()
+void Compressor::unlock_gt_block_process(uint32_t _col_block_id)
 {
-	lock_guard<mutex> lck(mtx_gt_block);
-    ++cur_block_id;
-	cv_gt_block.notify_all();
+    lock_guard<mutex> lck(mtx_gt_block);
+    (void)_col_block_id; // suppress unused warning; ordering handled via cur_col_block_id
+    if (n_col_blocks <= 1)
+    {
+        ++cur_block_id;
+    }
+    else
+    {
+        // Advance column block cursor; roll over to next row block when last column is processed
+        ++cur_col_block_id;
+        if (cur_col_block_id >= n_col_blocks)
+        {
+            cur_col_block_id = 0;
+            ++cur_block_id;
+        }
+    }
+    cv_gt_block.notify_all();
 }
-bool Compressor::compressFixedFields(fixed_field_block &fixed_field_block_io){
+bool Compressor::compressFixedFields(fixed_field_block &fixed_field_block_io)
+{
 
     fixed_field_block_compress.no_variants = fixed_field_block_io.no_variants;
     auto codec = MakeCompressionStrategy(params.backend, p_bsc_fixed_fields);
     for (auto data : {
-        make_tuple(ref(fixed_field_block_io.chrom), ref(fixed_field_block_compress.chrom),  "chrom"),
-        make_tuple(ref(fixed_field_block_io.id), ref(fixed_field_block_compress.id),  "id"),
-        make_tuple(ref(fixed_field_block_io.alt), ref(fixed_field_block_compress.alt), "alt"),
-        make_tuple(ref(fixed_field_block_io.qual), ref(fixed_field_block_compress.qual), "qual"),          
-        make_tuple(ref(fixed_field_block_io.pos), ref(fixed_field_block_compress.pos),  "pos"),
-        make_tuple(ref(fixed_field_block_io.ref), ref(fixed_field_block_compress.ref), "ref"),
-        // make_tuple(ref(fixed_field_block_io.gt_block), ref(fixed_field_block_compress.gt_block), "GT"),
-    })
-    {         
+             make_tuple(ref(fixed_field_block_io.chrom), ref(fixed_field_block_compress.chrom), "chrom"),
+             make_tuple(ref(fixed_field_block_io.id), ref(fixed_field_block_compress.id), "id"),
+             make_tuple(ref(fixed_field_block_io.alt), ref(fixed_field_block_compress.alt), "alt"),
+             make_tuple(ref(fixed_field_block_io.qual), ref(fixed_field_block_compress.qual), "qual"),
+             make_tuple(ref(fixed_field_block_io.pos), ref(fixed_field_block_compress.pos), "pos"),
+             make_tuple(ref(fixed_field_block_io.ref), ref(fixed_field_block_compress.ref), "ref"),
+             // make_tuple(ref(fixed_field_block_io.gt_block), ref(fixed_field_block_compress.gt_block), "GT"),
+         })
+    {
 
-        //BSC
+        // BSC
 
-        codec->Compress(get<0>(data), get<1>(data));   
+        codec->Compress(get<0>(data), get<1>(data));
 
-        //ZSTD  
+        // ZSTD
 
         // zstd::zstd_compress(get<0>(data), get<1>(data));
 
-        //LZMA
+        // LZMA
 
         // LZMACompress::Compress(get<0>(data), get<1>(data), 9);
 
         // lz4:: lz4_compress(get<0>(data), get<1>(data), 12);
         // BrotliUtils::compressData(get<0>(data), get<1>(data));
 
-        // std::cerr<<get<0>(data).size()<<":"<<get<1>(data).size()<<endl;    
+        // std::cerr<<get<0>(data).size()<<":"<<get<1>(data).size()<<endl;
     }
     auto gt_codec = MakeCompressionStrategy(params.backend, p_bsc_fixed_fields);
     gt_codec->Compress(fixed_field_block_io.gt_block, fixed_field_block_compress.gt_block);
     uint8_t marker = 0;
-    switch (params.backend) {
+    switch (params.backend)
+    {
     case compression_backend_t::bsc:
         marker = 0;
         break;
@@ -1114,23 +1232,24 @@ bool Compressor::compressFixedFields(fixed_field_block &fixed_field_block_io){
     fixed_field_block_compress.gt_block.emplace_back(marker);
     writeTempFlie(fixed_field_block_compress);
     // comp_sort_block_queue.Push(fixed_field_block_id,fixed_field_block_compress);
-    fixed_field_block_compress.Clear();    
+    fixed_field_block_compress.Clear();
     return true;
 }
 
-bool Compressor::writeTempFlie(fixed_field_block &fixed_field_block_io){
+bool Compressor::writeTempFlie(fixed_field_block &fixed_field_block_io)
+{
 
     uint64_t offset = ftell(temp_file) + sizeof(uint64_t);
-    
+
     uint64_t start_offset = ftell(temp_file);
     size_t comp_size = 0;
     fwrite(&offset, sizeof(offset), 1, temp_file);
-    
+
     fwrite(&fixed_field_block_io.no_variants, sizeof(uint32_t), 1, temp_file);
     comp_size = static_cast<uint32_t>(fixed_field_block_io.chrom.size());
     fwrite(&comp_size, sizeof(uint32_t), 1, temp_file);
     fwrite(fixed_field_block_io.chrom.data(), 1, fixed_field_block_io.chrom.size(), temp_file);
-    
+
     comp_size = static_cast<uint32_t>(fixed_field_block_io.pos.size());
     fwrite(&comp_size, sizeof(uint32_t), 1, temp_file);
     fwrite(fixed_field_block_io.pos.data(), 1, fixed_field_block_io.pos.size(), temp_file);
@@ -1154,14 +1273,13 @@ bool Compressor::writeTempFlie(fixed_field_block &fixed_field_block_io){
     comp_size = static_cast<uint32_t>(fixed_field_block_io.gt_block.size());
     fwrite(&comp_size, sizeof(uint32_t), 1, temp_file);
     fwrite(fixed_field_block_io.gt_block.data(), 1, fixed_field_block_io.gt_block.size(), temp_file);
-    
+
     offset = ftell(temp_file) - offset;
 
     fseek(temp_file, start_offset, SEEK_SET);
-  
+
     fwrite(&offset, sizeof(offset), 1, temp_file);
     fseek(temp_file, 0, SEEK_END);
 
-    return  true;
-
+    return true;
 }

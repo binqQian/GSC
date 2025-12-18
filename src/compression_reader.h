@@ -35,8 +35,20 @@ class CompressionReader {
 
     uint32_t no_samples;
     uint32_t ploidy;
-    uint64_t vec_len;   
+    uint64_t vec_len;
     uint64_t no_vec;
+
+    // GT column tiling metadata
+    uint32_t max_block_cols;            // Max haplotypes per column block (from params)
+    uint32_t n_col_blocks;              // Number of column blocks
+    uint32_t total_haplotypes;          // Total number of haplotypes
+    vector<uint32_t> col_block_sizes;   // Haplotypes per column block
+    vector<uint64_t> col_block_vec_lens; // vec_len for each column block
+
+    // Tiled mode: per-column-block buffers and counters
+    vector<CBitMemory> col_bv_buffers;   // One buffer per column block
+    vector<uint32_t> col_vec_read_in_block;  // Vectors read in current block for each column
+
     vector<string> samples_list;
     vector<variant_desc_t> v_vcf_data_compress;
     int *cur_g_data = nullptr;
@@ -120,6 +132,8 @@ public:
         vcf_hdr_read = false;
         no_samples = 0;
         ploidy = 0;
+        max_block_cols = 0;
+        n_col_blocks = 1;
         no_chrom_num = 0;
         no_vec = 0;
         start_flag = true;
@@ -133,6 +147,8 @@ public:
         vcf_hdr_read = false;
         no_samples = 0;
         ploidy = params.ploidy;
+        max_block_cols = params.max_block_cols;
+        n_col_blocks = 1;
         no_chrom_num = 0;
         in_file_name = params.in_file_name;
         in_type = params.in_type;
@@ -189,10 +205,18 @@ public:
     void InitVarinats(File_Handle_2 *_file_handle2);
 	bool ProcessInVCF();
 	uint32_t setNoVecBlock(GSC_Params & params);
+    void initializeColumnBlocks();
 	void GetWhereChrom(vector<pair<std::string,uint32_t>> &_where_chrom,vector<int64_t> &chunks_min_pos);
     uint32_t GetOtherFieldsBlockSum();
     void GetOtherField(vector<key_desc> &_keys,uint32_t &_no_keys,int &_key_gt_id);
     vector<uint32_t> GetActualVariants();
     void UpdateKeys(vector<key_desc> &_keys);
     void CloseFiles();
+
+    // Get column block tiling information
+    uint32_t GetNumColumnBlocks() const { return n_col_blocks; }
+    const vector<uint32_t>& GetColumnBlockSizes() const { return col_block_sizes; }
+    uint32_t GetTotalHaplotypes() const { return total_haplotypes; }
+    uint32_t GetMaxBlockCols() const { return max_block_cols; }
+    const vector<uint64_t>& GetColumnBlockVecLens() const { return col_block_vec_lens; }
 };

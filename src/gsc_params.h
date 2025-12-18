@@ -47,6 +47,10 @@ struct GSC_Params
     compression_backend_t backend;
     file_type in_type, out_type;
     uint32_t max_replication_depth, max_MB_memory;
+    // Maximum variants per block and haplotypes (samples*ploidy) per column block.
+    // Defaults tuned to cap memory on large cohorts.
+    uint32_t max_block_rows;
+    uint32_t max_block_cols;
     std::string in_file_name;
     std::string out_file_name;
     std::string out_samples_file_name;
@@ -89,6 +93,8 @@ struct GSC_Params
         compress_mode = compress_mode_t::lossless_mode;
         backend = compression_backend_t::bsc;
         max_replication_depth = 100;
+        max_block_rows = 10000;
+        max_block_cols = 10000;
         ploidy = 2;
         no_threads = 5;
         no_gt_threads = 1;

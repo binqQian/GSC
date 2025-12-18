@@ -40,10 +40,20 @@ class DecompressionReader {
 #endif
 
 	
-	uint64_t vec_len;
+    uint64_t vec_len;
     // uint32_t max_no_vec_in_block;
     uint32_t ploidy;
+    uint32_t max_block_rows = 0;
+    uint32_t max_block_cols = 0;
     uint32_t n_samples;
+
+    // GT column tiling metadata
+    uint32_t n_col_blocks = 1;           // Number of column blocks
+    uint32_t total_haplotypes = 0;       // Total number of haplotypes
+    vector<pair<uint32_t, uint32_t>> col_block_ranges; // (start_haplotype, n_haplotypes) per column block
+    vector<uint64_t> col_block_vec_lens; // vec_len for each column block
+    bool useLegacyPath = true;           // Backward compatibility flag
+    vector<uint32_t> chunk_block_offsets;
     uint64_t no_vec;
     uint64_t no_copy;
     uint32_t used_bits_cp;
@@ -54,7 +64,9 @@ class DecompressionReader {
 	vector<pair<std::string,uint32_t>> d_where_chrom;
 	vector<int64_t> chunks_min_pos;
 	map<int, chunk_stream> chunks_streams;
-	map<uint32_t,vector<uint8_t>> vint_last_perm;
+    // GT column tiling: 2D permutation map (row_block, col_block) -> perm
+    map<pair<uint32_t, uint32_t>, vector<uint8_t>> vint_last_perm_2d;
+	map<uint32_t,vector<uint8_t>> vint_last_perm;  // Legacy format (deprecated)
 
 	size_t p_chrom;
 	size_t p_pos;
@@ -147,8 +159,8 @@ public:
 	void InitDecompressParams();
 	void decompress_meta(vector<string> &v_samples, string &header);
 	bool readFixedFields();
-	
-	bool Decoder(vector<block_t> &v_blocks,vector<vector<uint32_t>> &s_perm,vector<uint8_t> &gt_index,uint32_t cur_chunk_id);
+
+	bool Decoder(vector<block_t> &v_blocks,vector<vector<vector<uint32_t>>> &s_perm,vector<uint8_t> &gt_index,uint32_t cur_chunk_id);
 	bool setStartChunk(uint32_t start_chunk);
 	uint32_t getActualPos(uint32_t chunk_id);
 

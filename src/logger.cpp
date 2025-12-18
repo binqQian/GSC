@@ -1,6 +1,7 @@
 #include "logger.h"
 
 #include <iostream>
+#include <algorithm>
 
 #include <spdlog/sinks/dist_sink.h>
 #include <spdlog/sinks/rotating_file_sink.h>
@@ -9,6 +10,23 @@
 namespace {
 constexpr std::size_t kMaxLogFileSize = 10 * 1024 * 1024;  // 10MB
 constexpr std::size_t kMaxRotatedFiles = 3;
+
+spdlog::level::level_enum ResolveLevel(spdlog::level::level_enum fallback) {
+    const char* env = std::getenv("GSC_LOG_LEVEL");
+    if (!env) {
+        return fallback;
+    }
+    std::string val(env);
+    std::transform(val.begin(), val.end(), val.begin(), ::tolower);
+    if (val == "trace") return spdlog::level::trace;
+    if (val == "debug") return spdlog::level::debug;
+    if (val == "info") return spdlog::level::info;
+    if (val == "warn" || val == "warning") return spdlog::level::warn;
+    if (val == "error") return spdlog::level::err;
+    if (val == "critical" || val == "fatal") return spdlog::level::critical;
+    if (val == "off") return spdlog::level::off;
+    return fallback;
+}
 }  // namespace
 
 LogManager& LogManager::Instance() {
@@ -19,7 +37,7 @@ LogManager& LogManager::Instance() {
 void LogManager::Initialize(const std::string& log_file, spdlog::level::level_enum level) {
     std::call_once(init_flag_, [this, log_file, level]() {
         try {
-            ConfigureLogger(log_file, level);
+            ConfigureLogger(log_file, ResolveLevel(level));
         } catch (const spdlog::spdlog_ex& ex) {
             std::cerr << "Failed to initialize logger: " << ex.what() << std::endl;
         }

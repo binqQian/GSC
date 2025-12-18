@@ -3,6 +3,8 @@
 
 #include <unistd.h>
 
+#include <cstdlib>
+
 #include <string>
 
 #include "gsc_params.h"
@@ -101,6 +103,8 @@ Options:
     -M,  --mode_lossly     Choose lossy compression mode (lossless by default).
     -b,  --bcf             Input is a BCF file (default: VCF or VCF.GZ).
     -p,  --ploidy [X]      Set ploidy of samples in input VCF to [X] (default: 2).
+        --max-block-rows [X]  Max variants per GT block (default: 10000).
+        --max-block-cols [X]  Max haplotypes (samples * ploidy) per GT column block (default: 10000).
     -t,  --threads [X]     Set number of threads to [X] (default: 1).
     -d,  --depth [X]       Set maximum replication depth to [X] (default: 100, 0 means no matches).
     -m,  --merge [X]       Specify files to merge, separated by commas (e.g., -m chr1.vcf,chr2.vcf), or '@' followed by a file containing a list of VCF files (e.g., -m @file_with_IDs.txt). By default, all VCF files are compressed.
@@ -210,6 +214,11 @@ int main(int argc, const char *argv[])
     
     LogManager::Instance().Initialize();
     auto logger = LogManager::Instance().Logger();
+    // Default to debug output unless overridden via GSC_LOG_LEVEL
+    const char* env_log = std::getenv("GSC_LOG_LEVEL");
+    if (!env_log) {
+        LogManager::Instance().SetLevel(spdlog::level::debug);
+    }
     high_resolution_clock::time_point start = high_resolution_clock::now();
 
     int result = 0;
@@ -342,6 +351,24 @@ int params_options(int argc, const char *argv[]){
                     usage_compress();
 
                 params.ploidy = temp;
+            }
+            else if (strcmp(argv[i], "--max-block-rows") == 0){
+                i++;
+                if (i >= argc)
+                    return usage_compress();
+                temp = atoi(argv[i]);
+                if (temp < 1)
+                    usage_compress();
+                params.max_block_rows = static_cast<uint32_t>(temp);
+            }
+            else if (strcmp(argv[i], "--max-block-cols") == 0){
+                i++;
+                if (i >= argc)
+                    return usage_compress();
+                temp = atoi(argv[i]);
+                if (temp < 1)
+                    usage_compress();
+                params.max_block_cols = static_cast<uint32_t>(temp);
             }
             else if (strcmp(argv[i], "--depth") == 0 || strcmp(argv[i], "-d") == 0){
                 

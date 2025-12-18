@@ -110,7 +110,7 @@ bool DecompressionReader::OpenReading(const string &in_file_name, const bool &_d
 
 		out.close();
 	}
-	logger->debug("Mode: {} other_fields_offset: {} sdsl_offset: {}", mode_type, other_fields_offset, sdsl_offset);
+	logger->info("Mode: {} other_fields_offset: {} sdsl_offset: {}", mode_type, other_fields_offset, sdsl_offset);
 	in.seekg(sdsl_offset, std::ios::beg);
 
 	rrr_zeros_bit_vector[0].load(in);
@@ -147,8 +147,8 @@ bool DecompressionReader::OpenReading(const string &in_file_name, const bool &_d
 
 		fclose(comp);
 
-		logger->debug("File start position: {}", FileStartPosition);
-		logger->debug("Archive size: {}", arch_size);
+		logger->info("File start position: {}", FileStartPosition);
+		logger->info("Archive size: {}", arch_size);
 	}
 #else // if BOOST
 	/*    const boost::interprocess::mode_t mode = boost::interprocess::read_only;
@@ -186,6 +186,12 @@ bool DecompressionReader::OpenReading(const string &in_file_name, const bool &_d
 	}
 	memcpy(&ploidy, buf + buf_pos, sizeof(uint8_t));
 	buf_pos = buf_pos + sizeof(uint8_t);
+
+	memcpy(&max_block_rows, buf + buf_pos, sizeof(uint32_t));
+	buf_pos = buf_pos + sizeof(uint32_t);
+
+	memcpy(&max_block_cols, buf + buf_pos, sizeof(uint32_t));
+	buf_pos = buf_pos + sizeof(uint32_t);
 
 	memcpy(&vec_len, buf + buf_pos, sizeof(uint64_t));
 	buf_pos = buf_pos + sizeof(uint64_t);
@@ -240,6 +246,62 @@ bool DecompressionReader::OpenReading(const string &in_file_name, const bool &_d
 		memcpy(&d_where_chrom[i].second, buf + buf_pos, sizeof(uint32_t));
 		buf_pos = buf_pos + sizeof(uint32_t);
 	}
+
+	// Read GT column tiling metadata (with backward compatibility for old files)
+	// Try to read column block metadata (may not exist in old files)
+	if (buf_pos + sizeof(uint32_t) <= sdsl_offset)
+	{
+		uint32_t saved_pos = buf_pos;
+		memcpy(&n_col_blocks, buf + buf_pos, sizeof(uint32_t));
+		buf_pos += sizeof(uint32_t);
+
+		// Validate that n_col_blocks is reasonable (between 1 and 10000)
+		if (n_col_blocks > 0 && n_col_blocks <= 10000)
+		{
+			col_block_ranges.reserve(n_col_blocks);
+			col_block_vec_lens.reserve(n_col_blocks);
+			total_haplotypes = n_samples * ploidy;
+
+			for (uint32_t cb = 0; cb < n_col_blocks; ++cb)
+			{
+				uint32_t start, size;
+				memcpy(&start, buf + buf_pos, sizeof(uint32_t));
+				buf_pos += sizeof(uint32_t);
+				memcpy(&size, buf + buf_pos, sizeof(uint32_t));
+				buf_pos += sizeof(uint32_t);
+				col_block_ranges.emplace_back(start, size);
+				col_block_vec_lens.push_back((size + 7) / 8);
+			}
+		}
+		else
+		{
+			// Invalid n_col_blocks, restore position (old file format)
+			buf_pos = saved_pos;
+			n_col_blocks = 1;
+			total_haplotypes = n_samples * ploidy;
+			col_block_ranges.emplace_back(0, total_haplotypes);
+			col_block_vec_lens.push_back(vec_len);
+		}
+	}
+	else
+	{
+		// Old format: no column tiling metadata
+		n_col_blocks = 1;
+		total_haplotypes = n_samples * ploidy;
+		col_block_ranges.emplace_back(0, total_haplotypes);
+		col_block_vec_lens.push_back(vec_len);
+	}
+
+	// Set useLegacyPath flag before reading permutations
+	if (max_block_rows == 0)
+		max_block_rows = total_haplotypes;
+	if (max_block_cols == 0)
+		max_block_cols = total_haplotypes;
+	bool legacy_cols = (max_block_cols >= total_haplotypes);
+	bool legacy_rows = (max_block_rows == total_haplotypes);
+	useLegacyPath = legacy_cols && legacy_rows && (n_col_blocks == 1);
+
+	// Read vint_last_perm (supports both old and new formats)
 	uint32_t vint_last_perm_size;
 	memcpy(&vint_last_perm_size, buf + buf_pos, sizeof(uint32_t));
 	buf_pos = buf_pos + sizeof(uint32_t);
@@ -247,10 +309,19 @@ bool DecompressionReader::OpenReading(const string &in_file_name, const bool &_d
 	for (uint32_t i = 0; i < vint_last_perm_size; ++i)
 	{
 		uint32_t data_size;
-		uint32_t first;
+		uint32_t first, second = 0;
 
 		memcpy(&first, buf + buf_pos, sizeof(uint32_t));
 		buf_pos = buf_pos + sizeof(uint32_t);
+
+		// New format: read col_block_id (second parameter)
+		// Old format (legacy path) stores only row_block_id
+		if (!useLegacyPath)
+		{
+			memcpy(&second, buf + buf_pos, sizeof(uint32_t));
+			buf_pos = buf_pos + sizeof(uint32_t);
+		}
+
 		memcpy(&data_size, buf + buf_pos, sizeof(uint32_t));
 		buf_pos = buf_pos + sizeof(uint32_t);
 		// std::cerr<<first<<":"<<data_size<<endl;
@@ -259,8 +330,16 @@ bool DecompressionReader::OpenReading(const string &in_file_name, const bool &_d
 		memcpy(&data[0], buf + buf_pos, data_size * sizeof(uint8_t));
 		buf_pos = buf_pos + data_size * sizeof(uint8_t);
 
-		vint_last_perm.emplace(first, data);
+		// Store in 2D map
+		vint_last_perm_2d.emplace(make_pair(first, second), data);
+
+		// For backward compatibility: also store in legacy map
+		if (useLegacyPath)
+		{
+			vint_last_perm.emplace(first, data);
+		}
 	}
+
 	// std::cerr<<"vint_last_perm_size: "<<vint_last_perm_size<<endl;
 	uint32_t comp_size;
 	memcpy(&comp_size, buf + buf_pos, sizeof(uint32_t));
@@ -276,6 +355,28 @@ bool DecompressionReader::OpenReading(const string &in_file_name, const bool &_d
 	comp_v_samples.resize(comp_size);
 	memcpy(&comp_v_samples[0], buf + buf_pos, comp_size * sizeof(uint8_t));
 	buf_pos = buf_pos + comp_size * sizeof(uint8_t);
+
+	// Precompute block offsets per chunk for tiled permutations
+	uint32_t row_block_variants = max_block_rows ? max_block_rows : total_haplotypes;
+	chunk_block_offsets.clear();
+	if (row_block_variants)
+	{
+		chunk_block_offsets.resize(chunks_streams_size);
+		uint32_t blocks_before = 0;
+		uint32_t prev_variants = 0;
+		for (uint32_t chunk_id = 0; chunk_id < chunks_streams_size; ++chunk_id)
+		{
+			auto it = chunks_streams.find(chunk_id);
+			uint32_t cur_variants = 0;
+			if (it != chunks_streams.end())
+				cur_variants = it->second.cur_chunk_actual_pos;
+			uint32_t chunk_variants = cur_variants - prev_variants;
+			uint32_t blocks_in_chunk = (chunk_variants + row_block_variants - 1) / row_block_variants;
+			chunk_block_offsets[chunk_id] = blocks_before;
+			blocks_before += blocks_in_chunk;
+			prev_variants = cur_variants;
+		}
+	}
 
 	buf = buf - FileStartPosition;
 
@@ -315,12 +416,14 @@ bool DecompressionReader::OpenReadingPart2(const string &in_file_name)
 		logger->error("Corrupted part2!");
 		exit(0);
 	}
-	if (part2_params_data.empty()) {
+	if (part2_params_data.empty())
+	{
 		logger->error("Corrupted part2: empty params payload.");
 		return false;
 	}
 	const uint8_t backend_id = part2_params_data[0];
-	if (backend_id <= static_cast<uint8_t>(compression_backend_t::brotli)) {
+	if (backend_id <= static_cast<uint8_t>(compression_backend_t::brotli))
+	{
 		backend = static_cast<compression_backend_t>(backend_id);
 	}
 	InitializeCompressionBackend(backend);
@@ -348,10 +451,12 @@ bool DecompressionReader::OpenReadingPart2(const string &in_file_name)
 		read(v_desc, pos_part2_params, keys[i].type);
 		// std::cerr<<keys[i].key_id<<" "<<keys[i].actual_field_id<<endl;
 	}
-	if (pos_part2_params < v_desc.size()) {
+	if (pos_part2_params < v_desc.size())
+	{
 		uint32_t backend_id = 0;
 		read(v_desc, pos_part2_params, backend_id);
-		if (backend_id <= static_cast<uint32_t>(compression_backend_t::brotli)) {
+		if (backend_id <= static_cast<uint32_t>(compression_backend_t::brotli))
+		{
 			backend = static_cast<compression_backend_t>(backend_id);
 		}
 	}
@@ -398,8 +503,7 @@ bool DecompressionReader::OpenReadingPart2(const string &in_file_name)
 															   v_packages[pck->key_id] = pck;
 														   }
 														   cv_packages.notify_all();
-													   }
-												   }));
+													   } }));
 	}
 
 	return true;
@@ -679,7 +783,7 @@ void DecompressionReader::initDecoderParams()
 	fixed_field_block_io.Clear();
 	fixed_field_block_io.Initalize();
 }
-bool DecompressionReader::Decoder(std::vector<block_t> &v_blocks, std::vector<std::vector<uint32_t>> &s_perm, std::vector<uint8_t> &gt_index, uint32_t cur_chunk_id)
+bool DecompressionReader::Decoder(std::vector<block_t> &v_blocks, std::vector<std::vector<std::vector<uint32_t>>> &s_perm, std::vector<uint8_t> &gt_index, uint32_t cur_chunk_id)
 {
 	// Initialize decoder parameters
 	initDecoderParams();
@@ -688,7 +792,11 @@ bool DecompressionReader::Decoder(std::vector<block_t> &v_blocks, std::vector<st
 	// Other initializations here...
 	std::vector<variant_desc_t> v_vcf_fixed_data_io;
 	std::vector<variant_desc_t> v_vcf_sort_data_io;
-	uint32_t block_size = n_samples * static_cast<uint32_t>(ploidy);
+	uint32_t row_block_variants = max_block_rows ? max_block_rows : total_haplotypes;
+	uint32_t block_size = useLegacyPath ? (n_samples * static_cast<uint32_t>(ploidy)) : row_block_variants;
+	uint32_t global_block_start = 0;
+	if (!useLegacyPath && cur_chunk_id < chunk_block_offsets.size())
+		global_block_start = chunk_block_offsets[cur_chunk_id];
 	v_vcf_fixed_data_io.reserve(no_variants_in_buf);
 	v_vcf_sort_data_io.reserve(no_variants_in_buf);
 	std::vector<uint32_t> perm(block_size, 0);
@@ -765,14 +873,13 @@ bool DecompressionReader::Decoder(std::vector<block_t> &v_blocks, std::vector<st
 			break;
 		}
 		uint32_t i_variant;
+		uint32_t block_id_local = 0;
 		variant_desc_t desc;
-		for(i_variant = 0; i_variant < no_variants; i_variant++) 	
+		for (i_variant = 0; i_variant < no_variants; i_variant++)
 		{
 			int64_t pos = 0;
 			// Load variant description
-			
 			read(fixed_field_block_io.pos, p_pos, pos);
-			
 			pos += prev_pos;
 			prev_pos = pos;
 			desc.pos = pos;
@@ -780,31 +887,86 @@ bool DecompressionReader::Decoder(std::vector<block_t> &v_blocks, std::vector<st
 			desc.filter = ".";
 			desc.info = ".";
 			v_vcf_sort_data_io.emplace_back(desc);
-			if ((i_variant+1) % block_size == 0)
+			if ((i_variant + 1) % block_size == 0)
 			{
-				out_perm(perm, v_vcf_sort_data_io);
-				s_perm.emplace_back(perm);
+				if (useLegacyPath)
+				{
+					out_perm(perm, v_vcf_sort_data_io);
+					// For 3D structure: wrap perm in a 2D vector (legacy: single column block)
+					vector<vector<uint32_t>> row_perm;
+					row_perm.emplace_back(perm);
+					s_perm.emplace_back(row_perm);
+				}
+				else
+				{
+					vector<vector<uint32_t>> row_perm(n_col_blocks);
+					for (uint32_t cb = 0; cb < n_col_blocks; ++cb)
+					{
+						auto it = vint_last_perm_2d.find(make_pair(global_block_start + block_id_local, cb));
+						if (it == vint_last_perm_2d.end())
+						{
+							row_perm[cb].resize(col_block_ranges[cb].second);
+							for (size_t i_p = 0; i_p < row_perm[cb].size(); ++i_p)
+								row_perm[cb][i_p] = static_cast<uint32_t>(i_p);
+						}
+						else
+						{
+							row_perm[cb] = vint_code::DecodeArray(it->second);
+						}
+					}
+					s_perm.emplace_back(row_perm);
+				}
+				if (!useLegacyPath)
+				{
+					for (size_t i_p = 0; i_p < v_vcf_sort_data_io.size(); i_p++)
+					{
+						if (atoi(v_vcf_sort_data_io[i_p].ref.c_str()))
+						{
+							v_vcf_sort_data_io[i_p].ref = v_vcf_sort_data_io[i_p].ref.substr(to_string(atoi(v_vcf_sort_data_io[i_p].ref.c_str())).length());
+						}
+					}
+				}
 				v_blocks.emplace_back(v_vcf_sort_data_io);
 				v_vcf_sort_data_io.clear();
+				block_id_local++;
 			}
 		}
 		if (i_variant % block_size)
 		{
-
-			auto it = vint_last_perm.find(cur_chunk_id);
-			
-			perm = vint_code::DecodeArray(it->second);
-
-			s_perm.emplace_back(perm);
-
-			for (size_t i_p = 0; i_p < i_variant % block_size; i_p++)
+			if (useLegacyPath)
+			{
+				auto it = vint_last_perm.find(cur_chunk_id);
+				perm = vint_code::DecodeArray(it->second);
+				vector<vector<uint32_t>> row_perm;
+				row_perm.emplace_back(perm);
+				s_perm.emplace_back(row_perm);
+			}
+			else
+			{
+				vector<vector<uint32_t>> row_perm(n_col_blocks);
+				for (uint32_t cb = 0; cb < n_col_blocks; ++cb)
+				{
+					auto it = vint_last_perm_2d.find(make_pair(global_block_start + block_id_local, cb));
+					if (it == vint_last_perm_2d.end())
+					{
+						row_perm[cb].resize(col_block_ranges[cb].second);
+						for (size_t i_p = 0; i_p < row_perm[cb].size(); ++i_p)
+							row_perm[cb][i_p] = static_cast<uint32_t>(i_p);
+					}
+					else
+					{
+						row_perm[cb] = vint_code::DecodeArray(it->second);
+					}
+				}
+				s_perm.emplace_back(row_perm);
+			}
+			for (size_t i_p = 0; i_p < v_vcf_sort_data_io.size(); i_p++)
 			{
 				if (atoi(v_vcf_sort_data_io[i_p].ref.c_str()))
 				{
 					v_vcf_sort_data_io[i_p].ref = v_vcf_sort_data_io[i_p].ref.substr(to_string(atoi(v_vcf_sort_data_io[i_p].ref.c_str())).length());
 				}
 			}
-
 			v_blocks.emplace_back(v_vcf_sort_data_io);
 			v_vcf_sort_data_io.clear();
 		} });

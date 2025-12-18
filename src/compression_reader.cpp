@@ -5,42 +5,48 @@
 #include <sstream>
 // ***************************************************************************************************************************************
 // ***************************************************************************************************************************************
-bool CompressionReader::OpenForReading(string & file_name)
+bool CompressionReader::OpenForReading(string &file_name)
 {
     auto logger = LogManager::Instance().Logger();
-    if(merge_flag){
-        bcf_hdr_t * temp_vcf_hdr = nullptr;
+    if (merge_flag)
+    {
+        bcf_hdr_t *temp_vcf_hdr = nullptr;
         vector<string> merge_file_names;
         long size = 0;
-        if(file_name[0] == '@')
+        if (file_name[0] == '@')
         {
-            
+
             std::ifstream directory_file_name(file_name.substr(1));
-            if(!directory_file_name.is_open())
+            if (!directory_file_name.is_open())
             {
                 logger->error("Cannot open {} file with samples.", file_name.substr(1));
                 exit(1);
             }
             std::string item;
-            
-            while (directory_file_name >> item) {
+
+            while (directory_file_name >> item)
+            {
                 merge_file_names.emplace_back(item);
-                size++;        
+                size++;
             }
-            logger->debug("Merge file list size: {}", size);
+            logger->info("Merge file list size: {}", size);
             directory_file_name.clear();
-        }else{   
+        }
+        else
+        {
             char delim = ',';
             std::stringstream ss(file_name);
             std::string item;
-            while (getline(ss, item, delim)) {
+            while (getline(ss, item, delim))
+            {
                 merge_file_names.emplace_back(item);
                 size++;
             }
         }
         merge_files.resize(size);
-        for(long i = 0;i < size;i++){
-            
+        for (long i = 0; i < size; i++)
+        {
+
             if (merge_files[i])
                 hts_close(merge_files[i]);
             if (in_type == file_type::VCF_File)
@@ -51,25 +57,25 @@ bool CompressionReader::OpenForReading(string & file_name)
             {
                 merge_files[i] = hts_open(merge_file_names[i].c_str(), "rb");
             }
-            if(!merge_files[i]){
+            if (!merge_files[i])
+            {
                 logger->error("Could not open {} file", merge_file_names[i]);
                 merge_failure_flag = true;
                 return false;
             }
             hts_set_opt(merge_files[i], HTS_OPT_CACHE_SIZE, 32 << 20);
             hts_set_opt(merge_files[i], HTS_OPT_BLOCK_SIZE, 32 << 20);
-            
+
             temp_vcf_hdr = bcf_hdr_read(merge_files[i]);
             vcf_hdr = bcf_hdr_merge(vcf_hdr, temp_vcf_hdr);
-
         }
         vcf_record = bcf_init();
-        
-        
-    }else{
-        if(in_file)
+    }
+    else
+    {
+        if (in_file)
             hts_close(in_file);
-        
+
         if (in_type == file_type::VCF_File)
         {
             in_file = hts_open(file_name.c_str(), "r");
@@ -78,13 +84,14 @@ bool CompressionReader::OpenForReading(string & file_name)
         {
             in_file = hts_open(file_name.c_str(), "rb");
         }
-        if(!in_file){
+        if (!in_file)
+        {
             logger->error("Could not open {} file", in_file_name);
             return false;
         }
         hts_set_opt(in_file, HTS_OPT_CACHE_SIZE, 32 << 20);
         hts_set_opt(in_file, HTS_OPT_BLOCK_SIZE, 32 << 20);
-        if(vcf_hdr)
+        if (vcf_hdr)
             bcf_hdr_destroy(vcf_hdr);
         vcf_hdr = bcf_hdr_read(in_file);
         int thread_count = 4;
@@ -98,18 +105,17 @@ bool CompressionReader::OpenForReading(string & file_name)
 // Get number of samples in VCF
 bool CompressionReader::ReadFile()
 {
-    
-    if(!(in_file || !merge_failure_flag) || !vcf_hdr)
+
+    if (!(in_file || !merge_failure_flag) || !vcf_hdr)
         return -1;
-        
+
     no_samples = bcf_hdr_nsamples(vcf_hdr);
     if (!vcf_hdr_read)
     {
-        
+
         for (size_t i = 0; i < no_samples; i++)
             samples_list.emplace_back(vcf_hdr->samples[i]);
 
-        
         vcf_hdr_read = true;
     }
     return true;
@@ -118,10 +124,10 @@ bool CompressionReader::ReadFile()
 // ***************************************************************************************************************************************
 uint32_t CompressionReader::GetSamples(vector<string> &s_list)
 {
-    
+
     if (!vcf_hdr_read)
     {
-        
+
         ReadFile();
     }
     s_list = samples_list;
@@ -140,14 +146,13 @@ bool CompressionReader::GetHeader(string &v_header)
     bcf_hdr_format(vcf_hdr, 0, &str);
     char *ptr = strstr(str.s, "#CHROM");
     v_header.assign(str.s, ptr - str.s);
-    if(str.m)
+    if (str.m)
         free(str.s);
     return true;
 }
 
-
 // ***************************************************************************************************************************************
-void CompressionReader::GetWhereChrom(vector<pair<std::string, uint32_t>> &_where_chrom,vector<int64_t> &_chunks_min_pos)
+void CompressionReader::GetWhereChrom(vector<pair<std::string, uint32_t>> &_where_chrom, vector<int64_t> &_chunks_min_pos)
 {
     _where_chrom = where_chrom;
     _chunks_min_pos = chunks_min_pos;
@@ -166,60 +171,119 @@ bool CompressionReader::setBitVector()
     block_max_size = vec_len * no_vec_in_block + 1;
     // phased_block_max_size = ((no_samples *  (ploidy-1)) / 8 + (((no_samples *  (ploidy-1)) % 8)?1:0))*no_vec_in_block/2;
     bv.Create(block_max_size);
-    
+
     vec_read_fixed_fields = 0;
     fixed_fields_id = 0;
     block_id = 0;
     vec_read_in_block = 0;
+
+    // Initialize column block tiling after vec_len is calculated
+    initializeColumnBlocks();
+
     return true;
 }
 // ***************************************************************************************************************************************
-void CompressionReader::GetOtherField(vector<key_desc> &_keys, uint32_t &_no_keys,int &_key_gt_id)
+void CompressionReader::initializeColumnBlocks()
+{
+    auto logger = LogManager::Instance().Logger();
+
+    // Guard against double initialization
+    if (!col_block_sizes.empty() || !col_block_vec_lens.empty())
+    {
+        logger->debug("Column blocks already initialized, skipping");
+        return;
+    }
+
+    total_haplotypes = no_samples * ploidy;
+
+    // Check if column tiling should be enabled
+    if (max_block_cols == 0 || max_block_cols >= total_haplotypes)
+    {
+        // Legacy single-column-block mode
+        n_col_blocks = 1;
+        col_block_sizes.push_back(total_haplotypes);
+        col_block_vec_lens.push_back(vec_len);
+        logger->info("Column tiling: LEGACY mode (n_col_blocks=1, total_haplotypes={})", total_haplotypes);
+        return;
+    }
+
+    // Tiled mode: calculate number of column blocks
+    n_col_blocks = (total_haplotypes + max_block_cols - 1) / max_block_cols;
+    col_block_sizes.reserve(n_col_blocks);
+    col_block_vec_lens.reserve(n_col_blocks);
+    col_bv_buffers.resize(n_col_blocks);
+    col_vec_read_in_block.resize(n_col_blocks, 0);
+
+    logger->info("Column tiling: TILED mode (n_col_blocks={}, total_haplotypes={}, max_block_cols={}, no_vec_in_block={})",
+                 n_col_blocks, total_haplotypes, max_block_cols, no_vec_in_block);
+
+    for (uint32_t cb = 0; cb < n_col_blocks; ++cb)
+    {
+        uint32_t start_hap = cb * max_block_cols;
+        uint32_t end_hap = std::min(start_hap + max_block_cols, total_haplotypes);
+        uint32_t block_size = end_hap - start_hap;
+
+        col_block_sizes.push_back(block_size);
+        // Calculate vec_len for this column block: ceil(block_size / 8)
+        uint64_t block_vec_len = (block_size + 7) / 8;
+        col_block_vec_lens.push_back(block_vec_len);
+
+        // Initialize buffer for this column block
+        uint64_t col_block_max_size = block_vec_len * no_vec_in_block + 1;
+        logger->info("  Column block {}: haplotypes={}, vec_len={}, buffer_size={}",
+                     cb, block_size, block_vec_len, col_block_max_size);
+        col_bv_buffers[cb].Create(col_block_max_size);
+    }
+}
+// ***************************************************************************************************************************************
+void CompressionReader::GetOtherField(vector<key_desc> &_keys, uint32_t &_no_keys, int &_key_gt_id)
 {
     _keys = keys;
     _no_keys = no_keys;
     _key_gt_id = key_gt_id;
-
 }
 void CompressionReader::UpdateKeys(vector<key_desc> &_keys)
 {
     // vector<key_desc>  tmp_keys = _keys;
     size_t k = 0;
-    if(order.size() < no_keys - no_flt_keys){
-        for(size_t i = 0; i < _keys.size();i++)
+    if (order.size() < no_keys - no_flt_keys)
+    {
+        for (size_t i = 0; i < _keys.size(); i++)
         {
-            if(_keys[i].keys_type == key_type_t::info)
+            if (_keys[i].keys_type == key_type_t::info)
             {
 
                 auto it = std::find(order.begin(), order.end(), _keys[i].actual_field_id);
-                if (it != order.end()) {
+                if (it != order.end())
+                {
                     _keys[i].actual_field_id = order[k++];
                 }
             }
-            else if(_keys[i].keys_type == key_type_t::fmt)
+            else if (_keys[i].keys_type == key_type_t::fmt)
             {
                 auto it = std::find(order.begin(), order.end(), _keys[i].actual_field_id);
-                if (it != order.end()) {
+                if (it != order.end())
+                {
                     _keys[i].actual_field_id = order[k++];
                 }
             }
         }
-    }else{
-        for(size_t i = 0; i < _keys.size();i++)
-        {
-            if(_keys[i].keys_type == key_type_t::info)
-            {
-
-                _keys[i].actual_field_id = order[k++];
-            }
-            else if(_keys[i].keys_type == key_type_t::fmt)
-            {
-                _keys[i].actual_field_id = order[k++];
-
-            }
-        }        
     }
+    else
+    {
+        for (size_t i = 0; i < _keys.size(); i++)
+        {
+            if (_keys[i].keys_type == key_type_t::info)
+            {
 
+                _keys[i].actual_field_id = order[k++];
+            }
+            else if (_keys[i].keys_type == key_type_t::fmt)
+            {
+                _keys[i].actual_field_id = order[k++];
+            }
+        }
+    }
 }
 // ***************************************************************************************************************************************
 void CompressionReader::InitVarinats(File_Handle_2 *_file_handle2)
@@ -231,7 +295,7 @@ void CompressionReader::InitVarinats(File_Handle_2 *_file_handle2)
     for (uint32_t i = 0; i < no_keys; i++)
         v_o_buf[i].SetMaxSize(max_buffer_size, 0);
     v_buf_ids_size.resize(no_keys, -1);
-	v_buf_ids_data.resize(no_keys, -1);
+    v_buf_ids_data.resize(no_keys, -1);
     // std::cerr << "no_keys:" << no_keys << endl;
     for (uint32_t i = 0; i < no_keys; i++)
     {
@@ -256,7 +320,7 @@ void CompressionReader::InitVarinats(File_Handle_2 *_file_handle2)
             break;
         }
     }
-    
+
     // file_handle2->RegisterStream("start");
     for (uint32_t i = 0; i < no_keys; i++)
     {
@@ -267,10 +331,7 @@ void CompressionReader::InitVarinats(File_Handle_2 *_file_handle2)
     {
         v_buf_ids_data[i] = file_handle2->RegisterStream("key_" + to_string(i) + "_data");
         // std::cerr<<v_buf_ids_data[i]<<endl;
-
-    }    
-    
-
+    }
 }
 // ***************************************************************************************************************************************
 bool CompressionReader::GetFilterInfoFormatKeys(int &no_flt_keys, int &no_info_keys, int &no_fmt_keys, vector<key_desc> &keys)
@@ -308,9 +369,8 @@ bool CompressionReader::GetFilterInfoFormatKeys(int &no_flt_keys, int &no_info_k
                     new_key.type = bcf_hdr_id2type(vcf_hdr, BCF_HL_FMT, id);
                     if (strcmp(vcf_hdr->id[BCF_DT_ID][id].key, "GT") == 0)
                     {
-                        key_gt_id = (int) keys.size();
+                        key_gt_id = (int)keys.size();
                     }
-                   
                 }
                 else // INFO
                 {
@@ -319,7 +379,7 @@ bool CompressionReader::GetFilterInfoFormatKeys(int &no_flt_keys, int &no_info_k
                     new_key.type = bcf_hdr_id2type(vcf_hdr, BCF_HL_INFO, id);
                 }
             }
-            new_key.actual_field_id = (uint32_t) keys.size();
+            new_key.actual_field_id = (uint32_t)keys.size();
             // std::cerr<<"new_key.actual_field_id:"<<new_key.key_id<<":"<<new_key.actual_field_id<<endl;
             keys.emplace_back(new_key);
         }
@@ -335,16 +395,15 @@ bool CompressionReader::GetVariantFromRec(bcf1_t *rec, vector<field_desc> &field
     field_order.reserve(no_keys);
     if (rec->d.n_flt)
     {
-        
+
         for (int i = 0; i < rec->d.n_flt; ++i)
         {
             fields[FilterIdToFieldId[rec->d.flt[i]]].present = true; // DEV, TMP
         }
-        
     }
 
     int curr_size = 0;
-                 
+
     // INFO
     if (rec->n_info)
     {
@@ -353,7 +412,7 @@ bool CompressionReader::GetVariantFromRec(bcf1_t *rec, vector<field_desc> &field
 
             bcf_info_t *z = &rec->d.info[i];
             // if(order.size() < no_keys - no_flt_keys || field_order_flag)
-                field_order.emplace_back(InfoIdToFieldId[z->key]);
+            field_order.emplace_back(InfoIdToFieldId[z->key]);
             auto &cur_field = fields[InfoIdToFieldId[z->key]];
             cur_field.present = true;
             if (!z->vptr)
@@ -420,19 +479,19 @@ bool CompressionReader::GetVariantFromRec(bcf1_t *rec, vector<field_desc> &field
             }
         }
     }
-    
+
     // FORMAT and individual information
     if (rec->n_sample)
     {
-        
+
         int i; // , j;
         if (rec->n_fmt)
         {
-            
+
             bcf_fmt_t *fmt = rec->d.fmt;
             for (i = 0; i < (int)rec->n_fmt; ++i)
             {
-                
+
                 if (!fmt[i].p)
                     continue;
                 if (fmt[i].id < 0) //! bcf_hdr_idinfo_exists(h,BCF_HL_FMT,fmt[i].id) )
@@ -442,11 +501,11 @@ bool CompressionReader::GetVariantFromRec(bcf1_t *rec, vector<field_desc> &field
                 }
 
                 // if(order.size() < no_keys - no_flt_keys || field_order_flag)
-                
-                    field_order.emplace_back(FormatIdToFieldId[fmt[i].id]);
+
+                field_order.emplace_back(FormatIdToFieldId[fmt[i].id]);
                 auto &cur_field = fields[FormatIdToFieldId[fmt[i].id]];
                 cur_field.present = true;
-                
+
                 int bcf_ht_type = bcf_hdr_id2type(vcf_hdr, BCF_HL_FMT, fmt[i].id); // BCF_HT_INT or BCF_HT_REAL or BCF_HT_FLAG or BCF_HT_STR
                 auto vcf_hdr_key = vcf_hdr->id[BCF_DT_ID][fmt[i].id].key;
                 // std::cerr<<vcf_hdr_key<<endl;
@@ -457,23 +516,21 @@ bool CompressionReader::GetVariantFromRec(bcf1_t *rec, vector<field_desc> &field
                     cur_field.data_size = curr_size - rec->n_sample;
                     cur_field.data = new char[cur_field.data_size];
                     int cur_phased_pos = 0;
-                    for(uint32_t j = 0; j < rec->n_sample; ++j)
+                    for (uint32_t j = 0; j < rec->n_sample; ++j)
                     {
-                        for(uint32_t k = 1; k < ploidy; ++k)
-                        {   
-                            if(bcf_gt_is_phased(gt_arr[j*ploidy+k]))
-                                if(gt_arr[j*ploidy+k] == GT_NOT_CALL)
+                        for (uint32_t k = 1; k < ploidy; ++k)
+                        {
+                            if (bcf_gt_is_phased(gt_arr[j * ploidy + k]))
+                                if (gt_arr[j * ploidy + k] == GT_NOT_CALL)
                                     cur_field.data[cur_phased_pos++] = '.';
                                 else
                                     cur_field.data[cur_phased_pos++] = '|';
                             else
                                 cur_field.data[cur_phased_pos++] = '/';
                         }
-
                     }
                     free(gt_arr);
                     continue;
-
                 }
                 else
                 {
@@ -493,7 +550,7 @@ bool CompressionReader::GetVariantFromRec(bcf1_t *rec, vector<field_desc> &field
                         break;
                     }
                 }
-                
+
                 if (curr_size)
                 {
                     // cur_field.data_size = (uint32_t)curr_size;
@@ -526,19 +583,22 @@ bool CompressionReader::GetVariantFromRec(bcf1_t *rec, vector<field_desc> &field
     }
     // if(order.size() < no_keys - no_flt_keys || field_order_flag){
     //     field_order_flag =  false;
-        for (size_t i = 0; i < field_order.size() - 1; ++i) {
-            // std::cerr<<field_order[i]<<" ";
-            if (field_order_graph[field_order[i]].find(field_order[i+1]) == field_order_graph[field_order[i]].end()) {
-                field_order_graph[field_order[i]].insert(field_order[i+1]);
-                inDegree[field_order[i+1]]++;
-            }
-            if (inDegree.find(field_order[i]) == inDegree.end()) {
-               
-                inDegree[field_order[i]] = 0;
-            }    
+    for (size_t i = 0; i < field_order.size() - 1; ++i)
+    {
+        // std::cerr<<field_order[i]<<" ";
+        if (field_order_graph[field_order[i]].find(field_order[i + 1]) == field_order_graph[field_order[i]].end())
+        {
+            field_order_graph[field_order[i]].insert(field_order[i + 1]);
+            inDegree[field_order[i + 1]]++;
         }
-        // std::cerr<<endl;
-        // order = topo_sort(field_order_graph,inDegree);
+        if (inDegree.find(field_order[i]) == inDegree.end())
+        {
+
+            inDegree[field_order[i]] = 0;
+        }
+    }
+    // std::cerr<<endl;
+    // order = topo_sort(field_order_graph,inDegree);
 
     // }
 
@@ -587,26 +647,25 @@ bool CompressionReader::SetVariantOtherFields(vector<field_desc> &fields)
             v_o_buf[i].WriteFlag(fields[i].present);
             break;
         }
-        
-        if (v_o_buf[i].IsFull())
-		{
-			// std::cerr<<"v_buf_ids_size[i]:"<<v_buf_ids_size[i]<<endl;
-			// std::cerr<<"v_buf_ids_size[i]:"<<v_buf_ids_size[i]<<endl;
-			auto part_id = file_handle2->AddPartPrepare(v_buf_ids_size[i]);
-			file_handle2->AddPartPrepare(v_buf_ids_data[i]);
-            // std::cerr<<part_id<<endl;
-			vector<uint32_t> v_size;
-			vector<uint8_t> v_data;
-			
-			v_o_buf[i].GetBuffer(v_size, v_data);
-            
-			
-			SPackage pck(i, v_buf_ids_size[i], v_buf_ids_data[i], part_id, v_size, v_data);
 
-			part_queue->Push(pck);
-		}
+        if (v_o_buf[i].IsFull())
+        {
+            // std::cerr<<"v_buf_ids_size[i]:"<<v_buf_ids_size[i]<<endl;
+            // std::cerr<<"v_buf_ids_size[i]:"<<v_buf_ids_size[i]<<endl;
+            auto part_id = file_handle2->AddPartPrepare(v_buf_ids_size[i]);
+            file_handle2->AddPartPrepare(v_buf_ids_data[i]);
+            // std::cerr<<part_id<<endl;
+            vector<uint32_t> v_size;
+            vector<uint8_t> v_data;
+
+            v_o_buf[i].GetBuffer(v_size, v_data);
+
+            SPackage pck(i, v_buf_ids_size[i], v_buf_ids_data[i], part_id, v_size, v_data);
+
+            part_queue->Push(pck);
+        }
     }
-    
+
     return true;
 }
 // ***************************************************************************************************************************************
@@ -622,24 +681,28 @@ bool CompressionReader::ProcessInVCF()
     tmpi = 0;
     temp = 0;
     cur_pos = 0;
-    gt_data = new int[no_samples*ploidy];
+    gt_data = new int[no_samples * ploidy];
     no_actual_variants = 0;
     int file_nums = 1;
-    if(merge_flag){
+    if (merge_flag)
+    {
         file_nums = merge_files.size();
     }
 
-    for(int i = 0;i < file_nums;i++){
-        if(merge_flag)
+    for (int i = 0; i < file_nums; i++)
+    {
+        if (merge_flag)
             in_file = merge_files[i];
 
         // Use parallel reader if enabled and not merging multiple files
-        if (use_parallel_reading_ && !merge_flag) {
+        if (use_parallel_reading_ && !merge_flag)
+        {
             logger->info("Using parallel VCF reader with {} threads", num_parse_threads_);
 
             // Initialize parallel reader
             parallel_reader_ = new gsc::ParallelVCFReader(num_parse_threads_);
-            if (!parallel_reader_->Initialize(in_file_name.c_str())) {
+            if (!parallel_reader_->Initialize(in_file_name.c_str()))
+            {
                 logger->error("Failed to initialize parallel VCF reader");
                 delete parallel_reader_;
                 parallel_reader_ = nullptr;
@@ -647,32 +710,41 @@ bool CompressionReader::ProcessInVCF()
             }
 
             // Process variants in batches
-            while (true) {
-                std::vector<bcf1_t*> batch = parallel_reader_->ParseNextBatch();
-                if (batch.empty()) break;
+            while (true)
+            {
+                std::vector<bcf1_t *> batch = parallel_reader_->ParseNextBatch();
+                if (batch.empty())
+                    break;
 
-                for (bcf1_t* vcf_record : batch) {
+                for (bcf1_t *vcf_record : batch)
+                {
                     variant_desc_t desc;
-                    if (vcf_record->errcode) {
+                    if (vcf_record->errcode)
+                    {
                         logger->error("Repair VCF file.");
                         exit(9);
                     }
                     bcf_unpack(vcf_record, BCF_UN_ALL);
-                    if (vcf_record->d.fmt->n != (int)ploidy) {
+                    if (vcf_record->d.fmt->n != (int)ploidy)
+                    {
                         logger->error("Wrong ploidy (not equal to {}) for record at position {}.", ploidy, vcf_record->pos);
                         logger->error("Repair VCF file OR set correct ploidy using -p option.");
                         exit(9);
                     }
-                    if (tmpi % 100000 == 0) {
+                    if (tmpi % 100000 == 0)
+                    {
                         logger->info("Processed {} variants...", tmpi);
                     }
-                    if(compress_mode == compress_mode_t::lossless_mode) {
+                    if (compress_mode == compress_mode_t::lossless_mode)
+                    {
                         std::vector<field_desc> curr_field(keys.size());
                         GetVariantFromRec(vcf_record, curr_field);
                         SetVariantOtherFields(curr_field);
-                        for(size_t j = 0; j < keys.size(); ++j) {
-                            if(curr_field[j].data_size > 0) {
-                                if(curr_field[j].data)
+                        for (size_t j = 0; j < keys.size(); ++j)
+                        {
+                            if (curr_field[j].data_size > 0)
+                            {
+                                if (curr_field[j].data)
                                     delete[] curr_field[j].data;
                                 curr_field[j].data = nullptr;
                                 curr_field[j].data_size = 0;
@@ -694,7 +766,8 @@ bool CompressionReader::ProcessInVCF()
             delete parallel_reader_;
             parallel_reader_ = nullptr;
         }
-        else {
+        else
+        {
             // Fallback to single-threaded bcf_read1() for BCF or merge mode
             while (bcf_read1(in_file, vcf_hdr, vcf_record) >= 0)
             {
@@ -712,10 +785,12 @@ bool CompressionReader::ProcessInVCF()
                     logger->error("Repair VCF file OR set correct ploidy using -p option.");
                     exit(9);
                 }
-                if (tmpi % 100000 == 0){
+                if (tmpi % 100000 == 0)
+                {
                     logger->info("Processed {} variants...", tmpi);
                 }
-                if(compress_mode == compress_mode_t::lossless_mode){
+                if (compress_mode == compress_mode_t::lossless_mode)
+                {
 
                     std::vector<field_desc> curr_field(keys.size());
 
@@ -723,12 +798,11 @@ bool CompressionReader::ProcessInVCF()
 
                     SetVariantOtherFields(curr_field);
 
-
-                    for(size_t j = 0; j < keys.size(); ++j)
+                    for (size_t j = 0; j < keys.size(); ++j)
                     {
-                        if(curr_field[j].data_size > 0)
+                        if (curr_field[j].data_size > 0)
                         {
-                            if(curr_field[j].data)
+                            if (curr_field[j].data)
                                 delete[] curr_field[j].data;
                             curr_field[j].data = nullptr;
                             curr_field[j].data_size = 0;
@@ -744,8 +818,8 @@ bool CompressionReader::ProcessInVCF()
             }
         }
     }
-    if(compress_mode == compress_mode_t::lossless_mode)
-        order = topo_sort(field_order_graph,inDegree);
+    if (compress_mode == compress_mode_t::lossless_mode)
+        order = topo_sort(field_order_graph, inDegree);
     if (cur_g_data)
     {
         delete[] cur_g_data;
@@ -758,7 +832,7 @@ bool CompressionReader::ProcessInVCF()
     logger->info("Read all the variants and genotypes.");
     // Last pack (may be smaller than block size）
 
-        CloseFiles();
+    CloseFiles();
     return true;
 }
 // void CompressionReader::addPhased(int * gt_data, int ngt_data){
@@ -774,8 +848,9 @@ bool CompressionReader::ProcessInVCF()
 
 // }
 // ***************************************************************************************************************************************
-void CompressionReader::ProcessFixedVariants(bcf1_t *vcf_record, variant_desc_t &desc){
-    
+void CompressionReader::ProcessFixedVariants(bcf1_t *vcf_record, variant_desc_t &desc)
+{
+
     if (vcf_record->n_allele <= 2)
     {
         desc.ref.erase(); // REF
@@ -785,7 +860,6 @@ void CompressionReader::ProcessFixedVariants(bcf1_t *vcf_record, variant_desc_t 
             {
 
                 desc.ref = to_string(++temp) + vcf_record->d.allele[0];
-
             }
             else
             {
@@ -806,9 +880,8 @@ void CompressionReader::ProcessFixedVariants(bcf1_t *vcf_record, variant_desc_t 
         for (int i = 0; i < ncur_g_data; i++)
         {
             gt_data[i] = bcf_gt_allele(cur_g_data[i]);
-            
         }
-        
+
         addVariant(gt_data, ncur_g_data, desc);
         bcf_clear(vcf_record);
     }
@@ -853,12 +926,11 @@ void CompressionReader::ProcessFixedVariants(bcf1_t *vcf_record, variant_desc_t 
         }
         else
         {
-            
+
             if (vcf_record->pos + 1 != cur_pos)
                 temp = 0;
             for (int n = 1; n < vcf_record->n_allele; n++) // create one line for each single allele
             {
-
 
                 // size_t len_ref = strlen(vcf_record->d.allele[0]), len_alt = strlen(vcf_record->d.allele[n]);
                 // if (len_ref > 1 && len_alt > 1)
@@ -877,18 +949,17 @@ void CompressionReader::ProcessFixedVariants(bcf1_t *vcf_record, variant_desc_t 
                     desc.ref += vcf_record->d.allele[0];
                     // desc.ref = to_string(++temp) + desc.ref.substr(0, len_ref);
                     desc.ref = to_string(++temp) + desc.ref;
-
                 }
                 else
                     desc.ref = '.';
                 desc.alt.erase(); // ALT
                 desc.alt += vcf_record->d.allele[n];
                 // desc.alt = desc.alt.substr(0, len_alt);
-                if(n == 1)
+                if (n == 1)
                     desc.alt += ",<N>";
                 else
                     desc.alt += ",<M>";
-                
+
                 bcf_get_genotypes(vcf_hdr, vcf_record, &cur_g_data, &ncur_g_data);
                 // if (gt_data)
                 //     delete[] gt_data;
@@ -910,10 +981,9 @@ void CompressionReader::ProcessFixedVariants(bcf1_t *vcf_record, variant_desc_t 
                     gt_data[i] = bcf_gt_allele(cur_g_data[i]);
                 }
                 addVariant(gt_data, ncur_g_data, desc);
-
             }
             tmpi += vcf_record->n_allele - 1;
-                // temp_count--;
+            // temp_count--;
             bcf_clear(vcf_record);
         }
     }
@@ -927,7 +997,7 @@ void CompressionReader::addVariant(int *gt_data, int ngt_data, variant_desc_t &d
 
     desc.pos = vcf_record->pos + 1;                      // POS
     desc.id = vcf_record->d.id ? vcf_record->d.id : "."; // ID
-                                                      //    desc.qual.erase(); // QUAL
+                                                         //    desc.qual.erase(); // QUAL
     if (bcf_float_is_missing(vcf_record->qual))
         desc.qual = ".";
     else
@@ -938,9 +1008,9 @@ void CompressionReader::addVariant(int *gt_data, int ngt_data, variant_desc_t &d
         desc.qual = s.s;
         free(s.s);
     }
-    if(!vec_read_fixed_fields)
+    if (!vec_read_fixed_fields)
         chunks_min_pos.emplace_back(desc.pos);
-    
+
     if (start_flag)
     {
         cur_chrom = desc.chrom;
@@ -949,78 +1019,175 @@ void CompressionReader::addVariant(int *gt_data, int ngt_data, variant_desc_t &d
 
     if (desc.chrom == cur_chrom)
     {
-        for (int i = 0; i < ngt_data; i++)
+        // Legacy path: single column block
+        if (n_col_blocks == 1)
         {
-            if (gt_data[i] == 0 || gt_data[i] == 1)
+            for (int i = 0; i < ngt_data; i++)
             {
-                bv.PutBit(0);
+                if (gt_data[i] == 0 || gt_data[i] == 1)
+                {
+                    bv.PutBit(0);
+                }
+                else // if(bcf_gt_is_missing(gt_arr[i]) || bcf_gt_allele(gt_arr[i]) == 2)
+                {
+                    bv.PutBit(1);
+                }
             }
-            else // if(bcf_gt_is_missing(gt_arr[i]) || bcf_gt_allele(gt_arr[i]) == 2)
+
+            bv.FlushPartialWordBuffer();
+
+            // Set vector with less significant bits of dibits
+            for (int i = 0; i < ngt_data; i++)
             {
-                bv.PutBit(1);
+
+                if (gt_data[i] == 1 || gt_data[i] == 2)
+                {
+                    bv.PutBit(1);
+                }
+                else // 0
+                {
+                    bv.PutBit(0);
+                }
+            }
+            bv.FlushPartialWordBuffer();
+
+            v_vcf_data_compress.emplace_back(desc);
+            vec_read_fixed_fields++;
+            if (vec_read_fixed_fields == no_fixed_fields)
+            {
+                actual_variants.emplace_back(no_actual_variants);
+                no_actual_variants = 0;
+                vec_read_fixed_fields = 0;
+            }
+            vec_read_in_block += 2; // Two vectors added
+
+            if (vec_read_in_block == no_vec_in_block) // Insert complete block into queue of blocks
+            {
+
+                bv.TakeOwnership();
+
+                Gt_queue->Push(block_id, 0, bv.mem_buffer, vec_read_in_block, v_vcf_data_compress);
+                v_vcf_data_compress.clear();
+                no_chrom_num++;
+                no_vec = no_vec + vec_read_in_block;
+                block_id++;
+                bv.Close();
+                bv.Create(block_max_size);
+                vec_read_in_block = 0;
             }
         }
-
-        bv.FlushPartialWordBuffer();
-
-        // Set vector with less significant bits of dibits
-        for (int i = 0; i < ngt_data; i++)
+        else
         {
-
-            if (gt_data[i] == 1 || gt_data[i] == 2)
+            // Tiled path: accumulate to column block buffers
+            for (uint32_t col_block_id = 0; col_block_id < n_col_blocks; ++col_block_id)
             {
-                bv.PutBit(1);
+                uint32_t col_start = col_block_id * max_block_cols;
+                uint32_t col_end = std::min(col_start + max_block_cols, total_haplotypes);
+
+                CBitMemory &col_bv = col_bv_buffers[col_block_id];
+
+                // MSB bit for column block haplotypes
+                for (uint32_t i = col_start; i < col_end; i++)
+                {
+                    if (gt_data[i] == 0 || gt_data[i] == 1)
+                    {
+                        col_bv.PutBit(0);
+                    }
+                    else
+                    {
+                        col_bv.PutBit(1);
+                    }
+                }
+                col_bv.FlushPartialWordBuffer();
+
+                // LSB bit for column block haplotypes
+                for (uint32_t i = col_start; i < col_end; i++)
+                {
+                    if (gt_data[i] == 1 || gt_data[i] == 2)
+                    {
+                        col_bv.PutBit(1);
+                    }
+                    else
+                    {
+                        col_bv.PutBit(0);
+                    }
+                }
+                col_bv.FlushPartialWordBuffer();
+
+                col_vec_read_in_block[col_block_id] += 2; // 2 vectors per variant
             }
-            else // 0
+
+            v_vcf_data_compress.emplace_back(desc);
+            vec_read_fixed_fields++;
+            if (vec_read_fixed_fields == no_fixed_fields)
             {
-                bv.PutBit(0);
+                actual_variants.emplace_back(no_actual_variants);
+                no_actual_variants = 0;
+                vec_read_fixed_fields = 0;
             }
-        }
-        bv.FlushPartialWordBuffer();
 
-        v_vcf_data_compress.emplace_back(desc);
-        vec_read_fixed_fields++;
-        if( vec_read_fixed_fields == no_fixed_fields)
-        {
-            actual_variants.emplace_back(no_actual_variants);
-            no_actual_variants = 0;
-            vec_read_fixed_fields = 0;
-        }
-        vec_read_in_block += 2; // Two vectors added
+            // Check if all column blocks are full (they should fill synchronously)
+            // Push all column blocks together when they're all full
+            if (col_vec_read_in_block[0] == no_vec_in_block)
+            {
+                auto logger = LogManager::Instance().Logger();
+                logger->info("Pushing row block {}: {} variants across {} column blocks",
+                             block_id, v_vcf_data_compress.size(), n_col_blocks);
 
-        if (vec_read_in_block == no_vec_in_block) // Insert complete block into queue of blocks
-        {
+                for (uint32_t col_block_id = 0; col_block_id < n_col_blocks; ++col_block_id)
+                {
+                    CBitMemory &col_bv = col_bv_buffers[col_block_id];
+                    col_bv.TakeOwnership();
 
-            bv.TakeOwnership();
+                    logger->info("  Pushing col_block {}: block_id={}, num_rows={}, buffer_size={}",
+                                 col_block_id, block_id, no_vec_in_block, col_bv.mem_buffer_pos);
 
-            Gt_queue->Push(block_id, bv.mem_buffer, vec_read_in_block, v_vcf_data_compress);
-            v_vcf_data_compress.clear();
-            no_chrom_num++;
-            no_vec = no_vec + vec_read_in_block;
-            block_id++;
-            bv.Close();
-            bv.Create(block_max_size);
-            vec_read_in_block = 0;
+                    // Use a copy of v_vcf_data_compress for all but the last column block
+                    if (col_block_id < n_col_blocks - 1)
+                    {
+                        vector<variant_desc_t> v_copy = v_vcf_data_compress;
+                        Gt_queue->Push(block_id, col_block_id, col_bv.mem_buffer, no_vec_in_block, v_copy);
+                    }
+                    else
+                    {
+                        // Last column block can move the data
+                        Gt_queue->Push(block_id, col_block_id, col_bv.mem_buffer, no_vec_in_block, v_vcf_data_compress);
+                    }
+
+                    no_chrom_num++;
+                    no_vec += no_vec_in_block;
+
+                    col_bv.Close();
+                    uint64_t col_block_max_size = col_block_vec_lens[col_block_id] * no_vec_in_block + 1;
+                    col_bv.Create(col_block_max_size);
+                    col_vec_read_in_block[col_block_id] = 0;
+                }
+
+                v_vcf_data_compress.clear();
+                block_id++;
+            }
         }
         no_chrom = cur_chrom;
     }
     else
     {
-        if( vec_read_fixed_fields)
+        if (vec_read_fixed_fields)
         {
-            actual_variants.emplace_back(no_actual_variants-1);
+            actual_variants.emplace_back(no_actual_variants - 1);
             no_actual_variants = 1;
             vec_read_fixed_fields = 0;
         }
-        if(!vec_read_fixed_fields)
+        if (!vec_read_fixed_fields)
             chunks_min_pos.emplace_back(desc.pos);
-        vec_read_fixed_fields ++;    
+        vec_read_fixed_fields++;
         cur_chrom = desc.chrom;
-        if (vec_read_in_block)
+
+        // Flush remaining data from previous chromosome (legacy mode only)
+        if (vec_read_in_block && n_col_blocks == 1)
         {
-            
+
             bv.TakeOwnership();
-            Gt_queue->Push(block_id, bv.mem_buffer, vec_read_in_block, v_vcf_data_compress);
+            Gt_queue->Push(block_id, 0, bv.mem_buffer, vec_read_in_block, v_vcf_data_compress);
             v_vcf_data_compress.clear();
             no_chrom_num++;
             no_vec = no_vec + vec_read_in_block;
@@ -1029,66 +1196,146 @@ void CompressionReader::addVariant(int *gt_data, int ngt_data, variant_desc_t &d
             bv.Create(block_max_size);
             vec_read_in_block = 0;
         }
-        for (int i = 0; i < ngt_data; i++)
-        {
 
-            if (gt_data[i] == 0 || gt_data[i] == 1)
-            {
-                bv.PutBit(0);
-            }
-            else // if(bcf_gt_is_missing(gt_arr[i]) || bcf_gt_allele(gt_arr[i]) == 2)
-            {
-                bv.PutBit(1);
-            }
-        }
-        bv.FlushPartialWordBuffer();
-        // Set vector with less significant bits of dibits
-        for (int i = 0; i < ngt_data; i++)
+        // Process first variant of new chromosome
+        if (n_col_blocks == 1)
         {
-            if (gt_data[i] == 1 || gt_data[i] == 2)
+            // Legacy path: single column block
+            for (int i = 0; i < ngt_data; i++)
             {
-                bv.PutBit(1);
+
+                if (gt_data[i] == 0 || gt_data[i] == 1)
+                {
+                    bv.PutBit(0);
+                }
+                else // if(bcf_gt_is_missing(gt_arr[i]) || bcf_gt_allele(gt_arr[i]) == 2)
+                {
+                    bv.PutBit(1);
+                }
             }
-            else // 0
+            bv.FlushPartialWordBuffer();
+            // Set vector with less significant bits of dibits
+            for (int i = 0; i < ngt_data; i++)
             {
-                bv.PutBit(0);
+                if (gt_data[i] == 1 || gt_data[i] == 2)
+                {
+                    bv.PutBit(1);
+                }
+                else // 0
+                {
+                    bv.PutBit(0);
+                }
+            }
+            bv.FlushPartialWordBuffer();
+
+            v_vcf_data_compress.emplace_back(desc);
+            vec_read_in_block += 2;
+        }
+        else
+        {
+            // Tiled path: accumulate to column block buffers
+            for (uint32_t col_block_id = 0; col_block_id < n_col_blocks; ++col_block_id)
+            {
+                uint32_t col_start = col_block_id * max_block_cols;
+                uint32_t col_end = std::min(col_start + max_block_cols, total_haplotypes);
+
+                CBitMemory &col_bv = col_bv_buffers[col_block_id];
+
+                // MSB bit for column block haplotypes
+                for (uint32_t i = col_start; i < col_end; i++)
+                {
+                    if (gt_data[i] == 0 || gt_data[i] == 1)
+                    {
+                        col_bv.PutBit(0);
+                    }
+                    else
+                    {
+                        col_bv.PutBit(1);
+                    }
+                }
+                col_bv.FlushPartialWordBuffer();
+
+                // LSB bit for column block haplotypes
+                for (uint32_t i = col_start; i < col_end; i++)
+                {
+                    if (gt_data[i] == 1 || gt_data[i] == 2)
+                    {
+                        col_bv.PutBit(1);
+                    }
+                    else
+                    {
+                        col_bv.PutBit(0);
+                    }
+                }
+                col_bv.FlushPartialWordBuffer();
+
+                col_vec_read_in_block[col_block_id] += 2;
+            }
+
+            v_vcf_data_compress.emplace_back(desc);
+
+            // Check if blocks are full and push synchronously
+            if (col_vec_read_in_block[0] == no_vec_in_block)
+            {
+                for (uint32_t col_block_id = 0; col_block_id < n_col_blocks; ++col_block_id)
+                {
+                    CBitMemory &col_bv = col_bv_buffers[col_block_id];
+                    col_bv.TakeOwnership();
+
+                    if (col_block_id < n_col_blocks - 1)
+                    {
+                        vector<variant_desc_t> v_copy = v_vcf_data_compress;
+                        Gt_queue->Push(block_id, col_block_id, col_bv.mem_buffer, no_vec_in_block, v_copy);
+                    }
+                    else
+                    {
+                        Gt_queue->Push(block_id, col_block_id, col_bv.mem_buffer, no_vec_in_block, v_vcf_data_compress);
+                    }
+
+                    no_chrom_num++;
+                    no_vec += no_vec_in_block;
+
+                    col_bv.Close();
+                    uint64_t col_block_max_size = col_block_vec_lens[col_block_id] * no_vec_in_block + 1;
+                    col_bv.Create(col_block_max_size);
+                    col_vec_read_in_block[col_block_id] = 0;
+                }
+
+                v_vcf_data_compress.clear();
+                block_id++;
             }
         }
-        bv.FlushPartialWordBuffer();
-        vec_read_in_block += 2; // Two vectors added
-        v_vcf_data_compress.emplace_back(desc);
         where_chrom.emplace_back(make_pair(no_chrom, no_chrom_num));
     }
 }
 
-
 // ***************************************************************************************************************************************
 uint32_t CompressionReader::setNoVecBlock(GSC_Params &params)
 {
-    params.var_in_block = no_samples * params.ploidy;
+    params.var_in_block = params.max_block_rows ? params.max_block_rows : (no_samples * params.ploidy);
 
-    int numThreads = std::thread::hardware_concurrency()/2;
+    int numThreads = std::thread::hardware_concurrency() / 2;
 
     int numChunks = 1 + (params.var_in_block / 1024);
-    
-    if (numChunks < numThreads) {
-        
+
+    if (numChunks < numThreads)
+    {
+
         numThreads = numChunks;
     }
 
     params.no_gt_threads = numThreads;
     // params.no_gt_threads = 1;
 
-    if(params.var_in_block < 1024)
+    if (params.var_in_block < 1024)
     {
         chunk_size = CHUNK_SIZE1;
-        
     }
-    else if(params.var_in_block < 4096 )
+    else if (params.var_in_block < 4096)
     {
         chunk_size = CHUNK_SIZE2;
     }
-    else if(params.var_in_block < 8192)
+    else if (params.var_in_block < 8192)
     {
         chunk_size = CHUNK_SIZE3;
     }
@@ -1096,96 +1343,159 @@ uint32_t CompressionReader::setNoVecBlock(GSC_Params &params)
     {
         chunk_size = params.var_in_block;
     }
-    params.no_blocks = chunk_size/params.var_in_block;
+    params.no_blocks = chunk_size / params.var_in_block;
 
-    no_fixed_fields = params.no_blocks*params.var_in_block;
+    no_fixed_fields = params.no_blocks * params.var_in_block;
 
     if (params.task_mode == task_mode_t::mcompress)
     {
+        // Use max_block_rows to determine vectors per block (each variant = 2 vectors)
         no_vec_in_block = params.var_in_block * 2;
-        params.vec_len = params.var_in_block / 8 + ((params.var_in_block % 8) ? 1 : 0);
+        params.vec_len = (no_samples * params.ploidy) / 8 + (((no_samples * params.ploidy) % 8) ? 1 : 0);
         params.n_samples = no_samples;
+
+        // Calculate vec_len here so we can initialize column blocks
+        vec_len = (no_samples * ploidy) / 8 + (((no_samples * ploidy) % 8) ? 1 : 0);
+
+        // Initialize column blocks now that we have all required metadata
+        initializeColumnBlocks();
     }
     return 0;
 }
-void CompressionReader::CloseFiles(){
+void CompressionReader::CloseFiles()
+{
     // std::cerr<<"Closing files"<<endl;
-    if( vec_read_fixed_fields)
+    if (vec_read_fixed_fields)
     {
         actual_variants.emplace_back(no_actual_variants);
         no_actual_variants = 0;
         vec_read_fixed_fields = 0;
-    } 
-    if (vec_read_in_block)
-    {
-        bv.TakeOwnership();
-        // Gt_queue->Push(block_id, bv.mem_buffer, vec_read_in_block,v_vcf_data_compress,chrom_flag::none);
-        Gt_queue->Push(block_id, bv.mem_buffer, vec_read_in_block, v_vcf_data_compress);
-        // v_vcf_data_compress.clear();
-        no_chrom_num++;
-        block_id++;
-        no_vec = no_vec + vec_read_in_block;
-        vec_read_in_block = 0;
-        bv.Close();
     }
-    
+
+    // Flush remaining data
+    if (n_col_blocks == 1)
+    {
+        // Legacy mode
+        if (vec_read_in_block)
+        {
+            bv.TakeOwnership();
+            Gt_queue->Push(block_id, 0, bv.mem_buffer, vec_read_in_block, v_vcf_data_compress);
+            no_chrom_num++;
+            block_id++;
+            no_vec = no_vec + vec_read_in_block;
+            vec_read_in_block = 0;
+            bv.Close();
+        }
+    }
+    else
+    {
+        // Tiled mode: flush all column blocks
+        // Find the last column block with data
+        int last_nonempty_col_block = -1;
+        for (uint32_t col_block_id = 0; col_block_id < n_col_blocks; ++col_block_id)
+        {
+            if (col_vec_read_in_block[col_block_id] > 0)
+            {
+                last_nonempty_col_block = col_block_id;
+            }
+        }
+
+        // Push each column block, only passing v_vcf_data_compress on the last one
+        bool flushed_data = false;
+        for (uint32_t col_block_id = 0; col_block_id < n_col_blocks; ++col_block_id)
+        {
+            if (col_vec_read_in_block[col_block_id] > 0)
+            {
+                flushed_data = true;
+                CBitMemory &col_bv = col_bv_buffers[col_block_id];
+                col_bv.TakeOwnership();
+
+                // Only pass v_vcf_data_compress on the last column block
+                // For other blocks, pass an empty temporary vector
+                if ((int)col_block_id == last_nonempty_col_block)
+                {
+                    Gt_queue->Push(block_id, col_block_id, col_bv.mem_buffer, col_vec_read_in_block[col_block_id], v_vcf_data_compress);
+                }
+                else
+                {
+                    std::vector<variant_desc_t> empty_vec;
+                    Gt_queue->Push(block_id, col_block_id, col_bv.mem_buffer, col_vec_read_in_block[col_block_id], empty_vec);
+                }
+
+                no_chrom_num++;
+                no_vec += col_vec_read_in_block[col_block_id];
+                col_bv.Close();
+                col_vec_read_in_block[col_block_id] = 0;
+            }
+        }
+        // Only increment block_id if we actually flushed data
+        if (flushed_data)
+        {
+            block_id++;
+        }
+    }
+
     v_vcf_data_compress.emplace_back(variant_desc_t());
-    Gt_queue->Push(block_id, nullptr, 0 ,v_vcf_data_compress);
-    
+    Gt_queue->Push(block_id, 0, nullptr, 0, v_vcf_data_compress);
+
     block_id = 0;
     Gt_queue->Complete();
-    
 
     where_chrom.emplace_back(make_pair(no_chrom, no_chrom_num));
 
     no_chrom_num = 0;
-    if(compress_mode == compress_mode_t::lossless_mode){
-	    for (uint32_t i = 0; i < no_keys; ++i)
-	    {
-        
-		    v_o_buf[i].GetBuffer(v_size, v_data);
-        
-		    auto part_id = file_handle2->AddPartPrepare(v_buf_ids_size[i]);
-		    file_handle2->AddPartPrepare(v_buf_ids_data[i]);
+    if (compress_mode == compress_mode_t::lossless_mode)
+    {
+        for (uint32_t i = 0; i < no_keys; ++i)
+        {
 
-		    SPackage pck(i, v_buf_ids_size[i], v_buf_ids_data[i], part_id, v_size, v_data);
+            v_o_buf[i].GetBuffer(v_size, v_data);
 
-		    part_queue->Push(pck);
+            auto part_id = file_handle2->AddPartPrepare(v_buf_ids_size[i]);
+            file_handle2->AddPartPrepare(v_buf_ids_data[i]);
 
-	    }
+            SPackage pck(i, v_buf_ids_size[i], v_buf_ids_data[i], part_id, v_size, v_data);
 
-	    part_queue->Complete();
+            part_queue->Push(pck);
+        }
+
+        part_queue->Complete();
     }
-	// file_handle2->Close();
-	
-    
+    // file_handle2->Close();
 }
 // ***************************************************************************************************************************************
-vector<int> CompressionReader::topo_sort(unordered_map<int, unordered_set<int>> &graph,unordered_map<int, int> inDegree) {
+vector<int> CompressionReader::topo_sort(unordered_map<int, unordered_set<int>> &graph, unordered_map<int, int> inDegree)
+{
 
     vector<int> result;
     queue<int> q;
-    for (const auto& p : inDegree) {
-        if (p.second == 0) {
+    for (const auto &p : inDegree)
+    {
+        if (p.second == 0)
+        {
             q.push(p.first);
         }
     }
-    while (!q.empty()) {
-        if(q.size() > 1)
+    while (!q.empty())
+    {
+        if (q.size() > 1)
             field_order_flag = true;
         int cur = q.front();
         q.pop();
         result.push_back(cur);
-        for (int next : graph[cur]) {
-            
-            if (--inDegree[next] == 0) {
+        for (int next : graph[cur])
+        {
+
+            if (--inDegree[next] == 0)
+            {
                 q.push(next);
             }
         }
     }
 
     // Step 3: Check if there's a cycle in the graph
-    if (result.size() != graph.size()) {
+    if (result.size() != graph.size())
+    {
         return vector<int>();
     }
 

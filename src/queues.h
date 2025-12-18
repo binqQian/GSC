@@ -102,12 +102,12 @@ using namespace std;
 class GtBlockQueue
 {
 public:
-    explicit GtBlockQueue(size_t _capacity) 
+    explicit GtBlockQueue(size_t _capacity)
         : flag(false), capacity(_capacity) {}
 
-    void Push(int id_block, unsigned char *data, size_t num_rows, std::vector<variant_desc_t> &v_vcf_data_compress)
+    void Push(int id_block, uint32_t col_block_id, unsigned char *data, size_t num_rows, std::vector<variant_desc_t> &v_vcf_data_compress)
     {
-        std::unique_ptr<genotype_block_t> block(new genotype_block_t(id_block, data, num_rows, std::move(v_vcf_data_compress)));
+        std::unique_ptr<genotype_block_t> block(new genotype_block_t(id_block, col_block_id, data, num_rows, std::move(v_vcf_data_compress)));
 
         {
             std::unique_lock<std::mutex> lck(m_mutex);
@@ -118,7 +118,7 @@ public:
         cv_pop.notify_one();
     }
 
-    bool Pop(int &id_block, unsigned char *&data, size_t &num_rows, std::vector<variant_desc_t> &v_vcf_data_compress)
+    bool Pop(int &id_block, uint32_t &col_block_id, unsigned char *&data, size_t &num_rows, std::vector<variant_desc_t> &v_vcf_data_compress)
     {
         std::unique_ptr<genotype_block_t> block;
 
@@ -136,6 +136,7 @@ public:
         cv_push.notify_one();
 
         id_block = block->block_id;
+        col_block_id = block->col_block_id;
         data = block->data;
         num_rows = block->num_rows;
         v_vcf_data_compress = std::move(block->v_vcf_data_compress);
@@ -156,12 +157,13 @@ private:
     struct genotype_block_t
     {
         int block_id;
+        uint32_t col_block_id;  // NEW: column block ID for tiling support
         unsigned char *data;
         size_t num_rows;
         std::vector<variant_desc_t> v_vcf_data_compress;
 
-        genotype_block_t(int _block_id, unsigned char *_data, size_t _num_rows, std::vector<variant_desc_t> &&_v_vcf_data_compress)
-            : block_id(_block_id), data(_data), num_rows(_num_rows), v_vcf_data_compress(std::move(_v_vcf_data_compress)) {}
+        genotype_block_t(int _block_id, uint32_t _col_block_id, unsigned char *_data, size_t _num_rows, std::vector<variant_desc_t> &&_v_vcf_data_compress)
+            : block_id(_block_id), col_block_id(_col_block_id), data(_data), num_rows(_num_rows), v_vcf_data_compress(std::move(_v_vcf_data_compress)) {}
     };
 
     std::deque<std::unique_ptr<genotype_block_t>> g_blocks;

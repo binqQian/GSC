@@ -54,9 +54,27 @@ typedef struct variant_desc_tag {
         return alt < x.alt;
     }
 } variant_desc_t;
+
+// ************************************************************************************
+// Column block metadata for GT tiling
+typedef struct col_block_meta_tag {
+    uint32_t start_haplotype;     // Starting haplotype index
+    uint32_t n_haplotypes;        // Number of haplotypes in this column block
+    uint32_t vec_len;             // ceil(n_haplotypes / 8) - bytes per row
+    uint64_t gt_data_offset;      // Offset to GT payload in compressed stream
+    uint32_t gt_data_size;        // Size of compressed GT data for this column block
+
+    col_block_meta_tag() : start_haplotype(0), n_haplotypes(0), vec_len(0),
+                           gt_data_offset(0), gt_data_size(0) {}
+    col_block_meta_tag(uint32_t start, uint32_t n_hap, uint32_t vlen)
+        : start_haplotype(start), n_haplotypes(n_hap), vec_len(vlen),
+          gt_data_offset(0), gt_data_size(0) {}
+} col_block_meta_t;
+
+// ************************************************************************************
 typedef struct block_tag
 {
-    
+
     std::vector<variant_desc_t> data_compress;
     block_tag(std::vector<variant_desc_t> v_vcf_data) :
             data_compress(v_vcf_data)

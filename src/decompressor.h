@@ -57,7 +57,8 @@ class Decompressor {
     
     // size_t num_chunks;
     vector<block_t> fixed_variants_chunk,fixed_variants_chunk_io;
-	vector<vector<uint32_t>> sort_perm,sort_perm_io;
+	// GT column tiling: 3D structure [row_block][col_block][perm]
+    vector<vector<vector<uint32_t>>> sort_perm, sort_perm_io;
     vector<uint8_t> decompress_gt_indexes,decompress_gt_indexes_io;
     vector<uint32_t> sparse_matrix_cols;
 
@@ -145,6 +146,8 @@ class Decompressor {
     uint32_t * sampleIDs = nullptr;
     
     size_t standard_block_size;
+    uint32_t row_block_size = 0;
+    uint32_t haplotype_count = 0;
     
     uint8_t *decomp_data = nullptr;
 
@@ -200,6 +203,7 @@ class Decompressor {
     void decoded_vector_row(uint64_t vec_id, uint64_t offset, uint64_t v_offset,uint64_t length, int pos, uint8_t *decomp_data);
     
     int decompressAll();
+    int decompressAllTiled();
 
     int BedFormatDecompress();
 
@@ -212,7 +216,10 @@ class Decompressor {
 
     int decompressRangeSample(const string & range);
 
+    void insert_block_bits(uint8_t *dest, const uint8_t *src, uint32_t dest_vec_len, uint32_t start_hap, uint32_t block_hap);
     void inline decode_perm_rev(int vec2_start, const vector<uint32_t> &rev_perm, uint8_t *decomp_data_perm, uint8_t *decomp_data);
+    void decode_perm_rev(int vec2_start, size_t vec_len, size_t block_haplotypes, const vector<uint32_t> &rev_perm,
+                         uint8_t *decomp_data_perm, uint8_t *decomp_data);
 
 
     void inline reverse_perm(const vector<uint32_t> &perm, vector<uint32_t> &rev_perm, int no_haplotypes);

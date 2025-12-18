@@ -66,7 +66,16 @@ class Compressor
     uint32_t no_curr_chrom_block =  0;
     vector<int64_t> chunks_min_pos;
     uint32_t cur_chunk_actual_pos = 0;
-    map<uint32_t,vector<uint8_t>> vint_last_perm;
+    // GT column tiling: 2D permutation map (row_block, col_block) -> perm
+    map<pair<uint32_t, uint32_t>, vector<uint8_t>> vint_last_perm_2d;
+    map<uint32_t,vector<uint8_t>> vint_last_perm;  // Legacy format (deprecated)
+
+    // GT column tiling metadata
+    uint32_t n_col_blocks = 1;
+    vector<uint32_t> col_block_sizes;
+    vector<uint64_t> col_block_vec_lens;
+    uint32_t total_haplotypes = 0;
+    uint32_t max_block_cols = 0;
 
     map<int, chunk_stream> chunks_streams;   
 
@@ -79,6 +88,8 @@ class Compressor
     mutex mtx_gt_block;
 	condition_variable cv_gt_block;
     int cur_block_id = 0;
+    uint32_t cur_col_block_id = 0;
+    bool use_legacy_perm = true;
 
 
 
@@ -122,9 +133,9 @@ class Compressor
     void lock_coder_compressor(SPackage& pck);
     bool check_coder_compressor(SPackage& pck);
     void unlock_coder_compressor(SPackage& pck);
-    void lock_gt_block_process(int &_block_id);
+    void lock_gt_block_process(int &_block_id, uint32_t _col_block_id);
     bool check_gt_block_process(int &_block_id);
-    void unlock_gt_block_process();
+    void unlock_gt_block_process(uint32_t _col_block_id);
     void Encoder(vector<uint8_t>& v_data, vector<uint8_t>& v_tmp);
     bool compress_meta(vector<string> v_samples,const string& v_header);
     void InitCompressParams();
