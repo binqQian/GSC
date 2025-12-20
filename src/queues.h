@@ -687,12 +687,12 @@ public:
     ~VarBlockQueue()
     {}
     
-    void Push(uint32_t id_block, DataType &data)
+    void Push(uint32_t id_block, DataType data)
     {
         unique_lock<std::mutex> lck(m_mutex);
         cv_push.wait(lck, [this] {return var_blocks.size() < capacity;});
 
-        var_blocks.emplace(variant_block_t(id_block,data));
+        var_blocks.emplace(variant_block_t(id_block, std::move(data)));
         
         cv_pop.notify_all();
     }
@@ -729,8 +729,8 @@ private:
         uint32_t block_id;
         DataType data;
 
-        variant_block(uint32_t _block_id,DataType &_data):
-        block_id(_block_id), data(_data)
+        variant_block(uint32_t _block_id, DataType &&_data) :
+        block_id(_block_id), data(std::move(_data))
         {}
     } variant_block_t;
     

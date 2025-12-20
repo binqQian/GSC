@@ -8,6 +8,8 @@ namespace vint_code {
     
     std::vector<uint8_t> EncodeArray(const std::vector<uint32_t>& arr);
     std::vector<uint32_t> DecodeArray(std::vector<uint8_t>& buffer);
-};
 
+    uint32_t ReadVint(const uint8_t* buffer, size_t size, size_t& pos);
+    void DecodeArray(const uint8_t* buffer, size_t size, std::vector<uint32_t>& out);
+};
 

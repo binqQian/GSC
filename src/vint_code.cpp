@@ -27,6 +27,30 @@ uint32_t ReadVint(std::vector<uint8_t>& buffer, size_t& pos)
     return value;
 }
 
+uint32_t ReadVint(const uint8_t* buffer, size_t size, size_t& pos)
+{
+    if (pos >= size)
+        return 0;
+    if (buffer[pos] == '\0')
+    {
+        pos++;
+        return 0;
+    }
+    uint8_t firstByte = buffer[pos++];
+    uint8_t mask = 0x80;
+    uint32_t value = firstByte & 0x7f;
+    int shift = 7;
+    while (firstByte & mask)
+    {
+        if (pos >= size)
+            break;
+        firstByte = buffer[pos++];
+        value = ((firstByte & 0x7f) << shift) | value;
+        shift += 7;
+    }
+    return value;
+}
+
 
 size_t WriteVint(uint32_t value, std::vector<uint8_t>& buffer)
 {
@@ -72,5 +96,16 @@ std::vector<uint32_t> DecodeArray(std::vector<uint8_t> &buffer)
     }
 
     return arr;
+}
+
+void DecodeArray(const uint8_t* buffer, size_t size, std::vector<uint32_t>& out)
+{
+    out.clear();
+    if (!buffer || size == 0)
+        return;
+    out.reserve(size / 4);
+    size_t pos = 0;
+    while (pos < size)
+        out.push_back(ReadVint(buffer, size, pos));
 }
 };

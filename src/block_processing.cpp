@@ -629,27 +629,44 @@ void BlockProcess::AddGtBlock(fixed_field_block &_fixed_field_block_io, vector<b
     _comp_pos_copy.insert(_comp_pos_copy.end(), _origin_of_copy.begin(), _origin_of_copy.end());
     _fixed_field_block_io.gt_block.insert(_fixed_field_block_io.gt_block.end(), _samples_indexes.begin(), _samples_indexes.end());
 }
+
+void BlockProcess::AddGtIndexBlock(std::vector<uint8_t> &gt_block, vector<bool> &_all_zeros, vector<bool> &_all_copies, vector<uint32_t> &_comp_pos_copy,
+                                  vector<bool> &_zeros_only, vector<bool> &_copies, vector<uint32_t> &_origin_of_copy, vector<uint8_t> &_samples_indexes)
+{
+    for (size_t i = 0; i < _origin_of_copy.size(); i++)
+    {
+        _origin_of_copy[i] += _all_zeros.size();
+    }
+
+    _all_zeros.insert(_all_zeros.end(), _zeros_only.begin(), _zeros_only.end());
+    _all_copies.insert(_all_copies.end(), _copies.begin(), _copies.end());
+    _comp_pos_copy.insert(_comp_pos_copy.end(), _origin_of_copy.begin(), _origin_of_copy.end());
+    gt_block.insert(gt_block.end(), _samples_indexes.begin(), _samples_indexes.end());
+}
+
+void BlockProcess::addFixedFieldsBlock(fixed_field_block &_fixed_field_block_io, vector<variant_desc_t> &_v_vcf_data_io, int64_t &prev_pos)
+{
+    _fixed_field_block_io.no_variants += static_cast<uint32_t>(_v_vcf_data_io.size());
+    variant_desc_t desc;
+    for (size_t i = 0; i < _v_vcf_data_io.size(); ++i)
+    {
+        desc = _v_vcf_data_io[i];
+        append_str(_fixed_field_block_io.chrom, desc.chrom);
+        append_str(_fixed_field_block_io.id, desc.id);
+        append_str(_fixed_field_block_io.alt, desc.alt);
+        append_str(_fixed_field_block_io.qual, desc.qual);
+        append(_fixed_field_block_io.pos, (int64_t)(desc.pos - prev_pos));
+        prev_pos = desc.pos;
+        append_str(_fixed_field_block_io.ref, desc.ref);
+    }
+}
 void BlockProcess::addSortFieldBlock(fixed_field_block &_fixed_field_block_io,vector<bool> &_all_zeros,vector<bool> &_all_copies,vector<uint32_t> &_comp_pos_copy,
     
     vector<bool> &_zeros_only, vector<bool> &_copies, vector<uint32_t> &_origin_of_copy,vector<uint8_t> &_samples_indexes,vector<variant_desc_t> &_v_vcf_data_io,int64_t &prev_pos)
 {         
 
     AddGtBlock(_fixed_field_block_io, _all_zeros, _all_copies, _comp_pos_copy, _zeros_only, _copies, _origin_of_copy, _samples_indexes);
-    // start += _zeros_only.size();
-    // cout<<"_zeros_only.size():"<<_zeros_only.size()<<":"<<start<<endl;
-    _fixed_field_block_io.no_variants += _v_vcf_data_io.size();
-    variant_desc_t desc;
-    for (size_t i = 0; i < _v_vcf_data_io.size(); ++i)
-    {
-        desc = _v_vcf_data_io[i];
-        append_str(_fixed_field_block_io.chrom,desc.chrom);
-        append_str(_fixed_field_block_io.id,desc.id);
-        append_str(_fixed_field_block_io.alt,desc.alt);
-        append_str(_fixed_field_block_io.qual,desc.qual);
-        append(_fixed_field_block_io.pos, (int64_t)(desc.pos - prev_pos));
-	    prev_pos = desc.pos;
-	    append_str(_fixed_field_block_io.ref, desc.ref);
-    }
+    addFixedFieldsBlock(_fixed_field_block_io, _v_vcf_data_io, prev_pos);
 }
 // void BlockProcess::addSortFieldBlock(sort_field_block &sort_fixed_field_block_io,vector<bool> &_all_zeros,vector<bool> &_all_copies,vector<uint32_t> &_comp_pos_copy,
 //     vector<bool> &_zeros_only, vector<bool> &_copies, vector<uint32_t> &_origin_of_copy,vector<uint8_t> &_samples_indexes,FieldsPackage &fields_pck,int64_t &prev_pos){

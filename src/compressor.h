@@ -57,8 +57,9 @@ class Compressor
     // uint32_t sort_field_block_id = 0;
     uint32_t fixed_field_block_id = 0;
     // sort_field_block sort_field_block_io,sort_field_block_compress,comp_sort_field_block;
-    // fixed_field_block fixed_field_block_compress,fixed_field_block_io;
-    fixed_field_block fixed_field_block_io,fixed_field_block_compress;
+    // Fixed fields: accumulate per chunk as row_blocks + chunk-level GT index.
+    fixed_field_chunk fixed_chunk_io;
+    fixed_field_block fixed_field_block_compress;
 
 
     
@@ -140,8 +141,12 @@ class Compressor
     bool compress_meta(vector<string> v_samples,const string& v_header);
     void InitCompressParams();
     bool compressFixedFields(fixed_field_block &field_block_io);
+    bool compressFixedFieldsChunk(fixed_field_chunk &chunk_io);
     bool OpenTempFile(const string &out_file_name);
     bool writeTempFlie(fixed_field_block &fixed_field_block_io);
+    bool writeTempChunkRB(const fixed_field_chunk &chunk_io,
+                          const std::vector<fixed_field_block> &row_blocks_comp,
+                          const std::vector<uint8_t> &gt_block_comp);
 public:
     ~Compressor()
     {

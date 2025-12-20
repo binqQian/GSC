@@ -1,6 +1,8 @@
 #include "decompression_reader.h"
 #include "logger.h"
+#include <algorithm>
 #include <chrono>
+#include <limits>
 
 using namespace std::chrono;
 using namespace std;
@@ -717,9 +719,106 @@ uint32_t DecompressionReader::getActualPos(uint32_t chunk_id)
 // read current chunk fixed fields compressed data
 bool DecompressionReader::readFixedFields()
 {
+	// Reset per-chunk state
+	has_fixed_fields_rb_dir = false;
+	fixed_fields_rb_dir.clear();
+	fixed_fields_chunk_start = 0;
+	fixed_fields_total_variants = 0;
+	fixed_fields_row_block_count = 0;
+	fixed_fields_gt_off = 0;
+	fixed_fields_gt_size = 0;
 
-	// auto it = chunks_streams.find(start_chunk_id);
-	// buf_pos = it->second - buf_pos;
+	const uint64_t chunk_start = buf_pos;
+	uint32_t magic_or_no_variants = 0;
+	memcpy(&magic_or_no_variants, buf + buf_pos, sizeof(uint32_t));
+
+	// New per-row_block fixed fields directory format
+	if (magic_or_no_variants == GSC_FIXED_FIELDS_RB_MAGIC)
+	{
+		buf_pos += sizeof(uint32_t);
+		uint32_t version = 0;
+		uint32_t flags = 0;
+		memcpy(&version, buf + buf_pos, sizeof(uint32_t));
+		buf_pos += sizeof(uint32_t);
+		memcpy(&fixed_fields_total_variants, buf + buf_pos, sizeof(uint32_t));
+		buf_pos += sizeof(uint32_t);
+		memcpy(&fixed_fields_row_block_count, buf + buf_pos, sizeof(uint32_t));
+		buf_pos += sizeof(uint32_t);
+		memcpy(&flags, buf + buf_pos, sizeof(uint32_t));
+		buf_pos += sizeof(uint32_t);
+		memcpy(&fixed_fields_gt_off, buf + buf_pos, sizeof(uint32_t));
+		buf_pos += sizeof(uint32_t);
+		memcpy(&fixed_fields_gt_size, buf + buf_pos, sizeof(uint32_t));
+		buf_pos += sizeof(uint32_t);
+
+		if (version != GSC_FIXED_FIELDS_RB_VERSION)
+		{
+			auto logger = LogManager::Instance().Logger();
+			logger->error("Unsupported fixed-fields chunk version: {}", version);
+			return false;
+		}
+
+		fixed_fields_chunk_start = chunk_start;
+		has_fixed_fields_rb_dir = true;
+		fixed_fields_rb_dir.resize(fixed_fields_row_block_count);
+
+		uint32_t max_end = 0;
+		const uint32_t base_end = 7u * sizeof(uint32_t) +
+							 fixed_fields_row_block_count *
+								 (sizeof(uint32_t) + 2u * sizeof(int64_t) + 6u * (2u * sizeof(uint32_t)));
+		max_end = base_end;
+		max_end = std::max<uint32_t>(max_end, fixed_fields_gt_off + fixed_fields_gt_size);
+
+		for (uint32_t i = 0; i < fixed_fields_row_block_count; ++i)
+		{
+			fixed_fields_rb_dir_entry e;
+			memcpy(&e.meta.variant_count, buf + buf_pos, sizeof(uint32_t));
+			buf_pos += sizeof(uint32_t);
+			memcpy(&e.meta.first_pos, buf + buf_pos, sizeof(int64_t));
+			buf_pos += sizeof(int64_t);
+			memcpy(&e.meta.last_pos, buf + buf_pos, sizeof(int64_t));
+			buf_pos += sizeof(int64_t);
+
+			memcpy(&e.chrom_off, buf + buf_pos, sizeof(uint32_t));
+			buf_pos += sizeof(uint32_t);
+			memcpy(&e.chrom_size, buf + buf_pos, sizeof(uint32_t));
+			buf_pos += sizeof(uint32_t);
+			memcpy(&e.pos_off, buf + buf_pos, sizeof(uint32_t));
+			buf_pos += sizeof(uint32_t);
+			memcpy(&e.pos_size, buf + buf_pos, sizeof(uint32_t));
+			buf_pos += sizeof(uint32_t);
+			memcpy(&e.id_off, buf + buf_pos, sizeof(uint32_t));
+			buf_pos += sizeof(uint32_t);
+			memcpy(&e.id_size, buf + buf_pos, sizeof(uint32_t));
+			buf_pos += sizeof(uint32_t);
+			memcpy(&e.ref_off, buf + buf_pos, sizeof(uint32_t));
+			buf_pos += sizeof(uint32_t);
+			memcpy(&e.ref_size, buf + buf_pos, sizeof(uint32_t));
+			buf_pos += sizeof(uint32_t);
+			memcpy(&e.alt_off, buf + buf_pos, sizeof(uint32_t));
+			buf_pos += sizeof(uint32_t);
+			memcpy(&e.alt_size, buf + buf_pos, sizeof(uint32_t));
+			buf_pos += sizeof(uint32_t);
+			memcpy(&e.qual_off, buf + buf_pos, sizeof(uint32_t));
+			buf_pos += sizeof(uint32_t);
+			memcpy(&e.qual_size, buf + buf_pos, sizeof(uint32_t));
+			buf_pos += sizeof(uint32_t);
+
+			max_end = std::max<uint32_t>(max_end, e.chrom_off + e.chrom_size);
+			max_end = std::max<uint32_t>(max_end, e.pos_off + e.pos_size);
+			max_end = std::max<uint32_t>(max_end, e.id_off + e.id_size);
+			max_end = std::max<uint32_t>(max_end, e.ref_off + e.ref_size);
+			max_end = std::max<uint32_t>(max_end, e.alt_off + e.alt_size);
+			max_end = std::max<uint32_t>(max_end, e.qual_off + e.qual_size);
+
+			fixed_fields_rb_dir[i] = std::move(e);
+		}
+
+		buf_pos = chunk_start + max_end;
+		return true;
+	}
+
+	// Legacy chunk-level fixed fields format
 	memcpy(&fixed_field_block_compress.no_variants, buf + buf_pos, sizeof(uint32_t));
 	buf_pos = buf_pos + sizeof(uint32_t);
 	uint32_t comp_size;
@@ -785,6 +884,14 @@ void DecompressionReader::initDecoderParams()
 }
 bool DecompressionReader::Decoder(std::vector<block_t> &v_blocks, std::vector<std::vector<std::vector<uint32_t>>> &s_perm, std::vector<uint8_t> &gt_index, uint32_t cur_chunk_id)
 {
+	if (has_fixed_fields_rb_dir)
+	{
+		uint32_t variants_before = 0;
+		return DecoderByRange(v_blocks, s_perm, gt_index, cur_chunk_id,
+							  std::numeric_limits<int64_t>::min(),
+							  std::numeric_limits<int64_t>::max(),
+							  variants_before);
+	}
 	// Initialize decoder parameters
 	initDecoderParams();
 	no_variants = fixed_field_block_compress.no_variants;
@@ -997,6 +1104,237 @@ bool DecompressionReader::Decoder(std::vector<block_t> &v_blocks, std::vector<st
 	gt_index = move(fixed_field_block_io.gt_block);
 
 	// Return true or appropriate status
+	return true;
+}
+
+bool DecompressionReader::DecoderByRange(vector<block_t> &v_blocks, vector<vector<vector<uint32_t>>> &s_perm,
+										vector<uint8_t> &gt_index, uint32_t cur_chunk_id,
+										int64_t range_1, int64_t range_2, uint32_t &variants_before)
+{
+	if (!has_fixed_fields_rb_dir)
+		return false;
+
+	initDecoderParams();
+	no_variants = fixed_fields_total_variants;
+	variants_before = 0;
+
+	// Decode chunk-level GT index
+	{
+		std::vector<uint8_t> gt_comp(fixed_fields_gt_size);
+		memcpy(gt_comp.data(), buf + fixed_fields_chunk_start + fixed_fields_gt_off, fixed_fields_gt_size);
+		if (gt_comp.empty())
+		{
+			gt_index.clear();
+		}
+		else
+		{
+			uint8_t marker = gt_comp.back();
+			gt_comp.pop_back();
+			switch (marker)
+			{
+			case 0:
+			{
+				auto gt_codec = MakeCompressionStrategy(compression_backend_t::bsc, p_bsc_fixed_fields);
+				gt_codec->Decompress(gt_comp, gt_index);
+				break;
+			}
+			case 1:
+				zstd::zstd_decompress(gt_comp, gt_index);
+				break;
+			case 2:
+			{
+				auto gt_codec = MakeCompressionStrategy(compression_backend_t::brotli, p_bsc_fixed_fields);
+				gt_codec->Decompress(gt_comp, gt_index);
+				break;
+			}
+			default:
+			{
+				auto gt_codec = MakeCompressionStrategy(backend, p_bsc_fixed_fields);
+				gt_codec->Decompress(gt_comp, gt_index);
+				break;
+			}
+			}
+		}
+	}
+
+	// Select row_blocks overlapping [range_1, range_2]
+	bool any = false;
+	uint32_t first_rb = 0;
+	uint32_t last_rb = 0;
+	uint32_t prefix_variants = 0;
+	for (uint32_t rb = 0; rb < fixed_fields_row_block_count; ++rb)
+	{
+		const auto &meta = fixed_fields_rb_dir[rb].meta;
+		if (meta.variant_count == 0)
+			continue;
+
+		if (meta.last_pos < range_1)
+		{
+			prefix_variants += meta.variant_count;
+			continue;
+		}
+		if (meta.first_pos > range_2)
+			break;
+		if (!any)
+		{
+			first_rb = rb;
+			any = true;
+		}
+		last_rb = rb;
+	}
+	variants_before = prefix_variants;
+
+	v_blocks.clear();
+	s_perm.clear();
+	if (!any)
+		return true;
+
+	auto codec = MakeCompressionStrategy(backend, p_bsc_fixed_fields);
+	const uint32_t row_block_variants = max_block_rows ? max_block_rows : total_haplotypes;
+	const uint32_t block_size = useLegacyPath ? (n_samples * static_cast<uint32_t>(ploidy)) : row_block_variants;
+	uint32_t global_block_start = 0;
+	if (!useLegacyPath && cur_chunk_id < chunk_block_offsets.size())
+		global_block_start = chunk_block_offsets[cur_chunk_id];
+
+	for (uint32_t rb = first_rb; rb <= last_rb; ++rb)
+	{
+		const auto &dir = fixed_fields_rb_dir[rb];
+		const uint32_t vcount = dir.meta.variant_count;
+		if (!vcount)
+			continue;
+
+		// Decompress fixed fields for this row_block
+		std::vector<uint8_t> comp, out_chrom, out_id, out_alt, out_qual, out_pos, out_ref;
+
+		comp.resize(dir.chrom_size);
+		memcpy(comp.data(), buf + fixed_fields_chunk_start + dir.chrom_off, dir.chrom_size);
+		codec->Decompress(comp, out_chrom);
+
+		comp.resize(dir.id_size);
+		memcpy(comp.data(), buf + fixed_fields_chunk_start + dir.id_off, dir.id_size);
+		codec->Decompress(comp, out_id);
+
+		comp.resize(dir.alt_size);
+		memcpy(comp.data(), buf + fixed_fields_chunk_start + dir.alt_off, dir.alt_size);
+		codec->Decompress(comp, out_alt);
+
+		comp.resize(dir.qual_size);
+		memcpy(comp.data(), buf + fixed_fields_chunk_start + dir.qual_off, dir.qual_size);
+		codec->Decompress(comp, out_qual);
+
+		comp.resize(dir.pos_size);
+		memcpy(comp.data(), buf + fixed_fields_chunk_start + dir.pos_off, dir.pos_size);
+		codec->Decompress(comp, out_pos);
+
+		comp.resize(dir.ref_size);
+		memcpy(comp.data(), buf + fixed_fields_chunk_start + dir.ref_off, dir.ref_size);
+		codec->Decompress(comp, out_ref);
+
+		std::vector<variant_desc_t> fixed_desc;
+		std::vector<variant_desc_t> sort_desc;
+		fixed_desc.resize(vcount);
+		sort_desc.resize(vcount);
+
+		size_t p_chrom_l = 0, p_id_l = 0, p_alt_l = 0, p_qual_l = 0;
+		for (uint32_t i = 0; i < vcount; ++i)
+		{
+			read_str(out_chrom, p_chrom_l, fixed_desc[i].chrom);
+			read_str(out_id, p_id_l, fixed_desc[i].id);
+			read_str(out_alt, p_alt_l, fixed_desc[i].alt);
+			read_str(out_qual, p_qual_l, fixed_desc[i].qual);
+		}
+
+		size_t p_pos_l = 0, p_ref_l = 0;
+		int64_t prev_pos_local = 0;
+		for (uint32_t i = 0; i < vcount; ++i)
+		{
+			int64_t delta = 0;
+			read(out_pos, p_pos_l, delta);
+			delta += prev_pos_local;
+			prev_pos_local = delta;
+			sort_desc[i].pos = static_cast<uint64_t>(delta);
+			read_str(out_ref, p_ref_l, sort_desc[i].ref);
+			sort_desc[i].filter = ".";
+			sort_desc[i].info = ".";
+		}
+
+		// Permutations
+		if (useLegacyPath)
+		{
+			std::vector<uint32_t> perm(block_size, 0);
+			if (vcount == block_size)
+			{
+				out_perm(perm, sort_desc);
+				vector<vector<uint32_t>> row_perm;
+				row_perm.emplace_back(perm);
+				s_perm.emplace_back(row_perm);
+			}
+			else
+			{
+				auto it = vint_last_perm.find(cur_chunk_id);
+				if (it == vint_last_perm.end())
+				{
+					perm.resize(block_size);
+					for (size_t i_p = 0; i_p < perm.size(); ++i_p)
+						perm[i_p] = static_cast<uint32_t>(i_p);
+				}
+				else
+				{
+					perm = vint_code::DecodeArray(it->second);
+				}
+				vector<vector<uint32_t>> row_perm;
+				row_perm.emplace_back(perm);
+				s_perm.emplace_back(row_perm);
+
+				for (size_t i_p = 0; i_p < sort_desc.size(); i_p++)
+				{
+					if (atoi(sort_desc[i_p].ref.c_str()))
+					{
+						sort_desc[i_p].ref = sort_desc[i_p].ref.substr(to_string(atoi(sort_desc[i_p].ref.c_str())).length());
+					}
+				}
+			}
+		}
+		else
+		{
+			vector<vector<uint32_t>> row_perm(n_col_blocks);
+			for (uint32_t cb = 0; cb < n_col_blocks; ++cb)
+			{
+				auto it = vint_last_perm_2d.find(make_pair(global_block_start + rb, cb));
+				if (it == vint_last_perm_2d.end())
+				{
+					row_perm[cb].resize(col_block_ranges[cb].second);
+					for (size_t i_p = 0; i_p < row_perm[cb].size(); ++i_p)
+						row_perm[cb][i_p] = static_cast<uint32_t>(i_p);
+				}
+				else
+				{
+					row_perm[cb] = vint_code::DecodeArray(it->second);
+				}
+			}
+			s_perm.emplace_back(row_perm);
+
+			for (size_t i_p = 0; i_p < sort_desc.size(); i_p++)
+			{
+				if (atoi(sort_desc[i_p].ref.c_str()))
+				{
+					sort_desc[i_p].ref = sort_desc[i_p].ref.substr(to_string(atoi(sort_desc[i_p].ref.c_str())).length());
+				}
+			}
+		}
+
+		// Merge fixed fields into sort_desc (file order must already match sort fields)
+		for (uint32_t i = 0; i < vcount; ++i)
+		{
+			sort_desc[i].chrom = std::move(fixed_desc[i].chrom);
+			sort_desc[i].id = std::move(fixed_desc[i].id);
+			sort_desc[i].alt = std::move(fixed_desc[i].alt);
+			sort_desc[i].qual = std::move(fixed_desc[i].qual);
+		}
+
+		v_blocks.emplace_back(sort_desc);
+	}
+
 	return true;
 }
 //*******************************************************************************************************************************

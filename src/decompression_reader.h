@@ -26,6 +26,17 @@
 class DecompressionReader {
 
     friend class Decompressor;
+
+    struct fixed_fields_rb_dir_entry
+    {
+        fixed_fields_row_block_meta meta;
+        uint32_t chrom_off = 0, chrom_size = 0;
+        uint32_t pos_off = 0, pos_size = 0;
+        uint32_t id_off = 0, id_size = 0;
+        uint32_t ref_off = 0, ref_size = 0;
+        uint32_t alt_off = 0, alt_size = 0;
+        uint32_t qual_off = 0, qual_size = 0;
+    };
     
 	
     // sdsl vectors and ranks
@@ -103,6 +114,15 @@ class DecompressionReader {
 	fixed_field_block fixed_field_block_compress;
 	fixed_field_block fixed_field_block_io;
 
+    // New fixed-fields chunk format (row_block directory)
+    bool has_fixed_fields_rb_dir = false;
+    uint64_t fixed_fields_chunk_start = 0;
+    uint32_t fixed_fields_total_variants = 0;
+    uint32_t fixed_fields_row_block_count = 0;
+    uint32_t fixed_fields_gt_off = 0;
+    uint32_t fixed_fields_gt_size = 0;
+    std::vector<fixed_fields_rb_dir_entry> fixed_fields_rb_dir;
+
 	vector<uint32_t> v_coder_part_ids;
     vector<std::unique_ptr<CompressionStrategy>> field_size_codecs;
     vector<std::unique_ptr<CompressionStrategy>> field_data_codecs;
@@ -161,6 +181,9 @@ public:
 	bool readFixedFields();
 
 	bool Decoder(vector<block_t> &v_blocks,vector<vector<vector<uint32_t>>> &s_perm,vector<uint8_t> &gt_index,uint32_t cur_chunk_id);
+    bool DecoderByRange(vector<block_t> &v_blocks, vector<vector<vector<uint32_t>>> &s_perm,
+                        vector<uint8_t> &gt_index, uint32_t cur_chunk_id,
+                        int64_t range_1, int64_t range_2, uint32_t &variants_before);
 	bool setStartChunk(uint32_t start_chunk);
 	uint32_t getActualPos(uint32_t chunk_id);
 

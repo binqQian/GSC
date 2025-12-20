@@ -171,7 +171,10 @@ public:
     void ProcessVariant(vector<uint32_t> &perm,vector<variant_desc_t> &v_vcf_data_io);
     void AddGtBlock(fixed_field_block &fixed_field_block_io, vector<bool> &all_zeros, vector<bool> &all_copies, vector<uint32_t> &comp_pos_copy,
                     vector<bool> &zeros_only, vector<bool> &copies, vector<uint32_t> &origin_of_copy, vector<uint8_t> &samples_indexes);
+    void AddGtIndexBlock(std::vector<uint8_t> &gt_block, vector<bool> &all_zeros, vector<bool> &all_copies, vector<uint32_t> &comp_pos_copy,
+                         vector<bool> &zeros_only, vector<bool> &copies, vector<uint32_t> &origin_of_copy, vector<uint8_t> &samples_indexes);
     // void ProcessLastPerm(vector<uint32_t> &perm,vector<vector<uint8_t>> &_vint_last_perm);
+    void addFixedFieldsBlock(fixed_field_block &_fixed_field_block_io, vector<variant_desc_t> &_v_vcf_data_io, int64_t &prev_pos);
     void addSortFieldBlock(fixed_field_block &_fixed_field_block_io,vector<bool> &_all_zeros,vector<bool> &_all_copies,vector<uint32_t> &_comp_pos_copy,
     vector<bool> &_zeros_only, vector<bool> &_copies, vector<uint32_t> &_origin_of_copy,vector<uint8_t> &_samples_indexes,vector<variant_desc_t> &_v_vcf_data_io,int64_t &prev_pos);
     // void addSortFieldBlock(sort_field_block &sort_fixed_field_block_io,vector<bool> &_all_zeros,vector<bool> &_all_copies,vector<uint32_t> &_comp_pos_copy,

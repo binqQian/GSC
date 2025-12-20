@@ -47,7 +47,7 @@
 
 class Decompressor {
 
-    
+	    
     DecompressionReader decompression_reader;
 
     GSC_Params params;
@@ -61,6 +61,8 @@ class Decompressor {
     vector<vector<vector<uint32_t>>> sort_perm, sort_perm_io;
     vector<uint8_t> decompress_gt_indexes,decompress_gt_indexes_io;
     vector<uint32_t> sparse_matrix_cols;
+    vector<uint8_t> tmp_gt_indexes_;
+    vector<uint8_t> vector_row_scratch_;
 
 
 
@@ -81,6 +83,11 @@ class Decompressor {
     uint32_t end_chunk_id = 0;
     uint32_t cur_chunk_id = 0;
     int64_t range_1,range_2;
+
+    // When fixed fields are decoded for a sub-range, this stores how many variants
+    // were skipped at the beginning of the chunk before the first decoded row_block.
+    uint32_t chunk_variant_offset = 0;
+    uint32_t chunk_variant_offset_io = 0;
 
     size_t chunk_size;
 
@@ -201,6 +208,20 @@ class Decompressor {
 
 
     void decoded_vector_row(uint64_t vec_id, uint64_t offset, uint64_t v_offset,uint64_t length, int pos, uint8_t *decomp_data);
+
+    struct ByteGroup
+    {
+        uint32_t byte_no = 0;
+        uint32_t begin = 0; // inclusive index into byte_where
+        uint32_t end = 0;   // exclusive index into byte_where
+    };
+
+    bool decode_vector_row_partial_bytes(uint64_t vec_id,
+                                         uint64_t curr_non_copy_vec_id_offset,
+                                         const vector<ByteGroup> &groups,
+                                         const vector<pair<uint32_t, uint32_t>> &byte_where,
+                                         uint8_t *out_bytes,
+                                         uint32_t out_count);
     
     int decompressAll();
     int decompressAllTiled();
