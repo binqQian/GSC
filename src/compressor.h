@@ -84,6 +84,12 @@ class Compressor
     uint32_t used_bits_cp;
     vector<pair<std::string, uint32_t>> where_chrom;
 
+    // Per-row_block GT index accumulation (tiled mode): collect all col_blocks for a row_block
+    // into one buffer, then store into fixed_chunk_io.gt_row_blocks when the row_block completes.
+    std::vector<uint8_t> pending_gt_row_block;
+    uint32_t pending_gt_row_block_id = 0;
+    bool has_pending_gt_row_block = false;
+
     uint64_t no_vec;
     size_t block_size;
     mutex mtx_gt_block;
@@ -146,7 +152,7 @@ class Compressor
     bool writeTempFlie(fixed_field_block &fixed_field_block_io);
     bool writeTempChunkRB(const fixed_field_chunk &chunk_io,
                           const std::vector<fixed_field_block> &row_blocks_comp,
-                          const std::vector<uint8_t> &gt_block_comp);
+                          const std::vector<std::vector<uint8_t>> &gt_row_blocks_comp);
 public:
     ~Compressor()
     {

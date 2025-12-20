@@ -320,7 +320,9 @@ struct fixed_field_block {
 // Fixed-fields on-disk format (per chunk) for fast range queries.
 // Version 1 stores fixed fields per row_block with an uncompressed directory.
 static constexpr uint32_t GSC_FIXED_FIELDS_RB_MAGIC = 0x46435347u; // "GSCF" in little-endian
-static constexpr uint32_t GSC_FIXED_FIELDS_RB_VERSION = 1u;
+static constexpr uint32_t GSC_FIXED_FIELDS_RB_VERSION_V1 = 1u; // chunk-level GT index
+static constexpr uint32_t GSC_FIXED_FIELDS_RB_VERSION_V2 = 2u; // per-row_block GT index segments
+static constexpr uint32_t GSC_FIXED_FIELDS_RB_VERSION_LATEST = GSC_FIXED_FIELDS_RB_VERSION_V2;
 
 struct fixed_fields_row_block_meta
 {
@@ -334,14 +336,14 @@ struct fixed_field_chunk
     uint32_t no_variants = 0;
     std::vector<fixed_field_block> row_blocks; // fixed fields only; gt_block stored separately
     std::vector<fixed_fields_row_block_meta> row_meta;
-    std::vector<uint8_t> gt_block; // chunk-level GT index payload (all row/col blocks)
+    std::vector<std::vector<uint8_t>> gt_row_blocks; // per-row_block GT index payload (all col blocks within the row_block)
 
     void Clear()
     {
         no_variants = 0;
         row_blocks.clear();
         row_meta.clear();
-        gt_block.clear();
+        gt_row_blocks.clear();
     }
 };
 struct SPackage {

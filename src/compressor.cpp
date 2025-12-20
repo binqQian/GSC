@@ -621,8 +621,16 @@ bool Compressor::CompressProcess()
                                                                      vint_last_perm_2d.emplace(make_pair(block_id, col_block_id), vint_code::EncodeArray(perm));
                                                                  }
                                                                  if (v_vcf_data_io.empty())
-                                                                     block_process.AddGtIndexBlock(fixed_chunk_io.gt_block, all_zeros, all_copies, comp_pos_copy,
+                                                                 {
+                                                                     if (!has_pending_gt_row_block)
+                                                                     {
+                                                                         pending_gt_row_block.clear();
+                                                                         pending_gt_row_block_id = static_cast<uint32_t>(block_id);
+                                                                         has_pending_gt_row_block = true;
+                                                                     }
+                                                                     block_process.AddGtIndexBlock(pending_gt_row_block, all_zeros, all_copies, comp_pos_copy,
                                                                                                   zeros_only, copies, origin_of_copy, samples_indexes);
+                                                                 }
                                                              }
                                                              // if(!cur_block_id)
                                                              //     prev_chrom = v_vcf_data_io[0].chrom;
@@ -638,7 +646,10 @@ bool Compressor::CompressProcess()
                                                                  if (no_curr_chrom_block)
                                                                  {
 
-                                                                     toal_all_size += fixed_chunk_io.gt_block.size();
+                                                                     size_t gt_sz = 0;
+                                                                     for (const auto &b : fixed_chunk_io.gt_row_blocks)
+                                                                         gt_sz += b.size();
+                                                                     toal_all_size += gt_sz;
                                                                      sortVarBlockQueue.Push(chunk_id, std::move(fixed_chunk_io));
                                                                      int id = (int)chunks_streams.size();
                                                                      chunks_streams[id] = chunk_stream(cur_chunk_actual_pos, 0);
@@ -651,7 +662,13 @@ bool Compressor::CompressProcess()
                                                                  {
 
                                                                      cur_chunk_actual_pos += (uint32_t)v_vcf_data_io.size();
-                                                                     block_process.AddGtIndexBlock(fixed_chunk_io.gt_block, all_zeros, all_copies, comp_pos_copy,
+                                                                     if (!has_pending_gt_row_block)
+                                                                     {
+                                                                         pending_gt_row_block.clear();
+                                                                         pending_gt_row_block_id = static_cast<uint32_t>(block_id);
+                                                                         has_pending_gt_row_block = true;
+                                                                     }
+                                                                     block_process.AddGtIndexBlock(pending_gt_row_block, all_zeros, all_copies, comp_pos_copy,
                                                                                                   zeros_only, copies, origin_of_copy, samples_indexes);
                                                                      fixed_field_block row_block_fixed;
                                                                      row_block_fixed.Clear();
@@ -664,11 +681,17 @@ bool Compressor::CompressProcess()
                                                                      fixed_chunk_io.no_variants += meta.variant_count;
                                                                      fixed_chunk_io.row_blocks.emplace_back(std::move(row_block_fixed));
                                                                      fixed_chunk_io.row_meta.emplace_back(meta);
+                                                                     fixed_chunk_io.gt_row_blocks.emplace_back(std::move(pending_gt_row_block));
+                                                                     pending_gt_row_block.clear();
+                                                                     has_pending_gt_row_block = false;
                                                                      no_curr_chrom_block++;
 
                                                                      if (no_curr_chrom_block == params.no_blocks)
                                                                      {
-                                                                         toal_all_size += fixed_chunk_io.gt_block.size();
+                                                                         size_t gt_sz = 0;
+                                                                         for (const auto &b : fixed_chunk_io.gt_row_blocks)
+                                                                             gt_sz += b.size();
+                                                                         toal_all_size += gt_sz;
                                                                          sortVarBlockQueue.Push(chunk_id, std::move(fixed_chunk_io));
                                                                          int id = (int)chunks_streams.size();
                                                                          chunks_streams[id] = chunk_stream(cur_chunk_actual_pos, 0);
@@ -684,7 +707,13 @@ bool Compressor::CompressProcess()
                                                              {
 
                                                                  cur_chunk_actual_pos += (uint32_t)v_vcf_data_io.size();
-                                                                 block_process.AddGtIndexBlock(fixed_chunk_io.gt_block, all_zeros, all_copies, comp_pos_copy,
+                                                                 if (!has_pending_gt_row_block)
+                                                                 {
+                                                                     pending_gt_row_block.clear();
+                                                                     pending_gt_row_block_id = static_cast<uint32_t>(block_id);
+                                                                     has_pending_gt_row_block = true;
+                                                                 }
+                                                                 block_process.AddGtIndexBlock(pending_gt_row_block, all_zeros, all_copies, comp_pos_copy,
                                                                                               zeros_only, copies, origin_of_copy, samples_indexes);
                                                                  fixed_field_block row_block_fixed;
                                                                  row_block_fixed.Clear();
@@ -697,11 +726,17 @@ bool Compressor::CompressProcess()
                                                                  fixed_chunk_io.no_variants += meta.variant_count;
                                                                  fixed_chunk_io.row_blocks.emplace_back(std::move(row_block_fixed));
                                                                  fixed_chunk_io.row_meta.emplace_back(meta);
+                                                                 fixed_chunk_io.gt_row_blocks.emplace_back(std::move(pending_gt_row_block));
+                                                                 pending_gt_row_block.clear();
+                                                                 has_pending_gt_row_block = false;
                                                                  no_curr_chrom_block++;
 
                                                                  if (no_curr_chrom_block == params.no_blocks)
                                                                  {
-                                                                     toal_all_size += fixed_chunk_io.gt_block.size();
+                                                                     size_t gt_sz = 0;
+                                                                     for (const auto &b : fixed_chunk_io.gt_row_blocks)
+                                                                         gt_sz += b.size();
+                                                                     toal_all_size += gt_sz;
                                                                      sortVarBlockQueue.Push(chunk_id, std::move(fixed_chunk_io));
                                                                      int id = (int)chunks_streams.size();
                                                                      chunks_streams[id] = chunk_stream(cur_chunk_actual_pos, 0);
@@ -730,7 +765,10 @@ bool Compressor::CompressProcess()
         if (no_curr_chrom_block > 0)
         {
             // Push the last chunk if there's remaining data
-            toal_all_size += fixed_chunk_io.gt_block.size();
+            size_t gt_sz = 0;
+            for (const auto &b : fixed_chunk_io.gt_row_blocks)
+                gt_sz += b.size();
+            toal_all_size += gt_sz;
             sortVarBlockQueue.Push(chunk_id, std::move(fixed_chunk_io));
             int id = (int)chunks_streams.size();
             chunks_streams[id] = chunk_stream(cur_chunk_actual_pos, 0);
@@ -1258,6 +1296,8 @@ bool Compressor::compressFixedFieldsChunk(fixed_field_chunk &chunk_io)
 {
     if (chunk_io.row_blocks.size() != chunk_io.row_meta.size())
         return false;
+    if (chunk_io.row_blocks.size() != chunk_io.gt_row_blocks.size())
+        return false;
 
     const uint32_t row_block_count = static_cast<uint32_t>(chunk_io.row_blocks.size());
     std::vector<fixed_field_block> row_blocks_comp(row_block_count);
@@ -1277,11 +1317,8 @@ bool Compressor::compressFixedFieldsChunk(fixed_field_chunk &chunk_io)
         codec->Compress(rb.qual, out.qual);
     }
 
-    std::vector<uint8_t> gt_block_comp;
+    uint8_t marker = 0;
     {
-        auto gt_codec = MakeCompressionStrategy(params.backend, p_bsc_fixed_fields);
-        gt_codec->Compress(chunk_io.gt_block, gt_block_comp);
-        uint8_t marker = 0;
         switch (params.backend)
         {
         case compression_backend_t::bsc:
@@ -1297,10 +1334,17 @@ bool Compressor::compressFixedFieldsChunk(fixed_field_chunk &chunk_io)
             marker = 0;
             break;
         }
-        gt_block_comp.emplace_back(marker);
     }
 
-    return writeTempChunkRB(chunk_io, row_blocks_comp, gt_block_comp);
+    std::vector<std::vector<uint8_t>> gt_row_blocks_comp(row_block_count);
+    auto gt_codec = MakeCompressionStrategy(params.backend, p_bsc_fixed_fields);
+    for (uint32_t i = 0; i < row_block_count; ++i)
+    {
+        gt_codec->Compress(chunk_io.gt_row_blocks[i], gt_row_blocks_comp[i]);
+        gt_row_blocks_comp[i].emplace_back(marker);
+    }
+
+    return writeTempChunkRB(chunk_io, row_blocks_comp, gt_row_blocks_comp);
 }
 
 bool Compressor::writeTempFlie(fixed_field_block &fixed_field_block_io)
@@ -1353,15 +1397,17 @@ bool Compressor::writeTempFlie(fixed_field_block &fixed_field_block_io)
 
 bool Compressor::writeTempChunkRB(const fixed_field_chunk &chunk_io,
                                   const std::vector<fixed_field_block> &row_blocks_comp,
-                                  const std::vector<uint8_t> &gt_block_comp)
+                                  const std::vector<std::vector<uint8_t>> &gt_row_blocks_comp)
 {
     const uint32_t row_block_count = static_cast<uint32_t>(row_blocks_comp.size());
     if (row_block_count != chunk_io.row_meta.size())
         return false;
+    if (row_block_count != gt_row_blocks_comp.size())
+        return false;
 
-    const uint32_t header_bytes = 7u * sizeof(uint32_t); // magic, version, total_variants, row_block_count, flags, gt_off, gt_size
+    const uint32_t header_bytes = 5u * sizeof(uint32_t); // magic, version, total_variants, row_block_count, flags
     const uint32_t entry_bytes =
-        sizeof(uint32_t) + 2u * sizeof(int64_t) + 6u * (2u * sizeof(uint32_t)); // variant_count + first/last + (off,size)*6
+        sizeof(uint32_t) + 2u * sizeof(int64_t) + 6u * (2u * sizeof(uint32_t)) + 2u * sizeof(uint32_t); // + (gt_off,gt_size)
     const uint32_t dir_bytes = row_block_count * entry_bytes;
 
     const uint64_t start_offset = ftell(temp_file);
@@ -1370,12 +1416,9 @@ bool Compressor::writeTempChunkRB(const fixed_field_chunk &chunk_io,
     const uint64_t payload_start = ftell(temp_file);
 
     uint32_t magic = GSC_FIXED_FIELDS_RB_MAGIC;
-    uint32_t version = GSC_FIXED_FIELDS_RB_VERSION;
+    uint32_t version = GSC_FIXED_FIELDS_RB_VERSION_LATEST;
     uint32_t total_variants = chunk_io.no_variants;
     uint32_t flags = 0;
-
-    uint32_t gt_off = 0;
-    uint32_t gt_size = static_cast<uint32_t>(gt_block_comp.size());
 
     uint32_t cur_off = header_bytes + dir_bytes;
 
@@ -1387,6 +1430,7 @@ bool Compressor::writeTempChunkRB(const fixed_field_chunk &chunk_io,
         uint32_t ref_off, ref_size;
         uint32_t alt_off, alt_size;
         uint32_t qual_off, qual_size;
+        uint32_t gt_off, gt_size;
     };
     std::vector<DirEntryOffsets> offsets(row_block_count);
 
@@ -1418,10 +1462,11 @@ bool Compressor::writeTempChunkRB(const fixed_field_chunk &chunk_io,
         o.qual_off = cur_off;
         o.qual_size = static_cast<uint32_t>(rb.qual.size());
         cur_off += o.qual_size;
-    }
 
-    gt_off = cur_off;
-    cur_off += gt_size;
+        o.gt_off = cur_off;
+        o.gt_size = static_cast<uint32_t>(gt_row_blocks_comp[i].size());
+        cur_off += o.gt_size;
+    }
 
     // Header
     fwrite(&magic, sizeof(uint32_t), 1, temp_file);
@@ -1429,8 +1474,6 @@ bool Compressor::writeTempChunkRB(const fixed_field_chunk &chunk_io,
     fwrite(&total_variants, sizeof(uint32_t), 1, temp_file);
     fwrite(&row_block_count, sizeof(uint32_t), 1, temp_file);
     fwrite(&flags, sizeof(uint32_t), 1, temp_file);
-    fwrite(&gt_off, sizeof(uint32_t), 1, temp_file);
-    fwrite(&gt_size, sizeof(uint32_t), 1, temp_file);
 
     // Directory
     for (uint32_t i = 0; i < row_block_count; ++i)
@@ -1454,6 +1497,9 @@ bool Compressor::writeTempChunkRB(const fixed_field_chunk &chunk_io,
         fwrite(&o.alt_size, sizeof(uint32_t), 1, temp_file);
         fwrite(&o.qual_off, sizeof(uint32_t), 1, temp_file);
         fwrite(&o.qual_size, sizeof(uint32_t), 1, temp_file);
+
+        fwrite(&o.gt_off, sizeof(uint32_t), 1, temp_file);
+        fwrite(&o.gt_size, sizeof(uint32_t), 1, temp_file);
     }
 
     // Data region in the same order used for offsets above.
@@ -1466,8 +1512,8 @@ bool Compressor::writeTempChunkRB(const fixed_field_chunk &chunk_io,
         fwrite(rb.ref.data(), 1, rb.ref.size(), temp_file);
         fwrite(rb.alt.data(), 1, rb.alt.size(), temp_file);
         fwrite(rb.qual.data(), 1, rb.qual.size(), temp_file);
+        fwrite(gt_row_blocks_comp[i].data(), 1, gt_row_blocks_comp[i].size(), temp_file);
     }
-    fwrite(gt_block_comp.data(), 1, gt_block_comp.size(), temp_file);
 
     const uint64_t payload_end = ftell(temp_file);
     const uint64_t payload_size = payload_end - payload_start;

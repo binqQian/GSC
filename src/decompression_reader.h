@@ -36,6 +36,7 @@ class DecompressionReader {
         uint32_t ref_off = 0, ref_size = 0;
         uint32_t alt_off = 0, alt_size = 0;
         uint32_t qual_off = 0, qual_size = 0;
+        uint32_t gt_off = 0, gt_size = 0; // v2+: per-row_block GT index segment
     };
     
 	
@@ -117,6 +118,7 @@ class DecompressionReader {
     // New fixed-fields chunk format (row_block directory)
     bool has_fixed_fields_rb_dir = false;
     uint64_t fixed_fields_chunk_start = 0;
+    uint32_t fixed_fields_chunk_version = 0;
     uint32_t fixed_fields_total_variants = 0;
     uint32_t fixed_fields_row_block_count = 0;
     uint32_t fixed_fields_gt_off = 0;

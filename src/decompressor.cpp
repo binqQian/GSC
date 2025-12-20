@@ -1346,9 +1346,16 @@ int Decompressor::decompressAllTiled()
     logger->info("decompressAllTiled: my_str allocated, size={}", my_str.size());
 
     uint64_t start_pair_id = static_cast<uint64_t>(start_chunk_actual_pos) * n_col_blocks;
-    uint64_t curr_non_copy_vec_id_offset = start_pair_id * 2 - rrr_rank_zeros_bit_vector[0](start_pair_id) -
-                                           rrr_rank_zeros_bit_vector[1](start_pair_id) - rrr_rank_copy_bit_vector[0](start_pair_id) -
-                                           rrr_rank_copy_bit_vector[1](start_pair_id);
+    uint64_t gt_index_base_pair_id = start_pair_id;
+    if (decompression_reader.has_fixed_fields_rb_dir &&
+        decompression_reader.fixed_fields_chunk_version >= GSC_FIXED_FIELDS_RB_VERSION_V2 &&
+        chunk_variant_offset_io)
+    {
+        gt_index_base_pair_id += static_cast<uint64_t>(chunk_variant_offset_io) * n_col_blocks;
+    }
+    uint64_t curr_non_copy_vec_id_offset = gt_index_base_pair_id * 2 - rrr_rank_zeros_bit_vector[0](gt_index_base_pair_id) -
+                                           rrr_rank_zeros_bit_vector[1](gt_index_base_pair_id) - rrr_rank_copy_bit_vector[0](gt_index_base_pair_id) -
+                                           rrr_rank_copy_bit_vector[1](gt_index_base_pair_id);
 
     logger->info("decompressAllTiled: start_pair_id={}, curr_non_copy_vec_id_offset={}", start_pair_id, curr_non_copy_vec_id_offset);
 
@@ -1722,9 +1729,16 @@ int Decompressor::decompressRangeTiled(const string &range)
 
     // Calculate start pair_id for this chunk
     uint64_t start_pair_id = static_cast<uint64_t>(start_chunk_actual_pos) * n_col_blocks;
-    uint64_t curr_non_copy_vec_id_offset = start_pair_id * 2 - rrr_rank_zeros_bit_vector[0](start_pair_id) -
-                                           rrr_rank_zeros_bit_vector[1](start_pair_id) - rrr_rank_copy_bit_vector[0](start_pair_id) -
-                                           rrr_rank_copy_bit_vector[1](start_pair_id);
+    uint64_t gt_index_base_pair_id = start_pair_id;
+    if (decompression_reader.has_fixed_fields_rb_dir &&
+        decompression_reader.fixed_fields_chunk_version >= GSC_FIXED_FIELDS_RB_VERSION_V2 &&
+        chunk_variant_offset_io)
+    {
+        gt_index_base_pair_id += static_cast<uint64_t>(chunk_variant_offset_io) * n_col_blocks;
+    }
+    uint64_t curr_non_copy_vec_id_offset = gt_index_base_pair_id * 2 - rrr_rank_zeros_bit_vector[0](gt_index_base_pair_id) -
+                                           rrr_rank_zeros_bit_vector[1](gt_index_base_pair_id) - rrr_rank_copy_bit_vector[0](gt_index_base_pair_id) -
+                                           rrr_rank_copy_bit_vector[1](gt_index_base_pair_id);
 
     const bool has_range = (range != "");
     int64_t start_pos = std::numeric_limits<int64_t>::min();
@@ -1827,9 +1841,16 @@ int Decompressor::decompressSampleSmartTiled(const string &range)
 
     // Calculate start pair_id for this chunk
     uint64_t start_pair_id = static_cast<uint64_t>(start_chunk_actual_pos) * n_col_blocks;
-    uint64_t curr_non_copy_vec_id_offset = start_pair_id * 2 - rrr_rank_zeros_bit_vector[0](start_pair_id) -
-                                           rrr_rank_zeros_bit_vector[1](start_pair_id) - rrr_rank_copy_bit_vector[0](start_pair_id) -
-                                           rrr_rank_copy_bit_vector[1](start_pair_id);
+    uint64_t gt_index_base_pair_id = start_pair_id;
+    if (decompression_reader.has_fixed_fields_rb_dir &&
+        decompression_reader.fixed_fields_chunk_version >= GSC_FIXED_FIELDS_RB_VERSION_V2 &&
+        chunk_variant_offset_io)
+    {
+        gt_index_base_pair_id += static_cast<uint64_t>(chunk_variant_offset_io) * n_col_blocks;
+    }
+    uint64_t curr_non_copy_vec_id_offset = gt_index_base_pair_id * 2 - rrr_rank_zeros_bit_vector[0](gt_index_base_pair_id) -
+                                           rrr_rank_zeros_bit_vector[1](gt_index_base_pair_id) - rrr_rank_copy_bit_vector[0](gt_index_base_pair_id) -
+                                           rrr_rank_copy_bit_vector[1](gt_index_base_pair_id);
 
     const bool has_range = (range != "");
     int64_t start_pos = std::numeric_limits<int64_t>::min();

@@ -723,6 +723,7 @@ bool DecompressionReader::readFixedFields()
 	has_fixed_fields_rb_dir = false;
 	fixed_fields_rb_dir.clear();
 	fixed_fields_chunk_start = 0;
+	fixed_fields_chunk_version = 0;
 	fixed_fields_total_variants = 0;
 	fixed_fields_row_block_count = 0;
 	fixed_fields_gt_off = 0;
@@ -746,12 +747,21 @@ bool DecompressionReader::readFixedFields()
 		buf_pos += sizeof(uint32_t);
 		memcpy(&flags, buf + buf_pos, sizeof(uint32_t));
 		buf_pos += sizeof(uint32_t);
-		memcpy(&fixed_fields_gt_off, buf + buf_pos, sizeof(uint32_t));
-		buf_pos += sizeof(uint32_t);
-		memcpy(&fixed_fields_gt_size, buf + buf_pos, sizeof(uint32_t));
-		buf_pos += sizeof(uint32_t);
 
-		if (version != GSC_FIXED_FIELDS_RB_VERSION)
+		fixed_fields_chunk_version = version;
+		if (version == GSC_FIXED_FIELDS_RB_VERSION_V1)
+		{
+			memcpy(&fixed_fields_gt_off, buf + buf_pos, sizeof(uint32_t));
+			buf_pos += sizeof(uint32_t);
+			memcpy(&fixed_fields_gt_size, buf + buf_pos, sizeof(uint32_t));
+			buf_pos += sizeof(uint32_t);
+		}
+		else if (version == GSC_FIXED_FIELDS_RB_VERSION_V2)
+		{
+			fixed_fields_gt_off = 0;
+			fixed_fields_gt_size = 0;
+		}
+		else
 		{
 			auto logger = LogManager::Instance().Logger();
 			logger->error("Unsupported fixed-fields chunk version: {}", version);
@@ -763,11 +773,22 @@ bool DecompressionReader::readFixedFields()
 		fixed_fields_rb_dir.resize(fixed_fields_row_block_count);
 
 		uint32_t max_end = 0;
-		const uint32_t base_end = 7u * sizeof(uint32_t) +
-							 fixed_fields_row_block_count *
-								 (sizeof(uint32_t) + 2u * sizeof(int64_t) + 6u * (2u * sizeof(uint32_t)));
+		uint32_t header_bytes = 0;
+		uint32_t entry_bytes = 0;
+		if (version == GSC_FIXED_FIELDS_RB_VERSION_V1)
+		{
+			header_bytes = 7u * sizeof(uint32_t);
+			entry_bytes = sizeof(uint32_t) + 2u * sizeof(int64_t) + 6u * (2u * sizeof(uint32_t));
+		}
+		else
+		{
+			header_bytes = 5u * sizeof(uint32_t);
+			entry_bytes = sizeof(uint32_t) + 2u * sizeof(int64_t) + 6u * (2u * sizeof(uint32_t)) + 2u * sizeof(uint32_t);
+		}
+		const uint32_t base_end = header_bytes + fixed_fields_row_block_count * entry_bytes;
 		max_end = base_end;
-		max_end = std::max<uint32_t>(max_end, fixed_fields_gt_off + fixed_fields_gt_size);
+		if (version == GSC_FIXED_FIELDS_RB_VERSION_V1)
+			max_end = std::max<uint32_t>(max_end, fixed_fields_gt_off + fixed_fields_gt_size);
 
 		for (uint32_t i = 0; i < fixed_fields_row_block_count; ++i)
 		{
@@ -804,12 +825,22 @@ bool DecompressionReader::readFixedFields()
 			memcpy(&e.qual_size, buf + buf_pos, sizeof(uint32_t));
 			buf_pos += sizeof(uint32_t);
 
+			if (version == GSC_FIXED_FIELDS_RB_VERSION_V2)
+			{
+				memcpy(&e.gt_off, buf + buf_pos, sizeof(uint32_t));
+				buf_pos += sizeof(uint32_t);
+				memcpy(&e.gt_size, buf + buf_pos, sizeof(uint32_t));
+				buf_pos += sizeof(uint32_t);
+			}
+
 			max_end = std::max<uint32_t>(max_end, e.chrom_off + e.chrom_size);
 			max_end = std::max<uint32_t>(max_end, e.pos_off + e.pos_size);
 			max_end = std::max<uint32_t>(max_end, e.id_off + e.id_size);
 			max_end = std::max<uint32_t>(max_end, e.ref_off + e.ref_size);
 			max_end = std::max<uint32_t>(max_end, e.alt_off + e.alt_size);
 			max_end = std::max<uint32_t>(max_end, e.qual_off + e.qual_size);
+			if (version == GSC_FIXED_FIELDS_RB_VERSION_V2)
+				max_end = std::max<uint32_t>(max_end, e.gt_off + e.gt_size);
 
 			fixed_fields_rb_dir[i] = std::move(e);
 		}
@@ -1118,45 +1149,6 @@ bool DecompressionReader::DecoderByRange(vector<block_t> &v_blocks, vector<vecto
 	no_variants = fixed_fields_total_variants;
 	variants_before = 0;
 
-	// Decode chunk-level GT index
-	{
-		std::vector<uint8_t> gt_comp(fixed_fields_gt_size);
-		memcpy(gt_comp.data(), buf + fixed_fields_chunk_start + fixed_fields_gt_off, fixed_fields_gt_size);
-		if (gt_comp.empty())
-		{
-			gt_index.clear();
-		}
-		else
-		{
-			uint8_t marker = gt_comp.back();
-			gt_comp.pop_back();
-			switch (marker)
-			{
-			case 0:
-			{
-				auto gt_codec = MakeCompressionStrategy(compression_backend_t::bsc, p_bsc_fixed_fields);
-				gt_codec->Decompress(gt_comp, gt_index);
-				break;
-			}
-			case 1:
-				zstd::zstd_decompress(gt_comp, gt_index);
-				break;
-			case 2:
-			{
-				auto gt_codec = MakeCompressionStrategy(compression_backend_t::brotli, p_bsc_fixed_fields);
-				gt_codec->Decompress(gt_comp, gt_index);
-				break;
-			}
-			default:
-			{
-				auto gt_codec = MakeCompressionStrategy(backend, p_bsc_fixed_fields);
-				gt_codec->Decompress(gt_comp, gt_index);
-				break;
-			}
-			}
-		}
-	}
-
 	// Select row_blocks overlapping [range_1, range_2]
 	bool any = false;
 	uint32_t first_rb = 0;
@@ -1186,8 +1178,69 @@ bool DecompressionReader::DecoderByRange(vector<block_t> &v_blocks, vector<vecto
 
 	v_blocks.clear();
 	s_perm.clear();
+	gt_index.clear();
 	if (!any)
 		return true;
+
+	auto decompress_gt_segment = [&](const uint8_t *comp_ptr, uint32_t comp_size, std::vector<uint8_t> &out)
+	{
+		out.clear();
+		if (!comp_size)
+			return;
+		std::vector<uint8_t> comp(comp_size);
+		memcpy(comp.data(), comp_ptr, comp_size);
+		uint8_t marker = comp.back();
+		comp.pop_back();
+		switch (marker)
+		{
+		case 0:
+		{
+			auto gt_codec = MakeCompressionStrategy(compression_backend_t::bsc, p_bsc_fixed_fields);
+			gt_codec->Decompress(comp, out);
+			break;
+		}
+		case 1:
+			zstd::zstd_decompress(comp, out);
+			break;
+		case 2:
+		{
+			auto gt_codec = MakeCompressionStrategy(compression_backend_t::brotli, p_bsc_fixed_fields);
+			gt_codec->Decompress(comp, out);
+			break;
+		}
+		default:
+		{
+			auto gt_codec = MakeCompressionStrategy(backend, p_bsc_fixed_fields);
+			gt_codec->Decompress(comp, out);
+			break;
+		}
+		}
+	};
+
+	// Decode GT index (v1: chunk-level; v2+: per-row_block, only for selected row_blocks)
+	if (fixed_fields_chunk_version == GSC_FIXED_FIELDS_RB_VERSION_V1)
+	{
+		decompress_gt_segment(buf + fixed_fields_chunk_start + fixed_fields_gt_off, fixed_fields_gt_size, gt_index);
+	}
+	else if (fixed_fields_chunk_version == GSC_FIXED_FIELDS_RB_VERSION_V2)
+	{
+		std::vector<uint8_t> seg_out;
+		for (uint32_t rb = first_rb; rb <= last_rb; ++rb)
+		{
+			const auto &dir = fixed_fields_rb_dir[rb];
+			if (!dir.gt_size)
+				continue;
+			decompress_gt_segment(buf + fixed_fields_chunk_start + dir.gt_off, dir.gt_size, seg_out);
+			if (!seg_out.empty())
+				gt_index.insert(gt_index.end(), seg_out.begin(), seg_out.end());
+		}
+	}
+	else
+	{
+		auto logger = LogManager::Instance().Logger();
+		logger->error("DecoderByRange: unsupported fixed-fields chunk version {}", fixed_fields_chunk_version);
+		return false;
+	}
 
 	auto codec = MakeCompressionStrategy(backend, p_bsc_fixed_fields);
 	const uint32_t row_block_variants = max_block_rows ? max_block_rows : total_haplotypes;
