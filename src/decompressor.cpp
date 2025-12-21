@@ -41,19 +41,10 @@ bool Decompressor::analyzeInputRange(uint32_t & start_chunk_id,uint32_t & end_ch
     bool query_flag = false;
     auto logger = LogManager::Instance().Logger();
 
-    // std::cerr << "Begin to extract the genotype sparse matrix" << endl;
     if (range == "")
     {
-        
-        for (size_t i = 0; i < decompression_reader.d_where_chrom.size(); i++)
-        {
-            prev_chrom_size = i ? decompression_reader.d_where_chrom[i - 1].second : 0;
-            end_chunk_id += (decompression_reader.d_where_chrom[i].second - prev_chrom_size + params.no_blocks-1) / params.no_blocks;
-            // no_block += (d_where_chrom[i].second - prev_chr_size) / no_comp_bolck + (((d_where_chrom[i].second - prev_chr_size) % no_comp_bolck) ? 1 : 0);
-            
-        }
-        
-
+        // Use the actual chunk count from chunks_min_pos, which is read from the compressed file
+        end_chunk_id = static_cast<uint32_t>(decompression_reader.chunks_min_pos.size());
     }
     else
     {
@@ -339,21 +330,27 @@ bool Decompressor::decompressProcess()
     } 
     cur_chunk_id = start_chunk_id;
     unique_ptr<thread> decompress_thread(new thread([&]{
-        
+
         while(cur_chunk_id < end_chunk_id){
             my_barrier.count_down_and_wait();
             my_barrier.count_down_and_wait();
             initalIndex();
             if(out_type == file_type::BED_File){
                 BedFormatDecompress();
-                
+
             }else{
                 if(params.compress_mode == compress_mode_t::lossless_mode){
-                    
                     uint32_t no_actual_variants =  decompression_reader.actual_variants[cur_chunk_id-1];
 
                     decompressAll();
 
+                    // Validate bounds before cleanup
+                    if (no_actual_variants > all_fields_io.size()) {
+                        auto logger = LogManager::Instance().Logger();
+                        logger->error("decompress_thread: BOUNDS ERROR! no_actual_variants={} > all_fields_io.size()={}",
+                                      no_actual_variants, all_fields_io.size());
+                        no_actual_variants = static_cast<uint32_t>(all_fields_io.size());
+                    }
                     for(uint32_t i = 0; i < no_actual_variants; ++i)
                         for(size_t j = 0; j < decompression_reader.keys.size(); ++j){
                             if(all_fields_io[i][j].data_size)
@@ -367,7 +364,7 @@ bool Decompressor::decompressProcess()
 
                         }
                     all_fields_io.clear();
-                    
+
                 }
                 else{
                     if (params.samples == "")
@@ -379,7 +376,6 @@ bool Decompressor::decompressProcess()
             fixed_variants_chunk_io.clear();
             sort_perm_io.clear();
             decompress_gt_indexes_io.clear();
-            
         }
     }));
 
@@ -388,18 +384,19 @@ bool Decompressor::decompressProcess()
         while (cur_chunk_id < end_chunk_id)
         {
             if(!decompression_reader.readFixedFields()){
-                
+                auto logger = LogManager::Instance().Logger();
+                logger->error("process_thread: readFixedFields FAILED at cur_chunk_id={}", cur_chunk_id);
                 break;
             }
             if(params.compress_mode == compress_mode_t::lossless_mode){
 
                 uint32_t no_actual_variants =  decompression_reader.actual_variants[cur_chunk_id];
-                
+
                 while (no_actual_variants--)
                 {
                     all_fields.emplace_back(vector<field_desc>(decompression_reader.keys.size()));
                     decompression_reader.GetVariants(all_fields.back());
-                    
+
                 }
             }
             uint32_t variants_before = 0;
@@ -413,13 +410,12 @@ bool Decompressor::decompressProcess()
                 decompression_reader.Decoder(fixed_variants_chunk,sort_perm,decompress_gt_indexes,cur_chunk_id);
             }
             chunk_variant_offset = variants_before;
-            
+
             my_barrier.count_down_and_wait();
             my_barrier.count_down_and_wait();
-            
+
         }
-        
-    })); 
+    }));
     while (cur_chunk_id < end_chunk_id)
 	{
         my_barrier.count_down_and_wait();
@@ -435,10 +431,9 @@ bool Decompressor::decompressProcess()
 
         cur_chunk_id++;
 		my_barrier.count_down_and_wait();
-          
+
     }
 
-    
     process_thread->join();
     decompress_thread->join();
     if(params.compress_mode == compress_mode_t::lossless_mode)
@@ -789,6 +784,15 @@ void Decompressor::appendVCF(variant_desc_t &_desc, vector<uint8_t> &_my_str, si
 
 void Decompressor::appendVCFToRec(variant_desc_t &_desc, vector<uint8_t> &_genotype, size_t _standard_block_size, vector<field_desc> &_fields, vector<key_desc> &_keys)
 {
+    auto logger = LogManager::Instance().Logger();
+    logger->debug("appendVCFToRec: entering, _genotype.size()={}, _standard_block_size={}, _fields.size()={}, _keys.size()={}",
+                  _genotype.size(), _standard_block_size, _fields.size(), _keys.size());
+    if (_genotype.size() < _standard_block_size) {
+        logger->error("appendVCFToRec: _genotype.size()={} < _standard_block_size={}", _genotype.size(), _standard_block_size);
+    }
+    if (_fields.size() != _keys.size()) {
+        logger->error("appendVCFToRec: _fields.size()={} != _keys.size()={}", _fields.size(), _keys.size());
+    }
     bcf_clear(rec);
     record = _desc.chrom + "\t0\t" + _desc.id + "\t" + _desc.ref + "\t" + _desc.alt + "\t" + _desc.qual + "\t" + "." + "\t" + ".";
     kstring_t s;
@@ -800,21 +804,33 @@ void Decompressor::appendVCFToRec(variant_desc_t &_desc, vector<uint8_t> &_genot
     int curr_size = 0;
     for (size_t i = 0; i < _fields.size(); i++)
     {
+        if (i >= _keys.size()) {
+            logger->error("appendVCFToRec: filter loop i={} >= _keys.size()={}", i, _keys.size());
+            break;
+        }
         uint32_t id = _keys[i].actual_field_id;
+        if (id >= _keys.size() || id >= _fields.size()) {
+            logger->error("appendVCFToRec: filter loop actual_field_id={} out of bounds (keys={}, fields={})", id, _keys.size(), _fields.size());
+            continue;
+        }
         if (_keys[id].keys_type == key_type_t::flt)
         {
-            
+
             if (_fields[id].present)
                 bcf_add_filter(out_hdr, rec, _keys[id].key_id);
         }
     }
-    
+
     for (size_t i = 0; i < _keys.size(); i++)
     {
         uint32_t id = _keys[i].actual_field_id;
+        if (id >= _keys.size() || id >= _fields.size()) {
+            logger->error("appendVCFToRec: info loop actual_field_id={} out of bounds (keys={}, fields={})", id, _keys.size(), _fields.size());
+            continue;
+        }
         if (_keys[id].keys_type == key_type_t::info)
         {
-            
+
             if (_fields[id].present)
                 switch (_keys[id].type)
 		        {
@@ -847,6 +863,10 @@ void Decompressor::appendVCFToRec(variant_desc_t &_desc, vector<uint8_t> &_genot
     for (size_t i = 0; i < _keys.size(); i++)
     {
         int id = _keys[i].actual_field_id;
+        if (id < 0 || static_cast<size_t>(id) >= _fields.size()) {
+            logger->error("appendVCFToRec: FORMAT loop id={} out of bounds (fields.size()={})", id, _fields.size());
+            continue;
+        }
 
         if(id == decompression_reader.key_gt_id)
         {
@@ -1635,17 +1655,21 @@ int Decompressor::decompressAllTiled()
 
     if (cur_chunk_id == end_chunk_id && count)
     {
+        logger->info("decompressAllTiled: appending final multi-allelic record, count={}, has_sample_subset={}", count, has_sample_subset);
         if (has_sample_subset)
             appendVCFToRec(temp_desc, genotype, output_haplotypes, temp_fields, decompression_reader.keys);
         else
             appendVCFToRec(temp_desc, genotype, static_cast<uint32_t>(haplotype_count), temp_fields, decompression_reader.keys);
+        logger->info("decompressAllTiled: final multi-allelic record appended");
     }
 
     logger->info("Processed chunk {}", cur_chunk_id);
 
+    logger->info("decompressAllTiled: cleaning done_unique, size={}", done_unique.size());
     for (auto &it : done_unique)
         delete[] it.second;
     done_unique.clear();
+    logger->info("decompressAllTiled: done_unique cleared, returning");
 
     return 0;
 }

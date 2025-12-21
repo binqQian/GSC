@@ -1182,38 +1182,34 @@ bool DecompressionReader::DecoderByRange(vector<block_t> &v_blocks, vector<vecto
 	if (!any)
 		return true;
 
+	// Pre-create codec objects for reuse (avoid repeated allocation)
+	auto gt_codec_bsc = MakeCompressionStrategy(compression_backend_t::bsc, p_bsc_fixed_fields);
+	auto gt_codec_brotli = MakeCompressionStrategy(compression_backend_t::brotli, p_bsc_fixed_fields);
+	auto gt_codec_backend = MakeCompressionStrategy(backend, p_bsc_fixed_fields);
+
+	// Lambda: decompress GT segment directly from pointer (no intermediate memcpy)
 	auto decompress_gt_segment = [&](const uint8_t *comp_ptr, uint32_t comp_size, std::vector<uint8_t> &out)
 	{
 		out.clear();
 		if (!comp_size)
 			return;
-		std::vector<uint8_t> comp(comp_size);
-		memcpy(comp.data(), comp_ptr, comp_size);
-		uint8_t marker = comp.back();
-		comp.pop_back();
+		uint8_t marker = comp_ptr[comp_size - 1];
+		const uint8_t *data_ptr = comp_ptr;
+		size_t data_size = comp_size - 1;
 		switch (marker)
 		{
 		case 0:
-		{
-			auto gt_codec = MakeCompressionStrategy(compression_backend_t::bsc, p_bsc_fixed_fields);
-			gt_codec->Decompress(comp, out);
+			gt_codec_bsc->DecompressFromPtr(data_ptr, data_size, out);
 			break;
-		}
 		case 1:
-			zstd::zstd_decompress(comp, out);
+			zstd::zstd_decompress_ptr(data_ptr, data_size, out);
 			break;
 		case 2:
-		{
-			auto gt_codec = MakeCompressionStrategy(compression_backend_t::brotli, p_bsc_fixed_fields);
-			gt_codec->Decompress(comp, out);
+			gt_codec_brotli->DecompressFromPtr(data_ptr, data_size, out);
 			break;
-		}
 		default:
-		{
-			auto gt_codec = MakeCompressionStrategy(backend, p_bsc_fixed_fields);
-			gt_codec->Decompress(comp, out);
+			gt_codec_backend->DecompressFromPtr(data_ptr, data_size, out);
 			break;
-		}
 		}
 	};
 
@@ -1224,6 +1220,15 @@ bool DecompressionReader::DecoderByRange(vector<block_t> &v_blocks, vector<vecto
 	}
 	else if (fixed_fields_chunk_version == GSC_FIXED_FIELDS_RB_VERSION_V2)
 	{
+		// Pre-calculate total GT size for reservation (avoid repeated reallocation)
+		size_t estimated_total_size = 0;
+		for (uint32_t rb = first_rb; rb <= last_rb; ++rb)
+		{
+			// Estimate decompressed size as ~4x compressed size (conservative)
+			estimated_total_size += fixed_fields_rb_dir[rb].gt_size * 4;
+		}
+		gt_index.reserve(estimated_total_size);
+
 		std::vector<uint8_t> seg_out;
 		for (uint32_t rb = first_rb; rb <= last_rb; ++rb)
 		{
@@ -1242,7 +1247,8 @@ bool DecompressionReader::DecoderByRange(vector<block_t> &v_blocks, vector<vecto
 		return false;
 	}
 
-	auto codec = MakeCompressionStrategy(backend, p_bsc_fixed_fields);
+	// Reuse gt_codec_backend for fixed fields (same backend)
+	auto &codec = gt_codec_backend;
 	const uint32_t row_block_variants = max_block_rows ? max_block_rows : total_haplotypes;
 	const uint32_t block_size = useLegacyPath ? (n_samples * static_cast<uint32_t>(ploidy)) : row_block_variants;
 	uint32_t global_block_start = 0;
@@ -1256,32 +1262,16 @@ bool DecompressionReader::DecoderByRange(vector<block_t> &v_blocks, vector<vecto
 		if (!vcount)
 			continue;
 
-		// Decompress fixed fields for this row_block
-		std::vector<uint8_t> comp, out_chrom, out_id, out_alt, out_qual, out_pos, out_ref;
+		// Decompress fixed fields for this row_block (directly from pointer, no memcpy)
+		std::vector<uint8_t> out_chrom, out_id, out_alt, out_qual, out_pos, out_ref;
+		const uint8_t *base_ptr = buf + fixed_fields_chunk_start;
 
-		comp.resize(dir.chrom_size);
-		memcpy(comp.data(), buf + fixed_fields_chunk_start + dir.chrom_off, dir.chrom_size);
-		codec->Decompress(comp, out_chrom);
-
-		comp.resize(dir.id_size);
-		memcpy(comp.data(), buf + fixed_fields_chunk_start + dir.id_off, dir.id_size);
-		codec->Decompress(comp, out_id);
-
-		comp.resize(dir.alt_size);
-		memcpy(comp.data(), buf + fixed_fields_chunk_start + dir.alt_off, dir.alt_size);
-		codec->Decompress(comp, out_alt);
-
-		comp.resize(dir.qual_size);
-		memcpy(comp.data(), buf + fixed_fields_chunk_start + dir.qual_off, dir.qual_size);
-		codec->Decompress(comp, out_qual);
-
-		comp.resize(dir.pos_size);
-		memcpy(comp.data(), buf + fixed_fields_chunk_start + dir.pos_off, dir.pos_size);
-		codec->Decompress(comp, out_pos);
-
-		comp.resize(dir.ref_size);
-		memcpy(comp.data(), buf + fixed_fields_chunk_start + dir.ref_off, dir.ref_size);
-		codec->Decompress(comp, out_ref);
+		codec->DecompressFromPtr(base_ptr + dir.chrom_off, dir.chrom_size, out_chrom);
+		codec->DecompressFromPtr(base_ptr + dir.id_off, dir.id_size, out_id);
+		codec->DecompressFromPtr(base_ptr + dir.alt_off, dir.alt_size, out_alt);
+		codec->DecompressFromPtr(base_ptr + dir.qual_off, dir.qual_size, out_qual);
+		codec->DecompressFromPtr(base_ptr + dir.pos_off, dir.pos_size, out_pos);
+		codec->DecompressFromPtr(base_ptr + dir.ref_off, dir.ref_size, out_ref);
 
 		std::vector<variant_desc_t> fixed_desc;
 		std::vector<variant_desc_t> sort_desc;

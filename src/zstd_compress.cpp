@@ -19,10 +19,14 @@ namespace zstd {
   }
 
   bool zstd_decompress(const std::vector<uint8_t>& cBuff, std::vector<uint8_t>& dBuff) {
-    const size_t hinted_size = ZSTD_getFrameContentSize(cBuff.data(), cBuff.size());
+    return zstd_decompress_ptr(cBuff.data(), cBuff.size(), dBuff);
+  }
+
+  bool zstd_decompress_ptr(const uint8_t* src, size_t src_size, std::vector<uint8_t>& dBuff) {
+    const size_t hinted_size = ZSTD_getFrameContentSize(src, src_size);
     if (hinted_size != ZSTD_CONTENTSIZE_ERROR && hinted_size != ZSTD_CONTENTSIZE_UNKNOWN) {
       dBuff.resize(hinted_size);
-      const size_t actual = ZSTD_decompress(dBuff.data(), hinted_size, cBuff.data(), cBuff.size());
+      const size_t actual = ZSTD_decompress(dBuff.data(), hinted_size, src, src_size);
       if (ZSTD_isError(actual)) {
         return false;
       }
@@ -36,7 +40,7 @@ namespace zstd {
     const size_t chunk = 1 << 16;
     dBuff.clear();
     dBuff.resize(chunk);
-    ZSTD_inBuffer input = {cBuff.data(), cBuff.size(), 0};
+    ZSTD_inBuffer input = {src, src_size, 0};
     bool ok = true;
     while (input.pos < input.size) {
       ZSTD_outBuffer output = {dBuff.data() + offset, dBuff.size() - offset, 0};

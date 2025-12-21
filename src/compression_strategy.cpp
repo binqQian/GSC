@@ -37,6 +37,10 @@ public:
     bool Decompress(const std::vector<uint8_t>& input, std::vector<uint8_t>& output) override {
         return zstd::zstd_decompress(input, output);
     }
+
+    bool DecompressFromPtr(const uint8_t* src, size_t src_size, std::vector<uint8_t>& output) override {
+        return zstd::zstd_decompress_ptr(src, src_size, output);
+    }
 };
 
 class BrotliCompressionStrategy : public CompressionStrategy {

@@ -12,4 +12,6 @@ namespace zstd {
     bool zstd_compress(vector<uint32_t>& v_text, std::vector<uint8_t>& cBuff, size_t& cSizeActual);
     bool zstd_decompress(const std::vector<uint8_t>& cBuff, std::vector<uint8_t>& dBuff);
     bool zstd_decompress(const std::vector<uint8_t>& cBuff, std::vector<uint32_t>& v_text, size_t& dSizeActual);
+    // Decompress directly from pointer, avoiding intermediate copy
+    bool zstd_decompress_ptr(const uint8_t* src, size_t src_size, std::vector<uint8_t>& dBuff);
 }
