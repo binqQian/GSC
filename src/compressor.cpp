@@ -229,7 +229,7 @@ bool Compressor::writeCompressFlie()
     fwrite(&mode_type, sizeof(mode_type), 1, comp);
     fwrite(&other_fields_offset, sizeof(other_fields_offset), 1, comp);
     fwrite(&sdsl_offset, sizeof(sdsl_offset), 1, comp);
-    logger->info("mode_type: {} other_fields_offset: {} sdsl_offset: {}", static_cast<int>(mode_type), other_fields_offset, sdsl_offset);
+    logger->debug("mode_type: {} other_fields_offset: {} sdsl_offset: {}", static_cast<int>(mode_type), other_fields_offset, sdsl_offset);
     fseek(comp, 21, SEEK_SET);
     for (auto cur_chunk : chunks_streams)
     {
@@ -290,7 +290,7 @@ bool Compressor::writeCompressFlie()
 
     if (sdsl::util::verbose)
     {
-        logger->info("store_to_file: `{}`", fname);
+        logger->debug("store_to_file: `{}`", fname);
     }
     // sdsl::osfstream out(fname, std::ios::binary | std::ios::app);
     // if (!out)
@@ -585,7 +585,7 @@ bool Compressor::CompressProcess()
                                                                 continue;
                                                             }
 
-                                                            logger->info("Processing GT block: block_id={}, col_block_id={}, num_rows={}, col_block_size={}, col_vec_len={}",
+                                                            logger->debug("Processing GT block: block_id={}, col_block_id={}, num_rows={}, col_block_size={}, col_vec_len={}",
                                                                          block_id, col_block_id, num_rows, col_block_size, col_vec_len);
 
                                                             // Prepare permutation buffer for this column block
@@ -601,7 +601,7 @@ bool Compressor::CompressProcess()
                                                             if (use_legacy_perm && num_rows == block_size)
                                                                 block_process.ProcessVariant(perm, v_vcf_data_io);
 
-                                                             logger->info("Finished GT block: block_id={}, col_block_id={}, perm_size={}", block_id, col_block_id, perm.size());
+                                                             logger->debug("Finished GT block: block_id={}, col_block_id={}, perm_size={}", block_id, col_block_id, perm.size());
                                                          }
 
                                                          if (data != nullptr)

@@ -167,14 +167,14 @@ bool Decompressor::analyzeInputRange(uint32_t & start_chunk_id,uint32_t & end_ch
 }
 bool Decompressor::initDecompression(DecompressionReader &decompression_reader){
     auto logger = LogManager::Instance().Logger();
-    logger->info("initDecompression: entering");
+    logger->debug("initDecompression: entering");
 
     haplotype_count = decompression_reader.n_samples * (uint32_t)decompression_reader.ploidy;
     row_block_size = decompression_reader.max_block_rows ? decompression_reader.max_block_rows : haplotype_count;
     standard_block_size = row_block_size;
     max_stored_unique = standard_block_size * 2;
 
-    logger->info("initDecompression: haplotype_count={}, row_block_size={}, useLegacyPath={}, vec_len={}",
+    logger->debug("initDecompression: haplotype_count={}, row_block_size={}, useLegacyPath={}, vec_len={}",
                  haplotype_count, row_block_size, decompression_reader.useLegacyPath, decompression_reader.vec_len);
 
     if(row_block_size < 1024)
@@ -201,13 +201,13 @@ bool Decompressor::initDecompression(DecompressionReader &decompression_reader){
 
     // Allocate full GT buffers only when decoding all samples.
     bool needs_full_decomp = (params.samples == "");
-    logger->info("initDecompression: needs_full_decomp={}, params.samples empty={}", needs_full_decomp, params.samples.empty());
+    logger->debug("initDecompression: needs_full_decomp={}, params.samples empty={}", needs_full_decomp, params.samples.empty());
     if (needs_full_decomp){
-        logger->info("initDecompression: allocating decomp_data with size={}", decompression_reader.vec_len * 2);
+        logger->debug("initDecompression: allocating decomp_data with size={}", decompression_reader.vec_len * 2);
         decomp_data = new uint8_t[decompression_reader.vec_len * 2];
         decomp_data_perm = new uint8_t[decompression_reader.vec_len * 2];
         zeros_only_vector = new uint8_t[decompression_reader.vec_len]();
-        logger->info("initDecompression: decomp_data allocated successfully");
+        logger->debug("initDecompression: decomp_data allocated successfully");
     }
     int no_haplotypes = haplotype_count;
     if (params.samples != ""){
@@ -253,15 +253,15 @@ bool Decompressor::initDecompression(DecompressionReader &decompression_reader){
 
     // Allocate tmp_arr for full decompression (both full decomp and tiled sample subset)
     if (needs_full_decomp) {
-        logger->info("initDecompression: allocating tmp_arr with size={}", full_byte_count);
+        logger->debug("initDecompression: allocating tmp_arr with size={}", full_byte_count);
         tmp_arr = new long long[full_byte_count];
-        logger->info("initDecompression: tmp_arr allocated successfully");
+        logger->debug("initDecompression: tmp_arr allocated successfully");
     }
-    logger->info("initDecompression: calling initialXORLut");
+    logger->debug("initDecompression: calling initialXORLut");
     initialXORLut();
-    logger->info("initDecompression: calling initialLut");
+    logger->debug("initDecompression: calling initialLut");
     initialLut();
-    logger->info("initDecompression: lut initialization done");
+    logger->debug("initDecompression: lut initialization done");
     if(out_type != file_type::BED_File){
         int fmt_id = bcf_hdr_id2int(out_hdr,BCF_DT_ID,"GT");
         bcf_enc_int1(&str, fmt_id);
@@ -279,7 +279,7 @@ bool Decompressor::initDecompression(DecompressionReader &decompression_reader){
         str.l = 3;
     }
 
-    logger->info("initDecompression: completed successfully");
+    logger->debug("initDecompression: completed successfully");
     return true;
 }
 //*************************************************************************************************************************************
@@ -1334,7 +1334,7 @@ void Decompressor::insert_block_bits(uint8_t *dest, const uint8_t *src, uint32_t
 int Decompressor::decompressAllTiled()
 {
     auto logger = LogManager::Instance().Logger();
-    logger->info("decompressAllTiled: entering");
+    logger->debug("decompressAllTiled: entering");
     done_unique.clear();
     stored_unique.clear();
     fields_pos = 0;
@@ -1343,7 +1343,7 @@ int Decompressor::decompressAllTiled()
     const uint32_t full_vec_len = decompression_reader.vec_len;
     const uint32_t row_block_variants = row_block_size ? row_block_size : haplotype_count;
 
-    logger->info("decompressAllTiled: n_col_blocks={}, full_vec_len={}, row_block_variants={}, haplotype_count={}",
+    logger->debug("decompressAllTiled: n_col_blocks={}, full_vec_len={}, row_block_variants={}, haplotype_count={}",
                  n_col_blocks, full_vec_len, row_block_variants, haplotype_count);
 
     if (!n_col_blocks || !row_block_variants)
@@ -1352,7 +1352,7 @@ int Decompressor::decompressAllTiled()
         return 1;
     }
 
-    logger->info("decompressAllTiled: col_block_ranges.size()={}, col_block_vec_lens.size()={}",
+    logger->debug("decompressAllTiled: col_block_ranges.size()={}, col_block_vec_lens.size()={}",
                  decompression_reader.col_block_ranges.size(), decompression_reader.col_block_vec_lens.size());
 
     if (decompression_reader.col_block_ranges.size() != n_col_blocks ||
@@ -1363,7 +1363,7 @@ int Decompressor::decompressAllTiled()
     }
 
     vector<uint8_t> my_str(haplotype_count);
-    logger->info("decompressAllTiled: my_str allocated, size={}", my_str.size());
+    logger->debug("decompressAllTiled: my_str allocated, size={}", my_str.size());
 
     uint64_t start_pair_id = static_cast<uint64_t>(start_chunk_actual_pos) * n_col_blocks;
     uint64_t gt_index_base_pair_id = start_pair_id;
@@ -1377,14 +1377,14 @@ int Decompressor::decompressAllTiled()
                                            rrr_rank_zeros_bit_vector[1](gt_index_base_pair_id) - rrr_rank_copy_bit_vector[0](gt_index_base_pair_id) -
                                            rrr_rank_copy_bit_vector[1](gt_index_base_pair_id);
 
-    logger->info("decompressAllTiled: start_pair_id={}, curr_non_copy_vec_id_offset={}", start_pair_id, curr_non_copy_vec_id_offset);
+    logger->debug("decompressAllTiled: start_pair_id={}, curr_non_copy_vec_id_offset={}", start_pair_id, curr_non_copy_vec_id_offset);
 
     uint64_t max_col_vec_len = 0;
     for (auto len : decompression_reader.col_block_vec_lens)
         if (len > max_col_vec_len)
             max_col_vec_len = len;
 
-    logger->info("decompressAllTiled: max_col_vec_len={}", max_col_vec_len);
+    logger->debug("decompressAllTiled: max_col_vec_len={}", max_col_vec_len);
     if (max_col_vec_len == 0)
     {
         logger->error("max_col_vec_len is 0!");
@@ -1407,7 +1407,7 @@ int Decompressor::decompressAllTiled()
         return 1;
     }
 
-    logger->info("decompressAllTiled: fixed_variants_chunk_io.size()={}, sort_perm_io.size()={}, total_variants={}, actual_variants={}",
+    logger->debug("decompressAllTiled: fixed_variants_chunk_io.size()={}, sort_perm_io.size()={}, total_variants={}, actual_variants={}",
                  fixed_variants_chunk_io.size(), sort_perm_io.size(), total_variants, actual_variants);
 
     // Calculate range filtering boundaries if range is specified
@@ -1430,7 +1430,7 @@ int Decompressor::decompressAllTiled()
             calculate_end_position(end_block, end_position);
             no_var = chunk_variant_offset_io + uint32_t(end_block * row_block_variants + end_position);
         }
-        logger->info("decompressAllTiled: range filtering - start_var={}, no_var={}", start_var, no_var);
+        logger->debug("decompressAllTiled: range filtering - start_var={}, no_var={}", start_var, no_var);
     }
 
     // Check if sample subset is specified
@@ -1444,7 +1444,7 @@ int Decompressor::decompressAllTiled()
         output_samples = smpl.no_samples;
         output_haplotypes = output_samples * decompression_reader.ploidy;
         subset_str.resize(output_haplotypes);
-        logger->info("decompressAllTiled: sample subset - output_samples={}, output_haplotypes={}", output_samples, output_haplotypes);
+        logger->debug("decompressAllTiled: sample subset - output_samples={}, output_haplotypes={}", output_samples, output_haplotypes);
 
         selected_haps_by_cb.resize(n_col_blocks);
         uint32_t assigned = 0;
@@ -1561,7 +1561,7 @@ int Decompressor::decompressAllTiled()
             }
         }
 
-        logger->info("decompressAllTiled: processing block_id={}, block_variants={}, processed_variants={} (subset_ctxs={})",
+        logger->debug("decompressAllTiled: processing block_id={}, block_variants={}, processed_variants={} (subset_ctxs={})",
                      block_id, block_variants, processed_variants, subset_ctxs.size());
 
         for (uint32_t var_in_block = 0; var_in_block < block_variants; ++var_in_block, ++processed_variants, ++global_var_idx)
@@ -1655,21 +1655,21 @@ int Decompressor::decompressAllTiled()
 
     if (cur_chunk_id == end_chunk_id && count)
     {
-        logger->info("decompressAllTiled: appending final multi-allelic record, count={}, has_sample_subset={}", count, has_sample_subset);
+        logger->debug("decompressAllTiled: appending final multi-allelic record, count={}, has_sample_subset={}", count, has_sample_subset);
         if (has_sample_subset)
             appendVCFToRec(temp_desc, genotype, output_haplotypes, temp_fields, decompression_reader.keys);
         else
             appendVCFToRec(temp_desc, genotype, static_cast<uint32_t>(haplotype_count), temp_fields, decompression_reader.keys);
-        logger->info("decompressAllTiled: final multi-allelic record appended");
+        logger->debug("decompressAllTiled: final multi-allelic record appended");
     }
 
     logger->info("Processed chunk {}", cur_chunk_id);
 
-    logger->info("decompressAllTiled: cleaning done_unique, size={}", done_unique.size());
+    logger->debug("decompressAllTiled: cleaning done_unique, size={}", done_unique.size());
     for (auto &it : done_unique)
         delete[] it.second;
     done_unique.clear();
-    logger->info("decompressAllTiled: done_unique cleared, returning");
+    logger->debug("decompressAllTiled: done_unique cleared, returning");
 
     return 0;
 }

@@ -63,10 +63,10 @@ bool ParallelVCFWriter::Initialize(const char* filename, bcf_hdr_t* hdr,
     // Launch writer thread if parallel writing is enabled
     if (use_parallel_writing_) {
         writer_thread_ = std::thread(&ParallelVCFWriter::WriterThread, this);
-        LogManager::Instance().Logger()->info("Parallel VCF writer initialized");
+        LogManager::Instance().Logger()->debug("Parallel VCF writer initialized");
     }
     else {
-        LogManager::Instance().Logger()->info("Serial VCF writer initialized");
+        LogManager::Instance().Logger()->debug("Serial VCF writer initialized");
     }
 
     initialized_ = true;
@@ -106,10 +106,10 @@ bool ParallelVCFWriter::InitializeWithHandle(htsFile* fp, bcf_hdr_t* hdr, bool u
     // Launch writer thread if parallel writing is enabled
     if (use_parallel_writing_) {
         writer_thread_ = std::thread(&ParallelVCFWriter::WriterThread, this);
-        LogManager::Instance().Logger()->info("Parallel VCF writer initialized with existing handle");
+        LogManager::Instance().Logger()->debug("Parallel VCF writer initialized with existing handle");
     }
     else {
-        LogManager::Instance().Logger()->info("Serial VCF writer initialized with existing handle");
+        LogManager::Instance().Logger()->debug("Serial VCF writer initialized with existing handle");
     }
 
     initialized_ = true;

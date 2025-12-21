@@ -29,7 +29,7 @@ bool CompressionReader::OpenForReading(string &file_name)
                 merge_file_names.emplace_back(item);
                 size++;
             }
-            logger->info("Merge file list size: {}", size);
+            logger->debug("Merge file list size: {}", size);
             directory_file_name.clear();
         }
         else
@@ -203,7 +203,7 @@ void CompressionReader::initializeColumnBlocks()
         n_col_blocks = 1;
         col_block_sizes.push_back(total_haplotypes);
         col_block_vec_lens.push_back(vec_len);
-        logger->info("Column tiling: LEGACY mode (n_col_blocks=1, total_haplotypes={})", total_haplotypes);
+        logger->debug("Column tiling: LEGACY mode (n_col_blocks=1, total_haplotypes={})", total_haplotypes);
         return;
     }
 
@@ -214,7 +214,7 @@ void CompressionReader::initializeColumnBlocks()
     col_bv_buffers.resize(n_col_blocks);
     col_vec_read_in_block.resize(n_col_blocks, 0);
 
-    logger->info("Column tiling: TILED mode (n_col_blocks={}, total_haplotypes={}, max_block_cols={}, no_vec_in_block={})",
+    logger->debug("Column tiling: TILED mode (n_col_blocks={}, total_haplotypes={}, max_block_cols={}, no_vec_in_block={})",
                  n_col_blocks, total_haplotypes, max_block_cols, no_vec_in_block);
 
     for (uint32_t cb = 0; cb < n_col_blocks; ++cb)
@@ -230,7 +230,7 @@ void CompressionReader::initializeColumnBlocks()
 
         // Initialize buffer for this column block
         uint64_t col_block_max_size = block_vec_len * no_vec_in_block + 1;
-        logger->info("  Column block {}: haplotypes={}, vec_len={}, buffer_size={}",
+        logger->debug("  Column block {}: haplotypes={}, vec_len={}, buffer_size={}",
                      cb, block_size, block_vec_len, col_block_max_size);
         col_bv_buffers[cb].Create(col_block_max_size);
     }
@@ -1134,7 +1134,7 @@ void CompressionReader::addVariant(int *gt_data, int ngt_data, variant_desc_t &d
             if (col_vec_read_in_block[0] == no_vec_in_block)
             {
                 auto logger = LogManager::Instance().Logger();
-                logger->info("Pushing row block {}: {} variants across {} column blocks",
+                logger->debug("Pushing row block {}: {} variants across {} column blocks",
                              block_id, v_vcf_data_compress.size(), n_col_blocks);
 
                 for (uint32_t col_block_id = 0; col_block_id < n_col_blocks; ++col_block_id)
@@ -1142,7 +1142,7 @@ void CompressionReader::addVariant(int *gt_data, int ngt_data, variant_desc_t &d
                     CBitMemory &col_bv = col_bv_buffers[col_block_id];
                     col_bv.TakeOwnership();
 
-                    logger->info("  Pushing col_block {}: block_id={}, num_rows={}, buffer_size={}",
+                    logger->debug("  Pushing col_block {}: block_id={}, num_rows={}, buffer_size={}",
                                  col_block_id, block_id, no_vec_in_block, col_bv.mem_buffer_pos);
 
                     // Only the last column block carries the variant descriptors

@@ -49,7 +49,7 @@ bool ParallelVCFReader::Initialize(const char* filename)
     if (fp_hts_->format.format == htsExactFormat::bcf) {
         // BCF files: use single-threaded bcf_read() (binary parsing is fast)
         use_parallel_parsing_ = false;
-        LogManager::Instance().Logger()->info("BCF format detected, using single-threaded parsing");
+        LogManager::Instance().Logger()->debug("BCF format detected, using single-threaded parsing");
     }
     else if (fp_hts_->format.format == htsExactFormat::vcf) {
         // VCF files: enable parallel text parsing
@@ -62,12 +62,12 @@ bool ParallelVCFReader::Initialize(const char* filename)
                 Cleanup();
                 return false;
             }
-            LogManager::Instance().Logger()->info(
+            LogManager::Instance().Logger()->debug(
                 "VCF.gz format detected, using {} threads for BGZF decompression + parallel parsing",
                 num_threads_);
         }
         else {
-            LogManager::Instance().Logger()->info(
+            LogManager::Instance().Logger()->debug(
                 "Uncompressed VCF detected, using {} threads for parallel parsing",
                 num_threads_);
         }

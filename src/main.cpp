@@ -214,11 +214,8 @@ int main(int argc, const char *argv[])
     
     LogManager::Instance().Initialize();
     auto logger = LogManager::Instance().Logger();
-    // Default to debug output unless overridden via GSC_LOG_LEVEL
-    const char* env_log = std::getenv("GSC_LOG_LEVEL");
-    if (!env_log) {
-        LogManager::Instance().SetLevel(spdlog::level::debug);
-    }
+    // Default to info level; use GSC_LOG_LEVEL=debug to enable debug logs
+    // No need to set level here - logger.cpp already handles GSC_LOG_LEVEL with info as default
     high_resolution_clock::time_point start = high_resolution_clock::now();
 
     int result = 0;
