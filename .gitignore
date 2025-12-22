@@ -2,6 +2,7 @@
 *.d
 gsc
 *.md
+!README.md
 /toy/
 /logs/
 /.vscode/
@@ -10,4 +11,6 @@ gsc
 
 /build/
 /tmp/
+
+/ref_code/fmt_comp/
 
