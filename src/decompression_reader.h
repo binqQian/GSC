@@ -130,6 +130,11 @@ class DecompressionReader {
     vector<std::unique_ptr<CompressionStrategy>> field_data_codecs;
     compression_backend_t backend = compression_backend_t::bsc;
 
+    // Adaptive FORMAT decompression support
+    bool has_adaptive_format_ = false;  // True if adaptive_format_data stream exists
+    int adaptive_format_stream_id_ = -1;
+    std::vector<uint8_t> adaptive_format_buffer_;
+
 	int64_t prev_pos;
 	// int id_block = 0;
 

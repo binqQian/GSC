@@ -16,7 +16,10 @@
 #include <unordered_set>
 #include <unordered_map>
 #include <stack>
+#include <memory>
 #include "parallel_vcf_reader.h"
+#include "format_field_detector.h"
+
 class CompressionReader {
 
     
@@ -92,6 +95,21 @@ class CompressionReader {
 	vector<int> v_buf_ids_data;
     File_Handle_2 * file_handle2 = nullptr;
     PartQueue<SPackage> * part_queue = nullptr;
+
+    // Adaptive FORMAT field compression
+    std::unique_ptr<gsc::FormatFieldManager> format_field_manager_;
+    bool use_adaptive_format_ = true;  // Enable adaptive FORMAT compression
+    std::vector<std::string> current_format_keys_;  // FORMAT keys for current row
+    uint32_t current_allele_count_ = 2;  // Allele count for current row
+
+    // Stream IDs for adaptive FORMAT compression
+    int adaptive_format_stream_id_ = -1;
+    std::vector<uint8_t> adaptive_format_buffer_;  // Buffer for adaptive FORMAT data
+
+    // FORMAT field indices in keys array (non-GT FORMAT fields)
+    std::vector<uint32_t> format_field_indices_;
+    std::unordered_map<uint32_t, std::string> key_id_to_name_;  // key_id -> field name
+
     unordered_map<int, unordered_set<int>> field_order_graph;
     bool field_order_flag;
     // unordered_map<int, unordered_set<int>> graph;
@@ -163,6 +181,9 @@ public:
         parallel_reader_ = nullptr;
         num_parse_threads_ = params.no_threads;
         use_parallel_reading_ = (num_parse_threads_ > 1);
+
+        // Initialize adaptive FORMAT compression
+        format_field_manager_ = std::make_unique<gsc::FormatFieldManager>();
     }
     
   

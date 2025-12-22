@@ -35,6 +35,8 @@
 #include "vint_code.h"
 #include <unordered_map>
 #include <array>
+#include <memory>
+#include "format_field_detector.h"
 #define MMAP
 
 #ifdef MMAP
@@ -110,6 +112,9 @@ class Decompressor {
     gsc::ParallelVCFWriter* parallel_writer_;
     bool use_parallel_writing_;
 
+    // Adaptive FORMAT field decompression
+    std::unique_ptr<gsc::FormatFieldManager> format_field_manager_;
+    bool use_adaptive_format_ = false;  // Set to true when adaptive compression was used
 
     uint32_t records_to_process;
 

@@ -464,6 +464,14 @@ bool DecompressionReader::OpenReadingPart2(const string &in_file_name)
 	}
 
 	InitDecompressParams();
+
+	// Check if adaptive FORMAT compression data exists
+	adaptive_format_stream_id_ = file_handle2->GetStreamId("adaptive_format_data");
+	has_adaptive_format_ = (adaptive_format_stream_id_ >= 0);
+	if (has_adaptive_format_) {
+		logger->info("Detected adaptive FORMAT compression data");
+	}
+
 	for (uint32_t i = 0; i < no_keys; ++i)
 	{
 		decomp_part_queue->PushQueue(i);
