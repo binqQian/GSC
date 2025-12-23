@@ -4,6 +4,7 @@
 #include <fstream>
 #include <sstream>
 #include <limits>
+#include <htslib/vcf.h>
 
 // Helper function to convert binary FORMAT field data to string
 // Returns the string representation of the field value for a specific sample
@@ -24,10 +25,14 @@ static std::string formatFieldToString(const char* data, uint32_t data_size,
             uint32_t end = std::min(start + values_per_sample, total_values);
 
             for (uint32_t i = start; i < end; ++i) {
-                if (i > start) result += ',';
                 int32_t val = int_data[i];
-                // Check for missing value (BCF uses INT32_MIN as missing)
-                if (val == std::numeric_limits<int32_t>::min() || val == -2147483647) {
+                // Stop at vector_end (this preserves "." vs ".,." semantics for fixed-length tags).
+                if (val == bcf_int32_vector_end) {
+                    break;
+                }
+                if (!result.empty()) result += ',';
+                // Missing value
+                if (val == bcf_int32_missing) {
                     result += '.';
                 } else {
                     result += std::to_string(val);
@@ -42,10 +47,12 @@ static std::string formatFieldToString(const char* data, uint32_t data_size,
             uint32_t end = std::min(start + values_per_sample, total_values);
 
             for (uint32_t i = start; i < end; ++i) {
-                if (i > start) result += ',';
                 float val = float_data[i];
-                // Check for NaN (BCF uses NaN for missing)
-                if (std::isnan(val)) {
+                if (bcf_float_is_vector_end(val)) {
+                    break;
+                }
+                if (!result.empty()) result += ',';
+                if (bcf_float_is_missing(val)) {
                     result += '.';
                 } else {
                     // Use fixed precision for real numbers
@@ -381,6 +388,8 @@ void CompressionReader::InitVarinats(File_Handle_2 *_file_handle2)
     format_field_indices_.clear();
     key_id_to_name_.clear();
     current_format_keys_.clear();
+    adaptive_format_stream_id_ = -1;
+    adaptive_format_buffer_.clear();
 
     for (uint32_t i = 0; i < no_keys; i++)
     {
@@ -791,15 +800,45 @@ bool CompressionReader::SetVariantOtherFields(vector<field_desc> &fields)
                        format_field_manager_ != nullptr;
 
     if (do_adaptive) {
+        std::vector<uint32_t> row_format_indices;
+        std::vector<std::string> row_format_keys;
+        row_format_indices.reserve(format_field_indices_.size());
+        row_format_keys.reserve(format_field_indices_.size());
+
+        // Preserve per-record FORMAT tag set and order (excluding GT).
+        if (vcf_record != nullptr && vcf_record->n_fmt && vcf_record->d.fmt != nullptr) {
+            bcf_fmt_t* fmt = vcf_record->d.fmt;
+            for (int fi = 0; fi < (int)vcf_record->n_fmt; ++fi) {
+                int tag_id = fmt[fi].id;
+                if (tag_id < 0 || tag_id >= (int)FormatIdToFieldId.size()) continue;
+
+                uint32_t field_idx = static_cast<uint32_t>(FormatIdToFieldId[tag_id]);
+                if (static_cast<int>(field_idx) == key_gt_id) continue;
+                if (field_idx >= fields.size() || field_idx >= keys.size()) continue;
+                if (!fields[field_idx].present) continue;
+
+                row_format_indices.push_back(field_idx);
+                row_format_keys.push_back(key_id_to_name_[keys[field_idx].key_id]);
+            }
+        } else {
+            // Fallback: use header-collected indices, filtered by presence.
+            for (uint32_t field_idx : format_field_indices_) {
+                if (field_idx >= fields.size() || field_idx >= keys.size()) continue;
+                if (!fields[field_idx].present) continue;
+                row_format_indices.push_back(field_idx);
+                row_format_keys.push_back(key_id_to_name_[keys[field_idx].key_id]);
+            }
+        }
+
         // Initialize FormatFieldManager for this row
         uint32_t allele_count = (vcf_record != nullptr) ? vcf_record->n_allele : 2;
-        format_field_manager_->initRow(current_format_keys_, allele_count);
+        format_field_manager_->initRow(row_format_keys, allele_count);
 
         // Process each sample
         for (uint32_t sample_idx = 0; sample_idx < no_samples; ++sample_idx) {
             // Build FORMAT string for this sample
             std::string sample_format = buildSampleFormatString(
-                format_field_indices_, fields, keys,
+                row_format_indices, fields, keys,
                 sample_idx, no_samples, allele_count);
 
             // Feed to FormatFieldManager
@@ -831,11 +870,18 @@ bool CompressionReader::SetVariantOtherFields(vector<field_desc> &fields)
     // Process all fields (including FORMAT for backwards compatibility)
     for (uint32_t i = 0; i < no_keys; i++)
     {
+        // In primary adaptive mode, omit legacy non-GT FORMAT fields. They will be reconstructed from
+        // adaptive_format_data on decompression when enabled.
+        bool suppress_legacy_fmt = adaptive_format_primary_ &&
+                                   keys[i].keys_type == key_type_t::fmt &&
+                                   static_cast<int>(i) != key_gt_id;
+
         switch (keys[i].type)
         {
         case BCF_HT_INT:
 
-            v_o_buf[i].WriteInt(fields[i].data, fields[i].present ? fields[i].data_size : 0);
+            v_o_buf[i].WriteInt(fields[i].data,
+                                (!suppress_legacy_fmt && fields[i].present) ? fields[i].data_size : 0);
 
 #ifdef LOG_INFO
             {
@@ -847,7 +893,8 @@ bool CompressionReader::SetVariantOtherFields(vector<field_desc> &fields)
 
             break;
         case BCF_HT_REAL:
-            v_o_buf[i].WriteReal(fields[i].data, fields[i].present ? fields[i].data_size : 0);
+            v_o_buf[i].WriteReal(fields[i].data,
+                                 (!suppress_legacy_fmt && fields[i].present) ? fields[i].data_size : 0);
 
 #ifdef LOG_INFO
             {
@@ -860,11 +907,12 @@ bool CompressionReader::SetVariantOtherFields(vector<field_desc> &fields)
 
             break;
         case BCF_HT_STR:
-            v_o_buf[i].WriteText(fields[i].data, fields[i].present ? fields[i].data_size : 0);
+            v_o_buf[i].WriteText(fields[i].data,
+                                 (!suppress_legacy_fmt && fields[i].present) ? fields[i].data_size : 0);
             break;
         case BCF_HT_FLAG:
 
-            v_o_buf[i].WriteFlag(fields[i].present);
+            v_o_buf[i].WriteFlag(!suppress_legacy_fmt && fields[i].present);
             break;
         }
 

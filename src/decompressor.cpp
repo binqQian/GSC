@@ -2,6 +2,7 @@
 #include "logger.h"
 #include <bitset>
 #include <chrono>
+#include <cstdlib>
 #include <limits>
 
 using namespace std::chrono;
@@ -307,6 +308,13 @@ bool Decompressor::decompressProcess()
     if(analyzeInputSamples(v_samples)) // Retrieving sample name.
         return false;
 
+    // Adaptive FORMAT decoding is opt-in on decompression.
+    // Recommended with VCF output; for BCF output, legacy typed FORMAT is preferred.
+    use_adaptive_format_ = params.use_adaptive_format && decompression_reader.HasAdaptiveFormat();
+    if (use_adaptive_format_) {
+        format_field_manager_ = std::make_unique<gsc::FormatFieldManager>();
+    }
+
 
     if(params.split_flag){
 
@@ -364,6 +372,7 @@ bool Decompressor::decompressProcess()
 
                         }
                     all_fields_io.clear();
+                    all_adaptive_format_rows_io.clear();
 
                 }
                 else{
@@ -396,6 +405,12 @@ bool Decompressor::decompressProcess()
                 {
                     all_fields.emplace_back(vector<field_desc>(decompression_reader.keys.size()));
                     decompression_reader.GetVariants(all_fields.back());
+                    if (use_adaptive_format_) {
+                        all_adaptive_format_rows.emplace_back();
+                        if (!decompression_reader.GetNextAdaptiveFormatRow(all_adaptive_format_rows.back())) {
+                            all_adaptive_format_rows.back().clear();
+                        }
+                    }
 
                 }
             }
@@ -425,6 +440,9 @@ bool Decompressor::decompressProcess()
         swap(chunk_variant_offset, chunk_variant_offset_io);
         if(params.compress_mode == compress_mode_t::lossless_mode){
             swap(all_fields, all_fields_io);
+            if (use_adaptive_format_) {
+                swap(all_adaptive_format_rows, all_adaptive_format_rows_io);
+            }
         }
         start_chunk_actual_pos = decompression_reader.getActualPos(cur_chunk_id);
         end_chunk_actual_pos = decompression_reader.getActualPos(cur_chunk_id+1);
@@ -749,9 +767,10 @@ void Decompressor::appendVCF(variant_desc_t &_desc, vector<uint8_t> &_my_str, si
 
             }
             bcf_update_genotypes(out_hdr, rec, gt_arr.data(), _no_haplotypes);
-        }
-    }
-    if(params.split_flag){
+	        }
+	    }
+
+	    if(params.split_flag){
 
         if(_desc.chrom != cur_chrom){
             if(cur_file != -1 ){
@@ -781,6 +800,143 @@ void Decompressor::appendVCF(variant_desc_t &_desc, vector<uint8_t> &_my_str, si
 
 }
 // // *****************************************************************************************************************
+
+void Decompressor::applyAdaptiveFormatRowToRec(const std::vector<uint8_t>& row,
+                                               const std::vector<std::string>& adaptive_format_keys,
+                                               const std::vector<key_desc>& all_keys,
+                                               size_t standard_block_size)
+{
+    if (!format_field_manager_ || adaptive_format_keys.empty() || row.empty()) {
+        return;
+    }
+
+    uint32_t actual_samples = static_cast<uint32_t>(standard_block_size / decompression_reader.ploidy);
+    bool is_sample_subset = (actual_samples != decompression_reader.n_samples);
+
+    std::vector<std::vector<std::string>> per_field_values(
+        adaptive_format_keys.size(), std::vector<std::string>(actual_samples));
+
+    for (uint32_t out_sample_idx = 0; out_sample_idx < actual_samples; ++out_sample_idx) {
+        uint32_t orig_sample_idx = is_sample_subset ? sampleIDs[out_sample_idx] : out_sample_idx;
+
+        std::string decoded = format_field_manager_->decodeSample(
+            row.data(), row.size(), orig_sample_idx, adaptive_format_keys);
+
+        size_t start = 0;
+        for (size_t k = 0; k < adaptive_format_keys.size(); ++k) {
+            size_t sep = decoded.find(':', start);
+            std::string v = (sep == std::string::npos)
+                                ? decoded.substr(start)
+                                : decoded.substr(start, sep - start);
+            if (v.empty()) v = ".";
+            per_field_values[k][out_sample_idx] = std::move(v);
+            if (sep == std::string::npos) {
+                start = decoded.size();
+            } else {
+                start = sep + 1;
+            }
+        }
+    }
+
+    auto findFmtKey = [&](const std::string& tag) -> const key_desc* {
+        int tag_id = bcf_hdr_id2int(out_hdr, BCF_DT_ID, tag.c_str());
+        if (tag_id < 0) return nullptr;
+        for (const auto& kd : all_keys) {
+            if (kd.keys_type == key_type_t::fmt && kd.key_id == static_cast<uint32_t>(tag_id)) {
+                return &kd;
+            }
+        }
+        return nullptr;
+    };
+
+    auto countElems = [](const std::string& v) -> uint32_t {
+        if (v.empty() || v == ".") return 1;
+        uint32_t n = 1;
+        for (char c : v) if (c == ',') ++n;
+        return n;
+    };
+
+    for (size_t k = 0; k < adaptive_format_keys.size(); ++k) {
+        const std::string& tag = adaptive_format_keys[k];
+        const key_desc* kd = findFmtKey(tag);
+        if (!kd) continue;
+
+        uint32_t max_elems = 1;
+        for (uint32_t s = 0; s < actual_samples; ++s) {
+            max_elems = std::max(max_elems, countElems(per_field_values[k][s]));
+        }
+
+        if (kd->type == BCF_HT_STR) {
+            std::vector<const char*> cvals(actual_samples);
+            for (uint32_t s = 0; s < actual_samples; ++s) cvals[s] = per_field_values[k][s].c_str();
+            bcf_update_format_string(out_hdr, rec, tag.c_str(), cvals.data(), static_cast<int>(actual_samples));
+            continue;
+        }
+
+        if (kd->type == BCF_HT_INT) {
+            std::vector<int32_t> out(static_cast<size_t>(actual_samples) * max_elems, bcf_int32_vector_end);
+            for (uint32_t s = 0; s < actual_samples; ++s) {
+                const std::string& v = per_field_values[k][s];
+                size_t off = static_cast<size_t>(s) * max_elems;
+
+                if (v.empty() || v == ".") {
+                    // Fully missing: encode as a single missing value (not empty), so VCF prints ".".
+                    out[off] = bcf_int32_missing;
+                    continue;
+                }
+
+                uint32_t e = 0;
+                size_t start = 0;
+                while (e < max_elems) {
+                    size_t sep = v.find(',', start);
+                    std::string tok = (sep == std::string::npos) ? v.substr(start) : v.substr(start, sep - start);
+                    if (tok.empty() || tok == ".") {
+                        out[off + e] = bcf_int32_missing;
+                    } else {
+                        char* endp = nullptr;
+                        long val = std::strtol(tok.c_str(), &endp, 10);
+                        out[off + e] = (endp != nullptr && *endp == '\0') ? static_cast<int32_t>(val) : bcf_int32_missing;
+                    }
+                    ++e;
+                    if (sep == std::string::npos) break;
+                    start = sep + 1;
+                }
+            }
+            bcf_update_format_int32(out_hdr, rec, tag.c_str(), out.data(), static_cast<int>(out.size()));
+        } else if (kd->type == BCF_HT_REAL) {
+            std::vector<float> out(static_cast<size_t>(actual_samples) * max_elems);
+            for (auto& x : out) bcf_float_set_vector_end(x);
+            for (uint32_t s = 0; s < actual_samples; ++s) {
+                const std::string& v = per_field_values[k][s];
+                size_t off = static_cast<size_t>(s) * max_elems;
+
+                if (v.empty() || v == ".") {
+                    bcf_float_set_missing(out[off]);
+                    continue;
+                }
+
+                uint32_t e = 0;
+                size_t start = 0;
+                while (e < max_elems) {
+                    size_t sep = v.find(',', start);
+                    std::string tok = (sep == std::string::npos) ? v.substr(start) : v.substr(start, sep - start);
+                    if (tok.empty() || tok == ".") {
+                        bcf_float_set_missing(out[off + e]);
+                    } else {
+                        char* endp = nullptr;
+                        double val = std::strtod(tok.c_str(), &endp);
+                        if (endp != nullptr && *endp == '\0') out[off + e] = static_cast<float>(val);
+                        else bcf_float_set_missing(out[off + e]);
+                    }
+                    ++e;
+                    if (sep == std::string::npos) break;
+                    start = sep + 1;
+                }
+            }
+            bcf_update_format_float(out_hdr, rec, tag.c_str(), out.data(), static_cast<int>(out.size()));
+        }
+    }
+}
 
 void Decompressor::appendVCFToRec(variant_desc_t &_desc, vector<uint8_t> &_genotype, size_t _standard_block_size, vector<field_desc> &_fields, vector<key_desc> &_keys)
 {
@@ -855,13 +1011,45 @@ void Decompressor::appendVCFToRec(variant_desc_t &_desc, vector<uint8_t> &_genot
 
                 
         }
-    }
+	    }
 
-    // // FORMAT
+	    // Adaptive FORMAT (non-GT) override: reconstruct from adaptive_format_data stream.
+	    // This path updates FORMAT tags via typed APIs (recommended for VCF output).
+	    bool can_use_adaptive_format = use_adaptive_format_ &&
+	                                  current_adaptive_format_row_ != nullptr &&
+	                                  !current_adaptive_format_row_->empty() &&
+	                                  format_field_manager_ != nullptr &&
+	                                  out_type != file_type::BCF_File;
 
-    // field_desc gt_phased;
-    for (size_t i = 0; i < _keys.size(); i++)
-    {
+	    std::vector<std::string> adaptive_format_keys;
+	    if (can_use_adaptive_format) {
+	        const auto& row = *current_adaptive_format_row_;
+	        size_t pos = 0;
+	        if (!row.empty()) {
+	            uint32_t field_count = vint_code::ReadVint(row.data(), row.size(), pos);
+	            adaptive_format_keys.reserve(field_count);
+	            for (uint32_t fi = 0; fi < field_count && pos < row.size(); ++fi) {
+	                uint32_t name_len = vint_code::ReadVint(row.data(), row.size(), pos);
+	                if (pos + name_len > row.size()) break;
+	                adaptive_format_keys.emplace_back(reinterpret_cast<const char*>(row.data() + pos), name_len);
+	                pos += name_len;
+
+	                uint32_t codec_size = vint_code::ReadVint(row.data(), row.size(), pos);
+	                if (pos + codec_size > row.size()) break;
+	                pos += codec_size;
+	            }
+	        }
+
+	        if (adaptive_format_keys.empty()) {
+	            can_use_adaptive_format = false;
+	        }
+	    }
+
+	    // // FORMAT
+
+	    // field_desc gt_phased;
+	    for (size_t i = 0; i < _keys.size(); i++)
+	    {
         int id = _keys[i].actual_field_id;
         if (id < 0 || static_cast<size_t>(id) >= _fields.size()) {
             logger->error("appendVCFToRec: FORMAT loop id={} out of bounds (fields.size()={})", id, _fields.size());
@@ -973,13 +1161,18 @@ void Decompressor::appendVCFToRec(variant_desc_t &_desc, vector<uint8_t> &_genot
             // In sample subset mode, skip non-GT FORMAT fields as they contain data for all samples
             uint32_t actual_samples = _standard_block_size / decompression_reader.ploidy;
             bool is_sample_subset = (actual_samples != decompression_reader.n_samples);
-            if (is_sample_subset)
+            if (is_sample_subset && !can_use_adaptive_format)
                 continue;
+
+            if (can_use_adaptive_format) {
+                // Already updated from adaptive_format_data stream.
+                continue;
+            }
 
             if (_fields[id].present)
             {
                 switch (_keys[id].type)
-		        {
+			        {
 		        case BCF_HT_INT:
                     curr_size = _fields[id].data_size >> 2;
                     bcf_update_format(out_hdr, rec, bcf_hdr_int2id(out_hdr, BCF_DT_ID, _keys[id].key_id), _fields[id].data, curr_size, BCF_HT_INT);
@@ -999,9 +1192,13 @@ void Decompressor::appendVCFToRec(variant_desc_t &_desc, vector<uint8_t> &_genot
 
 
             }
-        }
-    }
-    if(params.split_flag){
+	        }
+	    }
+
+	    if (can_use_adaptive_format) {
+	        applyAdaptiveFormatRowToRec(*current_adaptive_format_row_, adaptive_format_keys, _keys, _standard_block_size);
+	    }
+	    if(params.split_flag){
 
         if(_desc.chrom != cur_chrom){
             if(cur_file != -1 ){
@@ -1031,22 +1228,28 @@ void Decompressor::appendVCFToRec(variant_desc_t &_desc, vector<uint8_t> &_genot
 // 
 bool Decompressor::SetVariantToRec(variant_desc_t &desc, vector<field_desc> &fields, vector<key_desc> &keys, vector<uint8_t> &_my_str, size_t _standard_block_size)
 {
+    const std::vector<uint8_t>* row_for_this_variant = current_adaptive_format_row_;
     
     if(desc.alt.find("<M>") == string::npos){
 
         if(desc.alt.find("<N>") == string::npos){
             if(count){
-                
+                // Flush buffered record using its own adaptive FORMAT row.
+                current_adaptive_format_row_ = use_adaptive_format_ ? &temp_adaptive_format_row_ : nullptr;
                 appendVCFToRec(temp_desc, genotype, _standard_block_size, temp_fields, keys);  
+                current_adaptive_format_row_ = row_for_this_variant;
             }
             
+            current_adaptive_format_row_ = row_for_this_variant;
             appendVCFToRec(desc, _my_str, _standard_block_size, fields, keys);
             count = 0;
         
         }
         else{
             if(count){
+                current_adaptive_format_row_ = use_adaptive_format_ ? &temp_adaptive_format_row_ : nullptr;
                 appendVCFToRec(temp_desc, genotype, _standard_block_size, temp_fields, keys);  
+                current_adaptive_format_row_ = row_for_this_variant;
             }
             
             genotype = _my_str;
@@ -1060,12 +1263,18 @@ bool Decompressor::SetVariantToRec(variant_desc_t &desc, vector<field_desc> &fie
             temp_desc = desc;
             temp_desc.alt = desc.alt.substr(0, desc.alt.find_first_of(','));
             count = 1;
+            if (use_adaptive_format_ && row_for_this_variant) {
+                temp_adaptive_format_row_ = *row_for_this_variant;
+            } else {
+                temp_adaptive_format_row_.clear();
+            }
 
         }
         fields_pos++;
     }
     else{
         if(count == 0){
+            current_adaptive_format_row_ = row_for_this_variant;
             appendVCFToRec(desc, _my_str, _standard_block_size, fields, keys);
             count = 0;
             fields_pos++;
@@ -1612,6 +1821,12 @@ int Decompressor::decompressAllTiled()
                         subset_str[ctx.out_hap[i]] = gt_lookup_table[b0][b1][ctx.perm_bit[i]];
                     }
                 }
+                if (use_adaptive_format_ && field_index >= 0 &&
+                    static_cast<size_t>(field_index) < all_adaptive_format_rows_io.size()) {
+                    current_adaptive_format_row_ = &all_adaptive_format_rows_io[field_index];
+                } else {
+                    current_adaptive_format_row_ = nullptr;
+                }
                 SetVariantToRec(desc, all_fields_io[field_index], decompression_reader.keys, subset_str, output_haplotypes);
             }
             else
@@ -1647,6 +1862,12 @@ int Decompressor::decompressAllTiled()
                 if (trailing_bits)
                     memcpy(my_str.data() + (full_byte_count << 3), gt_lookup_table[decomp_data[vec1_start]][decomp_data[vec2_start]], trailing_bits);
 
+                if (use_adaptive_format_ && field_index >= 0 &&
+                    static_cast<size_t>(field_index) < all_adaptive_format_rows_io.size()) {
+                    current_adaptive_format_row_ = &all_adaptive_format_rows_io[field_index];
+                } else {
+                    current_adaptive_format_row_ = nullptr;
+                }
                 SetVariantToRec(desc, all_fields_io[field_index], decompression_reader.keys, my_str, haplotype_count);
             }
         }
@@ -2123,6 +2344,12 @@ int Decompressor::decompressAll(){
             }   
             variant_desc_t desc = fixed_variants_chunk_io[cur_block_id].data_compress[i];
 
+            if (use_adaptive_format_ && fields_pos >= 0 &&
+                static_cast<size_t>(fields_pos) < all_adaptive_format_rows_io.size()) {
+                current_adaptive_format_row_ = &all_adaptive_format_rows_io[fields_pos];
+            } else {
+                current_adaptive_format_row_ = nullptr;
+            }
             SetVariantToRec(desc, all_fields_io[fields_pos], decompression_reader.keys, my_str,standard_block_size);
             
         
@@ -2163,6 +2390,12 @@ int Decompressor::decompressAll(){
 
             variant_desc_t desc = fixed_variants_chunk_io[cur_block_id].data_compress[c_out_line];
             
+            if (use_adaptive_format_ && fields_pos >= 0 &&
+                static_cast<size_t>(fields_pos) < all_adaptive_format_rows_io.size()) {
+                current_adaptive_format_row_ = &all_adaptive_format_rows_io[fields_pos];
+            } else {
+                current_adaptive_format_row_ = nullptr;
+            }
             SetVariantToRec(desc, all_fields_io[fields_pos], decompression_reader.keys, my_str, standard_block_size);
         }
     }

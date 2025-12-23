@@ -134,6 +134,7 @@ class DecompressionReader {
     bool has_adaptive_format_ = false;  // True if adaptive_format_data stream exists
     int adaptive_format_stream_id_ = -1;
     std::vector<uint8_t> adaptive_format_buffer_;
+    bool adaptive_format_eof_ = false;
 
 	int64_t prev_pos;
 	// int id_block = 0;
@@ -145,6 +146,9 @@ class DecompressionReader {
 	void initDecoderParams();
 	bool decompress_other_fileds(SPackage* pck);
 	void Decoder(vector<uint8_t>& v_tmp, vector<uint8_t>& v_data);
+
+    // Adaptive FORMAT stream reader (lossless mode only)
+    bool refillAdaptiveFormatBuffer(size_t min_bytes);
 
 public:
 
@@ -195,6 +199,9 @@ public:
 	uint32_t getActualPos(uint32_t chunk_id);
 
 	void GetVariants(vector<field_desc> &fields);
+
+    bool HasAdaptiveFormat() const { return has_adaptive_format_; }
+    bool GetNextAdaptiveFormatRow(std::vector<uint8_t>& row_data);
 
 	// bool writeOtherFields(FILE* f,CompOtherFields<int,uint8_t,uint8_t> * fields_queue);
 	// bool readOtherFields(FILE* f,BlockingQueue<int,uint8_t,uint8_t> *fields_queue);

@@ -2,6 +2,7 @@
 #include "logger.h"
 #include <algorithm>
 #include <chrono>
+#include <cstring>
 #include <limits>
 
 using namespace std::chrono;
@@ -470,6 +471,9 @@ bool DecompressionReader::OpenReadingPart2(const string &in_file_name)
 	has_adaptive_format_ = (adaptive_format_stream_id_ >= 0);
 	if (has_adaptive_format_) {
 		logger->info("Detected adaptive FORMAT compression data");
+        file_handle2->ResetStreamPartIterator(adaptive_format_stream_id_);
+        adaptive_format_buffer_.clear();
+        adaptive_format_eof_ = false;
 	}
 
 	for (uint32_t i = 0; i < no_keys; ++i)
@@ -517,6 +521,52 @@ bool DecompressionReader::OpenReadingPart2(const string &in_file_name)
 	}
 
 	return true;
+}
+
+bool DecompressionReader::refillAdaptiveFormatBuffer(size_t min_bytes)
+{
+    if (!has_adaptive_format_ || adaptive_format_eof_) {
+        return adaptive_format_buffer_.size() >= min_bytes;
+    }
+
+    while (adaptive_format_buffer_.size() < min_bytes) {
+        std::vector<uint8_t> part;
+        if (!file_handle2->GetPart(adaptive_format_stream_id_, part)) {
+            adaptive_format_eof_ = true;
+            break;
+        }
+        adaptive_format_buffer_.insert(adaptive_format_buffer_.end(), part.begin(), part.end());
+    }
+
+    return adaptive_format_buffer_.size() >= min_bytes;
+}
+
+bool DecompressionReader::GetNextAdaptiveFormatRow(std::vector<uint8_t>& row_data)
+{
+    row_data.clear();
+    if (!has_adaptive_format_) {
+        return false;
+    }
+
+    // Row format: [row_size:4 bytes LE][row_payload:row_size]
+    if (!refillAdaptiveFormatBuffer(sizeof(uint32_t))) {
+        return false;
+    }
+
+    uint32_t row_size = 0;
+    std::memcpy(&row_size, adaptive_format_buffer_.data(), sizeof(uint32_t));
+
+    if (!refillAdaptiveFormatBuffer(sizeof(uint32_t) + row_size)) {
+        return false;
+    }
+
+    row_data.assign(adaptive_format_buffer_.begin() + sizeof(uint32_t),
+                    adaptive_format_buffer_.begin() + sizeof(uint32_t) + row_size);
+
+    adaptive_format_buffer_.erase(adaptive_format_buffer_.begin(),
+                                  adaptive_format_buffer_.begin() + sizeof(uint32_t) + row_size);
+
+    return true;
 }
 //**********************************************************************************************************************
 void DecompressionReader::close()

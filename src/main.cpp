@@ -105,9 +105,10 @@ Options:
     -p,  --ploidy [X]      Set ploidy of samples in input VCF to [X] (default: 2).
         --max-block-rows [X]  Max variants per GT block (default: 10000).
         --max-block-cols [X]  Max haplotypes (samples * ploidy) per GT column block (default: 10000).
-    -t,  --threads [X]     Set number of threads to [X] (default: 1).
-    -d,  --depth [X]       Set maximum replication depth to [X] (default: 100, 0 means no matches).
-    -m,  --merge [X]       Specify files to merge, separated by commas (e.g., -m chr1.vcf,chr2.vcf), or '@' followed by a file containing a list of VCF files (e.g., -m @file_with_IDs.txt). By default, all VCF files are compressed.
+	    -t,  --threads [X]     Set number of threads to [X] (default: 1).
+	    -d,  --depth [X]       Set maximum replication depth to [X] (default: 100, 0 means no matches).
+	    -m,  --merge [X]       Specify files to merge, separated by commas (e.g., -m chr1.vcf,chr2.vcf), or '@' followed by a file containing a list of VCF files (e.g., -m @file_with_IDs.txt). By default, all VCF files are compressed.
+	        --adaptive-format [off|shadow|primary]  FORMAT adaptive mode: off disables; shadow writes extra stream; primary omits legacy non-GT FORMAT.
 )");
 
     exit(0);
@@ -133,12 +134,13 @@ Options:
         -M,  --mode_lossly    Choose lossy compression mode (default: lossless).
         -b,  --bcf            Output a BCF file (default: VCF).
 
-    Filter options (applicable in lossy compression mode only):
-        -r,  --range [X]      Specify range in format [start],[end] (e.g., -r 4999756,4999852).
-        -s,  --samples [X]    Samples separated by comms (e.g., -s HG03861,NA18639) OR '@' sign followed by the name of a file with sample name(s) separated by whitespaces (for exaple: -s @file_with_IDs.txt). By default all samples/individuals are decompressed.
-        --header-only         Output only the header of the VCF/BCF.
-        --no-header           Output without the VCF/BCF header (only genotypes).
-        -G,  --no-genotype    Don't output sample genotypes (only #CHROM, POS, ID, REF, ALT, QUAL, FILTER, and INFO columns).
+	    Filter options (applicable in lossy compression mode only):
+	        -r,  --range [X]      Specify range in format [start],[end] (e.g., -r 4999756,4999852).
+	        -s,  --samples [X]    Samples separated by comms (e.g., -s HG03861,NA18639) OR '@' sign followed by the name of a file with sample name(s) separated by whitespaces (for exaple: -s @file_with_IDs.txt). By default all samples/individuals are decompressed.
+	        --use-adaptive-format Prefer adaptive_format_data for non-GT FORMAT reconstruction (recommended with VCF output).
+	        --header-only         Output only the header of the VCF/BCF.
+	        --no-header           Output without the VCF/BCF header (only genotypes).
+	        -G,  --no-genotype    Don't output sample genotypes (only #CHROM, POS, ID, REF, ALT, QUAL, FILTER, and INFO columns).
         -C,  --out-ac-an      Write AC/AN to the INFO field.
         -S,  --split          Split output into multiple files (one per chromosome).
         -I, [ID=^]            Include only sites with specified ID (e.g., -I "ID=rs6040355").
@@ -336,6 +338,22 @@ int params_options(int argc, const char *argv[]){
                 }
                 params.backend = parse_backend(backend_name);
             }
+            else if (strcmp(argv[i], "--adaptive-format") == 0) {
+                i++;
+                if (i >= argc)
+                    return usage_compress();
+                std::string mode = argv[i];
+                if (mode == "off") {
+                    params.adaptive_format_mode = adaptive_format_mode_t::off;
+                } else if (mode == "shadow") {
+                    params.adaptive_format_mode = adaptive_format_mode_t::shadow;
+                } else if (mode == "primary") {
+                    params.adaptive_format_mode = adaptive_format_mode_t::primary;
+                } else {
+                    logger->error("Unsupported --adaptive-format mode: {}", mode);
+                    return usage_compress();
+                }
+            }
             else if (strcmp(argv[i], "--ploidy") == 0 || strcmp(argv[i], "-p") == 0){
 
                 i++;
@@ -531,6 +549,9 @@ int params_options(int argc, const char *argv[]){
                     return usage_decompress();
                 }
                 params.backend = parse_backend(backend_name);
+            }
+            else if (strcmp(argv[i], "--use-adaptive-format") == 0) {
+                params.use_adaptive_format = true;
             }
 
             else if (strcmp(argv[i], "-n") == 0){

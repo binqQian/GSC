@@ -311,6 +311,49 @@ size_t BitTipArrayCodec::deserialize(const uint8_t* data, size_t len) {
         missing_set_.insert(cur);
     }
 
+    // Rebuild sum cache for cross-field predictors (e.g., DP <- sum(AD)).
+    // This must be available after deserialize() to enable correct decoding of PredictedScalarCodec.
+    sum_cache_.clear();
+    sum_cache_.resize(sample_count_, INT64_MIN);
+
+    uint32_t special1_idx = 0, special2_idx = 0, dict_idx = 0;
+    std::vector<int64_t> arr;
+    arr.reserve(expected_len_ > 0 ? expected_len_ : 8);
+
+    for (uint32_t i = 0; i < sample_count_; ++i) {
+        if (missing_set_.count(i)) {
+            sum_cache_[i] = INT64_MIN;
+            ++dict_idx;  // missing samples occupy a dict_ids_ slot
+            continue;
+        }
+
+        TipType tip = getTip(i);
+        reconstructArray(i, tip, special1_idx, special2_idx, dict_idx, arr);
+
+        int64_t sum = 0;
+        for (int64_t v : arr) {
+            if (v != INT64_MIN) sum += v;
+        }
+        sum_cache_[i] = sum;
+
+        switch (tip) {
+            case TIP_SPECIAL_1:
+                if (field_type_ == FieldType::PL_LIKE) {
+                    ++special1_idx;
+                    ++special2_idx;
+                }
+                break;
+            case TIP_SPECIAL_2:
+                ++special1_idx;
+                break;
+            case TIP_GENERAL:
+                ++dict_idx;
+                break;
+            default:
+                break;
+        }
+    }
+
     frozen_ = true;
     return pos;
 }
@@ -498,10 +541,12 @@ bool BitTipArrayCodec::checkAbPattern(const std::vector<int64_t>& arr,
     // - arr[2] = b
     // - Remaining elements follow specific formula
 
-    if (arr.size() < 3) return false;
+    // For correctness, only treat as special PL pattern when biallelic (len==3).
+    if (expected_len_ != 3) return false;
+    if (arr.size() != 3) return false;
     if (arr[0] != 0) return false;
-    if (arr[1] <= 0 || arr[1] == INT64_MIN) return false;
-    if (arr[2] <= 0 || arr[2] == INT64_MIN) return false;
+    if (arr[1] == INT64_MIN || arr[2] == INT64_MIN) return false;
+    if (arr[1] < 0 || arr[2] < 0) return false;
 
     a = arr[1];
     b = arr[2];

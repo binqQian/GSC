@@ -98,7 +98,8 @@ class CompressionReader {
 
     // Adaptive FORMAT field compression
     std::unique_ptr<gsc::FormatFieldManager> format_field_manager_;
-    bool use_adaptive_format_ = true;  // Enable adaptive FORMAT compression
+    bool use_adaptive_format_ = false;  // Enable adaptive FORMAT compression
+    bool adaptive_format_primary_ = false;  // Omit legacy non-GT FORMAT fields when true
     std::vector<std::string> current_format_keys_;  // FORMAT keys for current row
     uint32_t current_allele_count_ = 2;  // Allele count for current row
 
@@ -184,6 +185,9 @@ public:
 
         // Initialize adaptive FORMAT compression
         format_field_manager_ = std::make_unique<gsc::FormatFieldManager>();
+        use_adaptive_format_ = (params.compress_mode == compress_mode_t::lossless_mode) &&
+                              (params.adaptive_format_mode != adaptive_format_mode_t::off);
+        adaptive_format_primary_ = (params.adaptive_format_mode == adaptive_format_mode_t::primary);
     }
     
   

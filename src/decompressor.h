@@ -115,6 +115,9 @@ class Decompressor {
     // Adaptive FORMAT field decompression
     std::unique_ptr<gsc::FormatFieldManager> format_field_manager_;
     bool use_adaptive_format_ = false;  // Set to true when adaptive compression was used
+    const std::vector<uint8_t>* current_adaptive_format_row_ = nullptr;
+    std::vector<std::vector<uint8_t>> all_adaptive_format_rows;
+    std::vector<std::vector<uint8_t>> all_adaptive_format_rows_io;
 
     uint32_t records_to_process;
 
@@ -177,6 +180,7 @@ class Decompressor {
     string record;
     variant_desc_t temp_desc;
     vector<field_desc> temp_fields;
+    std::vector<uint8_t> temp_adaptive_format_row_;
     int count = 0;
     vector<vector<field_desc>> all_fields;
     vector<vector<field_desc>> all_fields_io;
@@ -280,11 +284,15 @@ class Decompressor {
 
     sdsl::bit_vector copy_bit_vector[2];
 
-
-
-    bool SetVariantToRec(variant_desc_t& desc, vector<field_desc>& fields, vector<key_desc> &keys, vector<uint8_t> &_my_str, size_t _standard_block_size);
-    void appendVCFToRec(variant_desc_t &_desc, vector<uint8_t> &_genotype, size_t _standard_block_size, vector<field_desc> &_fields, vector<key_desc> &_keys);
-    void appendVCF(variant_desc_t &_desc,vector<uint8_t> &_my_str,size_t _no_haplotypes);
+	
+	
+	    bool SetVariantToRec(variant_desc_t& desc, vector<field_desc>& fields, vector<key_desc> &keys, vector<uint8_t> &_my_str, size_t _standard_block_size);
+	    void appendVCFToRec(variant_desc_t &_desc, vector<uint8_t> &_genotype, size_t _standard_block_size, vector<field_desc> &_fields, vector<key_desc> &_keys);
+	    void applyAdaptiveFormatRowToRec(const std::vector<uint8_t>& row,
+	                                     const std::vector<std::string>& adaptive_format_keys,
+	                                     const std::vector<key_desc>& all_keys,
+	                                     size_t standard_block_size);
+	    void appendVCF(variant_desc_t &_desc,vector<uint8_t> &_my_str,size_t _no_haplotypes);
     // void appendVCFToRec(variant_desc_t &_desc, string_view _genotype, size_t _no_haplotypes,vector<field_desc>& _fields, vector<key_desc> &_keys);
     // bool SetVariantToRec(variant_desc_t& desc, vector<field_desc>& fields, vector<key_desc> &keys, string_view _my_str, size_t _standard_block_size);
     bool SetVariant(variant_desc_t &desc, vector<uint8_t> &_my_str, size_t _standard_block_size);

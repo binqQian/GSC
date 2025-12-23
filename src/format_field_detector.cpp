@@ -126,7 +126,7 @@ std::unique_ptr<FormatFieldCodec> FormatFieldDetector::createCodec() {
     }
 
     CodecType type = recommendedCodecType();
-    auto codec = gsc::createCodec(type);
+    auto codec = gsc::createCodec(type, field_name_, features_.array_len);
 
     // Set predictor if applicable
     if (predictor_ && type == CodecType::PredictedScalar) {
@@ -287,11 +287,14 @@ void FormatFieldDetector::parseScalarValue(const char* value, size_t len) {
 bool FormatFieldDetector::checkAbPattern(const std::vector<int64_t>& arr) {
     // PL pattern check from ref_code/fmt_comp
     // Pattern: [0, a, b, ...] where subsequent elements follow a formula
-    // Simplified check: arr[0] == 0 and arr[1] > 0 and arr[2] > 0
+    // NOTE: For correctness, we only treat this as a "special pattern" when PL is biallelic diploid,
+    // i.e. expected length == 3. Multiallelic PL needs additional reconstruction logic.
 
-    if (arr.size() < 3) return false;
+    if (config_.expected_array_len != 3) return false;
+    if (arr.size() != 3) return false;
     if (arr[0] != 0) return false;
-    if (arr[1] <= 0 || arr[2] <= 0) return false;
+    if (arr[1] == INT64_MIN || arr[2] == INT64_MIN) return false;
+    if (arr[1] < 0 || arr[2] < 0) return false;
 
     // Check if b == 15 * a (stronger pattern)
     int64_t a = arr[1];
@@ -299,7 +302,7 @@ bool FormatFieldDetector::checkAbPattern(const std::vector<int64_t>& arr) {
     if (b == 15 * a) return true;
 
     // General AB pattern: check if remaining elements follow expected formula
-    // For now, accept if first 3 elements match basic pattern
+    // For biallelic PL, having [0,a,b] is the whole vector.
     return true;
 }
 
@@ -360,24 +363,26 @@ void FormatFieldManager::initRow(const std::vector<std::string>& format_keys,
 
 void FormatFieldManager::processSample(const char* sample_str, size_t len,
                                         uint32_t sample_pos) {
-    (void)sample_pos;
-
-    // Parse sample fields
-    std::unordered_map<std::string, std::string> fields;
-    parseSampleFields(sample_str, len, fields);
+    // Parse sample fields into ordered vector aligned with current_format_keys_
+    std::vector<std::string> values;
+    parseSampleFields(sample_str, len, values);
 
     if (!frozen_) {
         // Observation phase: feed to detectors
-        for (auto& kv : fields) {
-            auto it = detectors_.find(kv.first);
+        for (size_t i = 0; i < current_format_keys_.size() && i < values.size(); ++i) {
+            const std::string& key = current_format_keys_[i];
+            if (skip_gt_ && key == "GT") continue;
+
+            auto it = detectors_.find(key);
             if (it != detectors_.end()) {
-                it->second->feed(kv.second.c_str(), kv.second.size());
+                const std::string& v = values[i];
+                it->second->feed(v.c_str(), v.size());
             }
         }
 
         // Buffer for later encoding
         BufferedSample bs;
-        bs.fields = std::move(fields);
+        bs.values = std::move(values);
         sample_buffer_.push_back(std::move(bs));
 
         ++samples_processed_;
@@ -395,13 +400,8 @@ void FormatFieldManager::processSample(const char* sample_str, size_t len,
             freezeAndFlush();
         }
     } else {
-        // Encoding phase: directly encode
-        for (auto& kv : fields) {
-            auto it = codecs_.find(kv.first);
-            if (it != codecs_.end()) {
-                it->second->encode(kv.second.c_str(), kv.second.size(), samples_processed_);
-            }
-        }
+        // Encoding phase: directly encode using stable key order and true sample_pos
+        encodeSampleValues(values, sample_pos);
         ++samples_processed_;
     }
 }
@@ -441,7 +441,9 @@ std::string FormatFieldManager::decodeSample(const uint8_t* data, size_t len,
     size_t pos = 0;
     uint32_t field_count = vint_code::ReadVint(data, len, pos);
 
-    std::unordered_map<std::string, std::string> decoded_fields;
+    // First pass: deserialize codecs
+    std::unordered_map<std::string, std::unique_ptr<FormatFieldCodec>> decoded_codecs;
+    decoded_codecs.reserve(field_count);
 
     for (uint32_t i = 0; i < field_count && pos < len; ++i) {
         // Field name
@@ -454,16 +456,36 @@ std::string FormatFieldManager::decodeSample(const uint8_t* data, size_t len,
 
         // Parse codec params to determine type
         CodecParams params;
-        size_t params_size = params.deserialize(data + pos, codec_size);
-        (void)params_size;
+        size_t header_size = params.deserialize(data + pos, codec_size);
+        if (header_size == 0 || header_size > codec_size) {
+            // Corrupted codec data; skip
+            pos += codec_size;
+            continue;
+        }
 
-        // Create codec and deserialize
-        auto codec = gsc::createCodec(params.type);
-        codec->deserialize(data + pos, codec_size);
+        // Create codec and deserialize payload (skip header bytes)
+        auto codec = gsc::createCodec(params.type, field_name, params.array_len);
+        codec->deserialize(data + pos + header_size, codec_size - header_size);
         pos += codec_size;
 
-        // Decode value
-        decoded_fields[field_name] = codec->decode(sample_pos);
+        decoded_codecs.emplace(std::move(field_name), std::move(codec));
+    }
+
+    // Cross-field predictors for decoding (DP <- AD, optional GQ <- PL)
+    auto ad_it = decoded_codecs.find("AD");
+    auto dp_it = decoded_codecs.find("DP");
+    if (ad_it != decoded_codecs.end() && dp_it != decoded_codecs.end()) {
+        FormatFieldCodec* ad_codec = ad_it->second.get();
+        dp_it->second->setPredictor([ad_codec](uint32_t pos) -> int64_t {
+            return ad_codec->getComputedValue(pos);
+        });
+    }
+
+    // Second pass: decode values
+    std::unordered_map<std::string, std::string> decoded_fields;
+    decoded_fields.reserve(decoded_codecs.size());
+    for (const auto& kv : decoded_codecs) {
+        decoded_fields[kv.first] = kv.second->decode(sample_pos);
     }
 
     // Build output string in format key order
@@ -484,8 +506,11 @@ std::string FormatFieldManager::decodeSample(const uint8_t* data, size_t len,
 }
 
 void FormatFieldManager::parseSampleFields(const char* sample_str, size_t len,
-                                            std::unordered_map<std::string, std::string>& fields) {
-    // Parse "val1:val2:val3:..." into {key1: val1, key2: val2, ...}
+                                            std::vector<std::string>& values) {
+    // Parse "val1:val2:val3:..." into values aligned with current_format_keys_
+    values.clear();
+    values.resize(current_format_keys_.size());
+
     size_t key_idx = 0;
     const char* start = sample_str;
     const char* end = sample_str + len;
@@ -493,14 +518,55 @@ void FormatFieldManager::parseSampleFields(const char* sample_str, size_t len,
 
     while (p <= end && key_idx < current_format_keys_.size()) {
         if (p == end || *p == ':') {
-            const std::string& key = current_format_keys_[key_idx];
-            fields[key] = std::string(start, p - start);
+            values[key_idx] = std::string(start, p - start);
 
             ++key_idx;
             start = p + 1;
         }
         ++p;
     }
+}
+
+void FormatFieldManager::encodeSampleValues(const std::vector<std::string>& values, uint32_t sample_pos) {
+    // Enforce dependency order for predictor-based codecs:
+    // - AD before DP
+    // - PL before GQ (if ever enabled)
+
+    auto encodeOne = [&](const std::string& key) {
+        if (skip_gt_ && key == "GT") return;
+        auto it = codecs_.find(key);
+        if (it == codecs_.end()) return;
+
+        size_t idx = std::find(current_format_keys_.begin(), current_format_keys_.end(), key) - current_format_keys_.begin();
+        if (idx >= values.size()) {
+            it->second->encode("", 0, sample_pos);
+            return;
+        }
+
+        const std::string& v = values[idx];
+        it->second->encode(v.c_str(), v.size(), sample_pos);
+    };
+
+    if (codecs_.count("AD")) encodeOne("AD");
+    if (codecs_.count("PL")) encodeOne("PL");
+
+    for (size_t i = 0; i < current_format_keys_.size(); ++i) {
+        const std::string& key = current_format_keys_[i];
+        if (skip_gt_ && key == "GT") continue;
+        if (key == "AD" || key == "PL" || key == "DP" || key == "GQ") continue;
+
+        auto it = codecs_.find(key);
+        if (it == codecs_.end()) continue;
+        if (i >= values.size()) {
+            it->second->encode("", 0, sample_pos);
+        } else {
+            const std::string& v = values[i];
+            it->second->encode(v.c_str(), v.size(), sample_pos);
+        }
+    }
+
+    if (codecs_.count("DP")) encodeOne("DP");
+    if (codecs_.count("GQ")) encodeOne("GQ");
 }
 
 void FormatFieldManager::freezeAndFlush() {
@@ -515,16 +581,13 @@ void FormatFieldManager::freezeAndFlush() {
         codecs_[kv.first]->freeze();
     }
 
+    // Cross-field predictors for encoding must reference codecs (not detectors),
+    // otherwise prediction stops after the observe limit.
+    setupCrossFieldCodecPredictors();
+
     // Flush buffered samples
-    uint32_t pos = 0;
-    for (const auto& bs : sample_buffer_) {
-        for (const auto& field : bs.fields) {
-            auto it = codecs_.find(field.first);
-            if (it != codecs_.end()) {
-                it->second->encode(field.second.c_str(), field.second.size(), pos);
-            }
-        }
-        ++pos;
+    for (uint32_t sample_pos = 0; sample_pos < sample_buffer_.size(); ++sample_pos) {
+        encodeSampleValues(sample_buffer_[sample_pos].values, sample_pos);
     }
 
     sample_buffer_.clear();
@@ -544,6 +607,19 @@ void FormatFieldManager::setupCrossFieldPredictors() {
 
     // Setup GQ <- f(PL) predictor could be added here
     // For simplicity, we'll implement this in Phase 2
+}
+
+void FormatFieldManager::setupCrossFieldCodecPredictors() {
+    auto ad_it = codecs_.find("AD");
+    auto dp_it = codecs_.find("DP");
+    if (ad_it != codecs_.end() && dp_it != codecs_.end()) {
+        FormatFieldCodec* ad_codec = ad_it->second.get();
+        dp_it->second->setPredictor([ad_codec](uint32_t pos) -> int64_t {
+            return ad_codec->getComputedValue(pos);
+        });
+    }
+
+    // GQ <- PL predictor can be added when f(PL) is finalized.
 }
 
 uint32_t FormatFieldManager::getExpectedArrayLen(const std::string& field_name) const {

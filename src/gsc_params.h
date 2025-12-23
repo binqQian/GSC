@@ -22,6 +22,13 @@ enum class compression_backend_t
     zstd,
     brotli
 };
+
+enum class adaptive_format_mode_t
+{
+    off,     // Disable adaptive FORMAT stream
+    shadow,  // Write adaptive stream in addition to legacy FORMAT fields
+    primary  // Write adaptive stream and omit legacy non-GT FORMAT fields
+};
 enum class file_type
 {
     VCF_File,
@@ -85,6 +92,10 @@ struct GSC_Params
     float min_qual, max_qual; 
     std::string out_id;
 
+    // Adaptive FORMAT compression / decompression
+    adaptive_format_mode_t adaptive_format_mode;
+    bool use_adaptive_format;  // Prefer adaptive FORMAT stream on decompression (VCF output recommended)
+
     GSC_Params()
     {
         task_mode = task_mode_t::none;
@@ -127,5 +138,8 @@ struct GSC_Params
         maxAC = INT32_MAX;
         minAF = 0;
         maxAF = 1;
+
+        adaptive_format_mode = adaptive_format_mode_t::shadow;
+        use_adaptive_format = false;
     }
 };

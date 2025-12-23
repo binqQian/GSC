@@ -187,17 +187,19 @@ private:
     // Per-field codecs (created after freeze)
     std::unordered_map<std::string, std::unique_ptr<FormatFieldCodec>> codecs_;
 
-    // Buffered samples before freeze
+    // Buffered samples before freeze (kept in FORMAT key order)
     struct BufferedSample {
-        std::unordered_map<std::string, std::string> fields;
+        std::vector<std::string> values;  // Same size/order as current_format_keys_
     };
     std::vector<BufferedSample> sample_buffer_;
 
     // Helper functions
     void parseSampleFields(const char* sample_str, size_t len,
-                           std::unordered_map<std::string, std::string>& fields);
+                           std::vector<std::string>& values);
+    void encodeSampleValues(const std::vector<std::string>& values, uint32_t sample_pos);
     void freezeAndFlush();
     void setupCrossFieldPredictors();
+    void setupCrossFieldCodecPredictors();
 
     // Expected array lengths based on allele count
     uint32_t getExpectedArrayLen(const std::string& field_name) const;
