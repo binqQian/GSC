@@ -73,7 +73,6 @@ void BitTipArrayCodec::freeze() {
     tips_.resize(tips_bytes, 0);
 
     // Classify each sample and encode
-    uint32_t special1_idx = 0, special2_idx = 0;
     for (uint32_t i = 0; i < sample_count_; ++i) {
         if (missing_set_.count(i)) {
             // Missing: use TIP_GENERAL with special marker
@@ -602,9 +601,13 @@ uint32_t BitTipArrayCodec::getOrCreateDictId(const std::vector<int64_t>& arr) {
         }
     }
 
-    if (max_val < 0xFF) {
+    // Dictionary values are ZigZag-encoded on serialize, so the encoded magnitude is ~2*abs(v).
+    // Choose element_bytes based on the ZigZag range to avoid truncation (e.g. 135 -> zz=270 needs 2 bytes).
+    uint64_t max_abs = static_cast<uint64_t>(max_val);
+    uint64_t max_zz = (max_abs << 1) + 1; // worst-case ZigZag value
+    if (max_zz <= 0xFFu) {
         entry.element_bytes = 1;
-    } else if (max_val < 0xFFFF) {
+    } else if (max_zz <= 0xFFFFu) {
         entry.element_bytes = 2;
     } else {
         entry.element_bytes = 4;

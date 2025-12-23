@@ -1,5 +1,6 @@
 #include "decompression_reader.h"
 #include "logger.h"
+#include "zstd_compress.h"
 #include <algorithm>
 #include <chrono>
 #include <cstring>
@@ -535,7 +536,32 @@ bool DecompressionReader::refillAdaptiveFormatBuffer(size_t min_bytes)
             adaptive_format_eof_ = true;
             break;
         }
-        adaptive_format_buffer_.insert(adaptive_format_buffer_.end(), part.begin(), part.end());
+
+        // Decode adaptive FORMAT part framing:
+        // - Legacy: raw bytes (row stream)
+        // - New: "AFD1" + method + raw_size + payload (possibly zstd-compressed)
+        std::vector<uint8_t> decoded;
+        if (part.size() >= 12 &&
+            part[0] == 'A' && part[1] == 'F' && part[2] == 'D' && part[3] == '1')
+        {
+            const uint8_t method = part[4];
+            const uint8_t* payload = part.data() + 12;
+            const size_t payload_size = part.size() - 12;
+            if (method == 0) {
+                decoded.assign(payload, payload + payload_size);
+            } else if (method == 1) {
+                if (!zstd::zstd_decompress_ptr(payload, payload_size, decoded)) {
+                    // Fallback: treat as raw if decompression fails.
+                    decoded = part;
+                }
+            } else {
+                decoded = part;
+            }
+        } else {
+            decoded = std::move(part);
+        }
+
+        adaptive_format_buffer_.insert(adaptive_format_buffer_.end(), decoded.begin(), decoded.end());
     }
 
     return adaptive_format_buffer_.size() >= min_bytes;

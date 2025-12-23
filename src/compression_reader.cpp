@@ -1,10 +1,77 @@
 #include "compression_reader.h"
 #include "logger.h"
+#include "vint_code.h"
+#include "zstd_compress.h"
 #include <iostream>
 #include <fstream>
 #include <sstream>
 #include <limits>
 #include <htslib/vcf.h>
+
+namespace {
+constexpr uint8_t kAdaptiveMagic[4] = {'A', 'F', 'D', '1'}; // Adaptive Format Data v1
+constexpr uint8_t kAdaptiveMethodRaw = 0;
+constexpr uint8_t kAdaptiveMethodZstd = 1;
+
+static void writeU32LE(uint32_t v, std::vector<uint8_t>& out) {
+    out.push_back(static_cast<uint8_t>(v & 0xffu));
+    out.push_back(static_cast<uint8_t>((v >> 8) & 0xffu));
+    out.push_back(static_cast<uint8_t>((v >> 16) & 0xffu));
+    out.push_back(static_cast<uint8_t>((v >> 24) & 0xffu));
+}
+
+static std::vector<uint8_t> encodeAdaptiveFormatPart(const std::vector<uint8_t>& raw) {
+    std::vector<uint8_t> compressed;
+    bool ok = zstd::zstd_compress(raw, compressed);
+
+    uint8_t method = kAdaptiveMethodRaw;
+    const std::vector<uint8_t>* payload = &raw;
+    if (ok && !compressed.empty() && compressed.size() + 12 < raw.size()) {
+        method = kAdaptiveMethodZstd;
+        payload = &compressed;
+    }
+
+    std::vector<uint8_t> framed;
+    framed.reserve(12 + payload->size());
+    framed.push_back(kAdaptiveMagic[0]);
+    framed.push_back(kAdaptiveMagic[1]);
+    framed.push_back(kAdaptiveMagic[2]);
+    framed.push_back(kAdaptiveMagic[3]);
+    framed.push_back(method);
+    framed.push_back(0);
+    framed.push_back(0);
+    framed.push_back(0);
+    writeU32LE(static_cast<uint32_t>(raw.size()), framed);
+    framed.insert(framed.end(), payload->begin(), payload->end());
+    return framed;
+}
+
+static std::unordered_set<uint32_t> parseAdaptiveRowKeyIds(const std::vector<uint8_t>& adaptive_row,
+                                                           bcf_hdr_t* hdr) {
+    std::unordered_set<uint32_t> ids;
+    if (adaptive_row.empty() || hdr == nullptr) return ids;
+
+    size_t pos = 0;
+    uint32_t field_count = vint_code::ReadVint(adaptive_row.data(), adaptive_row.size(), pos);
+    ids.reserve(field_count);
+
+    for (uint32_t fi = 0; fi < field_count && pos < adaptive_row.size(); ++fi) {
+        uint32_t name_len = vint_code::ReadVint(adaptive_row.data(), adaptive_row.size(), pos);
+        if (pos + name_len > adaptive_row.size()) break;
+        std::string name(reinterpret_cast<const char*>(adaptive_row.data() + pos), name_len);
+        pos += name_len;
+
+        int tag_id = bcf_hdr_id2int(hdr, BCF_DT_ID, name.c_str());
+        if (tag_id >= 0) ids.insert(static_cast<uint32_t>(tag_id));
+
+        uint32_t codec_size = vint_code::ReadVint(adaptive_row.data(), adaptive_row.size(), pos);
+        if (pos + codec_size > adaptive_row.size()) break;
+        pos += codec_size;
+    }
+
+    return ids;
+}
+} // namespace
 
 // Helper function to convert binary FORMAT field data to string
 // Returns the string representation of the field value for a specific sample
@@ -799,6 +866,7 @@ bool CompressionReader::SetVariantOtherFields(vector<field_desc> &fields)
                        !format_field_indices_.empty() &&
                        format_field_manager_ != nullptr;
 
+    std::unordered_set<uint32_t> adaptive_row_key_ids;
     if (do_adaptive) {
         std::vector<uint32_t> row_format_indices;
         std::vector<std::string> row_format_keys;
@@ -848,7 +916,12 @@ bool CompressionReader::SetVariantOtherFields(vector<field_desc> &fields)
 
         // Finalize row and get compressed data
         std::vector<uint8_t> adaptive_data;
-        format_field_manager_->finalizeRow(adaptive_data);
+        format_field_manager_->finalizeRow(adaptive_data, adaptive_format_primary_);
+
+        // In primary mode, suppress legacy only for tags actually emitted to adaptive stream.
+        if (adaptive_format_primary_) {
+            adaptive_row_key_ids = parseAdaptiveRowKeyIds(adaptive_data, vcf_hdr);
+        }
 
         // Append to adaptive format buffer
         // Format: [row_size:4bytes][row_data]
@@ -861,8 +934,9 @@ bool CompressionReader::SetVariantOtherFields(vector<field_desc> &fields)
 
         // Check if buffer is full, flush to stream
         if (adaptive_format_buffer_.size() >= max_buffer_size) {
+            std::vector<uint8_t> framed = encodeAdaptiveFormatPart(adaptive_format_buffer_);
             int part_id = file_handle2->AddPartPrepare(adaptive_format_stream_id_);
-            file_handle2->AddPartComplete(adaptive_format_stream_id_, part_id, adaptive_format_buffer_);
+            file_handle2->AddPartComplete(adaptive_format_stream_id_, part_id, framed);
             adaptive_format_buffer_.clear();
         }
     }
@@ -874,7 +948,8 @@ bool CompressionReader::SetVariantOtherFields(vector<field_desc> &fields)
         // adaptive_format_data on decompression when enabled.
         bool suppress_legacy_fmt = adaptive_format_primary_ &&
                                    keys[i].keys_type == key_type_t::fmt &&
-                                   static_cast<int>(i) != key_gt_id;
+                                   static_cast<int>(i) != key_gt_id &&
+                                   adaptive_row_key_ids.find(keys[i].key_id) != adaptive_row_key_ids.end();
 
         switch (keys[i].type)
         {
@@ -1735,8 +1810,9 @@ void CompressionReader::CloseFiles()
         // Flush remaining adaptive FORMAT data
         if (use_adaptive_format_ && adaptive_format_stream_id_ >= 0 &&
             !adaptive_format_buffer_.empty()) {
+            std::vector<uint8_t> framed = encodeAdaptiveFormatPart(adaptive_format_buffer_);
             int part_id = file_handle2->AddPartPrepare(adaptive_format_stream_id_);
-            file_handle2->AddPartComplete(adaptive_format_stream_id_, part_id, adaptive_format_buffer_);
+            file_handle2->AddPartComplete(adaptive_format_stream_id_, part_id, framed);
             adaptive_format_buffer_.clear();
         }
 

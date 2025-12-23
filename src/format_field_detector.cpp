@@ -407,20 +407,49 @@ void FormatFieldManager::processSample(const char* sample_str, size_t len,
 }
 
 void FormatFieldManager::finalizeRow(std::vector<uint8_t>& out) {
+    finalizeRow(out, false);
+}
+
+void FormatFieldManager::finalizeRow(std::vector<uint8_t>& out, bool omit_rawstring_fields) {
     // Force freeze if not already done
     if (!frozen_) {
         freezeAndFlush();
     }
 
-    // Serialize format: [field_count][field_name+codec_data]*
-    uint32_t field_count = static_cast<uint32_t>(codecs_.size());
-    vint_code::WriteVint(field_count, out);
-
+    // Decide which fields to emit for this row.
+    // In primary mode, we can omit RawString-coded fields and keep them in legacy streams,
+    // otherwise adaptive_format_data may become larger than legacy typed compression.
+    std::vector<std::string> emit_keys;
+    emit_keys.reserve(current_format_keys_.size());
     for (const auto& key : current_format_keys_) {
         if (skip_gt_ && key == "GT") continue;
-
         auto it = codecs_.find(key);
         if (it == codecs_.end()) continue;
+        if (omit_rawstring_fields && it->second->type() == CodecType::RawString) continue;
+        emit_keys.push_back(key);
+    }
+
+    // Ensure predictor dependencies are present for decoding (DP<-AD, GQ<-PL if enabled later).
+    auto ensureDep = [&](const std::string& target, CodecType target_type, const std::string& dep) {
+        auto it = codecs_.find(target);
+        if (it == codecs_.end()) return;
+        if (it->second->type() != target_type) return;
+        auto dep_it = codecs_.find(dep);
+        if (dep_it == codecs_.end()) return;
+        if (std::find(emit_keys.begin(), emit_keys.end(), dep) == emit_keys.end()) {
+            emit_keys.push_back(dep);
+        }
+    };
+    ensureDep("DP", CodecType::PredictedScalar, "AD");
+    ensureDep("GQ", CodecType::PredictedScalar, "PL");
+
+    // Serialize format: [field_count][field_name+codec_data]*
+    uint32_t field_count = static_cast<uint32_t>(emit_keys.size());
+    vint_code::WriteVint(field_count, out);
+
+    for (const auto& key : emit_keys) {
+        auto it = codecs_.find(key);
+        if (it == codecs_.end()) continue; // Should not happen.
 
         // Field name
         vint_code::WriteVint(static_cast<uint32_t>(key.size()), out);

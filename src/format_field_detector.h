@@ -152,6 +152,7 @@ public:
 
     // Finalize row: freeze detectors, encode remaining samples, serialize
     void finalizeRow(std::vector<uint8_t>& out);
+    void finalizeRow(std::vector<uint8_t>& out, bool omit_rawstring_fields);
 
     // -------------------------------------------------------------------------
     // Decoding
