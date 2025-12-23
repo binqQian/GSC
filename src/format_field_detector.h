@@ -138,6 +138,22 @@ public:
     FormatFieldManager();
 
     // -------------------------------------------------------------------------
+    // Decoded row cache (for fast decompression)
+    // -------------------------------------------------------------------------
+
+    struct RowDecoder {
+        std::vector<std::string> keys;  // Field names in row order
+        std::vector<std::unique_ptr<FormatFieldCodec>> codecs;  // Same order as keys
+        std::unordered_map<std::string, size_t> index_by_name;
+
+        void clear() {
+            keys.clear();
+            codecs.clear();
+            index_by_name.clear();
+        }
+    };
+
+    // -------------------------------------------------------------------------
     // Row-level operations
     // -------------------------------------------------------------------------
 
@@ -157,6 +173,10 @@ public:
     // -------------------------------------------------------------------------
     // Decoding
     // -------------------------------------------------------------------------
+
+    // Prepare a row decoder by deserializing all codecs exactly once.
+    // Returns false if data is corrupted.
+    bool prepareRowDecoder(const uint8_t* data, size_t len, RowDecoder& out) const;
 
     // Decode a sample's FORMAT string from serialized data
     std::string decodeSample(const uint8_t* data, size_t len,

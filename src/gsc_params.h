@@ -139,7 +139,8 @@ struct GSC_Params
         minAF = 0;
         maxAF = 1;
 
-        adaptive_format_mode = adaptive_format_mode_t::shadow;
+        // Keep legacy behavior by default unless explicitly enabled via CLI.
+        adaptive_format_mode = adaptive_format_mode_t::off;
         use_adaptive_format = false;
     }
 };

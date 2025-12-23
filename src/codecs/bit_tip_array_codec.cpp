@@ -4,6 +4,7 @@
 #include <cstring>
 #include <sstream>
 #include <algorithm>
+#include <limits>
 
 namespace gsc {
 
@@ -135,6 +136,41 @@ void BitTipArrayCodec::freeze() {
     }
 
     observed_arrays_.clear();
+
+    // Build per-sample prefix indices for fast decode.
+    special1_index_by_sample_.assign(sample_count_, 0);
+    special2_index_by_sample_.assign(sample_count_, 0);
+    dict_index_by_sample_.assign(sample_count_, 0);
+
+    uint32_t special1_idx = 0, special2_idx = 0, dict_idx = 0;
+    for (uint32_t i = 0; i < sample_count_; ++i) {
+        special1_index_by_sample_[i] = special1_idx;
+        special2_index_by_sample_[i] = special2_idx;
+        dict_index_by_sample_[i] = dict_idx;
+
+        if (missing_set_.count(i)) {
+            ++dict_idx;  // missing samples occupy a dict_ids_ slot
+            continue;
+        }
+
+        TipType t = getTip(i);
+        switch (t) {
+            case TIP_SPECIAL_1:
+                if (field_type_ == FieldType::PL_LIKE) {
+                    ++special1_idx;
+                    ++special2_idx;
+                }
+                break;
+            case TIP_SPECIAL_2:
+                ++special1_idx;
+                break;
+            case TIP_GENERAL:
+                ++dict_idx;
+                break;
+            default:
+                break;
+        }
+    }
 }
 
 void BitTipArrayCodec::encode(const char* value, size_t len, uint32_t sample_pos) {
@@ -315,11 +351,19 @@ size_t BitTipArrayCodec::deserialize(const uint8_t* data, size_t len) {
     sum_cache_.clear();
     sum_cache_.resize(sample_count_, INT64_MIN);
 
+    special1_index_by_sample_.assign(sample_count_, 0);
+    special2_index_by_sample_.assign(sample_count_, 0);
+    dict_index_by_sample_.assign(sample_count_, 0);
+
     uint32_t special1_idx = 0, special2_idx = 0, dict_idx = 0;
     std::vector<int64_t> arr;
     arr.reserve(expected_len_ > 0 ? expected_len_ : 8);
 
     for (uint32_t i = 0; i < sample_count_; ++i) {
+        special1_index_by_sample_[i] = special1_idx;
+        special2_index_by_sample_[i] = special2_idx;
+        dict_index_by_sample_[i] = dict_idx;
+
         if (missing_set_.count(i)) {
             sum_cache_[i] = INT64_MIN;
             ++dict_idx;  // missing samples occupy a dict_ids_ slot
@@ -357,7 +401,107 @@ size_t BitTipArrayCodec::deserialize(const uint8_t* data, size_t len) {
     return pos;
 }
 
+bool BitTipArrayCodec::decodeToInt32Array(uint32_t sample_pos, int32_t* out, uint32_t out_len) const {
+    if (out == nullptr) return false;
+    if (expected_len_ == 0 || out_len < expected_len_) return false;
+    if (sample_pos >= sample_count_) return false;
+    if (missing_set_.count(sample_pos)) return false;
+
+    for (uint32_t i = 0; i < expected_len_; ++i) {
+        out[i] = 0;
+    }
+
+    TipType tip = getTip(sample_pos);
+
+    uint32_t special1_idx = 0, special2_idx = 0, dict_idx = 0;
+    if (sample_pos < special1_index_by_sample_.size() &&
+        sample_pos < special2_index_by_sample_.size() &&
+        sample_pos < dict_index_by_sample_.size()) {
+        special1_idx = special1_index_by_sample_[sample_pos];
+        special2_idx = special2_index_by_sample_[sample_pos];
+        dict_idx = dict_index_by_sample_[sample_pos];
+    } else {
+        // Fallback: count payloads up to this position
+        for (uint32_t i = 0; i < sample_pos && i < sample_count_; ++i) {
+            if (missing_set_.count(i)) {
+                ++dict_idx;
+                continue;
+            }
+            TipType t = getTip(i);
+            switch (t) {
+                case TIP_SPECIAL_1:
+                    if (field_type_ == FieldType::PL_LIKE) {
+                        ++special1_idx;
+                        ++special2_idx;
+                    }
+                    break;
+                case TIP_SPECIAL_2:
+                    ++special1_idx;
+                    break;
+                case TIP_GENERAL:
+                    ++dict_idx;
+                    break;
+                default:
+                    break;
+            }
+        }
+    }
+
+    switch (tip) {
+        case TIP_ALL_ZERO:
+            return true;
+
+        case TIP_SPECIAL_1:
+            if (field_type_ == FieldType::AD_LIKE) {
+                out[0] = 2;
+            } else if (field_type_ == FieldType::PL_LIKE) {
+                if (expected_len_ >= 3 &&
+                    special1_idx < special1_payload_.size() &&
+                    special2_idx < special2_payload_.size()) {
+                    out[0] = 0;
+                    out[1] = static_cast<int32_t>(special1_payload_[special1_idx]);
+                    out[2] = static_cast<int32_t>(special2_payload_[special2_idx]);
+                }
+            }
+            return true;
+
+        case TIP_SPECIAL_2:
+            if (field_type_ == FieldType::AD_LIKE) {
+                if (special1_idx < special1_payload_.size() && expected_len_ >= 1) {
+                    out[0] = static_cast<int32_t>(special1_payload_[special1_idx]);
+                }
+            } else if (field_type_ == FieldType::PL_LIKE) {
+                if (expected_len_ >= 3 && special1_idx < special1_payload_.size()) {
+                    int32_t a = static_cast<int32_t>(special1_payload_[special1_idx]);
+                    out[0] = 0;
+                    out[1] = a;
+                    out[2] = a * 15;
+                }
+            }
+            return true;
+
+        case TIP_GENERAL:
+            if (dict_idx < dict_ids_.size()) {
+                uint32_t id = dict_ids_[dict_idx];
+                if (id != UINT32_MAX && id < dictionary_.size()) {
+                    const auto& values = dictionary_[id].values;
+                    const size_t n = std::min<size_t>(values.size(), expected_len_);
+                    const int32_t missing = std::numeric_limits<int32_t>::min();
+                    for (size_t i = 0; i < n; ++i) {
+                        out[i] = (values[i] == INT64_MIN) ? missing : static_cast<int32_t>(values[i]);
+                    }
+                }
+            }
+            return true;
+    }
+
+    return true;
+}
+
 std::string BitTipArrayCodec::decode(uint32_t sample_pos) const {
+    if (sample_pos >= sample_count_) {
+        return ".";
+    }
     if (missing_set_.count(sample_pos)) {
         return ".";
     }
@@ -365,30 +509,38 @@ std::string BitTipArrayCodec::decode(uint32_t sample_pos) const {
     TipType tip = getTip(sample_pos);
     std::vector<int64_t> arr;
 
-    // Count payloads up to this position
     uint32_t special1_idx = 0, special2_idx = 0, dict_idx = 0;
 
-    for (uint32_t i = 0; i < sample_pos && i < sample_count_; ++i) {
-        if (missing_set_.count(i)) {
-            ++dict_idx;
-            continue;
-        }
-        TipType t = getTip(i);
-        switch (t) {
-            case TIP_SPECIAL_1:
-                if (field_type_ == FieldType::PL_LIKE) {
-                    ++special1_idx;
-                    ++special2_idx;
-                }
-                break;
-            case TIP_SPECIAL_2:
-                ++special1_idx;
-                break;
-            case TIP_GENERAL:
+    if (sample_pos < special1_index_by_sample_.size() &&
+        sample_pos < special2_index_by_sample_.size() &&
+        sample_pos < dict_index_by_sample_.size()) {
+        special1_idx = special1_index_by_sample_[sample_pos];
+        special2_idx = special2_index_by_sample_[sample_pos];
+        dict_idx = dict_index_by_sample_[sample_pos];
+    } else {
+        // Fallback: count payloads up to this position
+        for (uint32_t i = 0; i < sample_pos && i < sample_count_; ++i) {
+            if (missing_set_.count(i)) {
                 ++dict_idx;
-                break;
-            default:
-                break;
+                continue;
+            }
+            TipType t = getTip(i);
+            switch (t) {
+                case TIP_SPECIAL_1:
+                    if (field_type_ == FieldType::PL_LIKE) {
+                        ++special1_idx;
+                        ++special2_idx;
+                    }
+                    break;
+                case TIP_SPECIAL_2:
+                    ++special1_idx;
+                    break;
+                case TIP_GENERAL:
+                    ++dict_idx;
+                    break;
+                default:
+                    break;
+            }
         }
     }
 
@@ -416,6 +568,9 @@ void BitTipArrayCodec::reset() {
     dict_index_.clear();
     dict_ids_.clear();
     sum_cache_.clear();
+    special1_index_by_sample_.clear();
+    special2_index_by_sample_.clear();
+    dict_index_by_sample_.clear();
     observed_arrays_.clear();
     missing_positions_.clear();
     missing_set_.clear();

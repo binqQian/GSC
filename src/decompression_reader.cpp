@@ -1,9 +1,11 @@
 #include "decompression_reader.h"
 #include "logger.h"
+#include "bsc.h"
 #include "zstd_compress.h"
 #include <algorithm>
 #include <chrono>
 #include <cstring>
+#include <mutex>
 #include <limits>
 
 using namespace std::chrono;
@@ -530,6 +532,13 @@ bool DecompressionReader::refillAdaptiveFormatBuffer(size_t min_bytes)
         return adaptive_format_buffer_.size() >= min_bytes;
     }
 
+    auto readU32LE = [](const uint8_t* p) -> uint32_t {
+        return (static_cast<uint32_t>(p[0]) |
+                (static_cast<uint32_t>(p[1]) << 8) |
+                (static_cast<uint32_t>(p[2]) << 16) |
+                (static_cast<uint32_t>(p[3]) << 24));
+    };
+
     while (adaptive_format_buffer_.size() < min_bytes) {
         std::vector<uint8_t> part;
         if (!file_handle2->GetPart(adaptive_format_stream_id_, part)) {
@@ -545,6 +554,7 @@ bool DecompressionReader::refillAdaptiveFormatBuffer(size_t min_bytes)
             part[0] == 'A' && part[1] == 'F' && part[2] == 'D' && part[3] == '1')
         {
             const uint8_t method = part[4];
+            const uint32_t raw_size = readU32LE(part.data() + 8);
             const uint8_t* payload = part.data() + 12;
             const size_t payload_size = part.size() - 12;
             if (method == 0) {
@@ -554,7 +564,20 @@ bool DecompressionReader::refillAdaptiveFormatBuffer(size_t min_bytes)
                     // Fallback: treat as raw if decompression fails.
                     decoded = part;
                 }
+            } else if (method == 2) {
+                static std::once_flag init_flag;
+                std::call_once(init_flag, []() { CBSCWrapper::InitLibrary(p_bsc_features); });
+
+                std::vector<uint8_t> payload_vec(payload, payload + payload_size);
+                if (!CBSCWrapper::Decompress(payload_vec, decoded)) {
+                    decoded = part;
+                }
             } else {
+                decoded = part;
+            }
+
+            if (decoded != part && raw_size != 0 && decoded.size() != raw_size) {
+                // Corrupted part framing or codec mismatch: fallback to raw bytes.
                 decoded = part;
             }
         } else {

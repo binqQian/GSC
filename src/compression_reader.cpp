@@ -1,10 +1,12 @@
 #include "compression_reader.h"
 #include "logger.h"
+#include "bsc.h"
 #include "vint_code.h"
 #include "zstd_compress.h"
 #include <iostream>
 #include <fstream>
 #include <sstream>
+#include <mutex>
 #include <limits>
 #include <htslib/vcf.h>
 
@@ -12,6 +14,7 @@ namespace {
 constexpr uint8_t kAdaptiveMagic[4] = {'A', 'F', 'D', '1'}; // Adaptive Format Data v1
 constexpr uint8_t kAdaptiveMethodRaw = 0;
 constexpr uint8_t kAdaptiveMethodZstd = 1;
+constexpr uint8_t kAdaptiveMethodBsc = 2;
 
 static void writeU32LE(uint32_t v, std::vector<uint8_t>& out) {
     out.push_back(static_cast<uint8_t>(v & 0xffu));
@@ -20,16 +23,39 @@ static void writeU32LE(uint32_t v, std::vector<uint8_t>& out) {
     out.push_back(static_cast<uint8_t>((v >> 24) & 0xffu));
 }
 
+static bool bscCompress(const std::vector<uint8_t>& raw, std::vector<uint8_t>& compressed) {
+    static std::once_flag init_flag;
+    std::call_once(init_flag, []() { CBSCWrapper::InitLibrary(p_bsc_features); });
+
+    CBSCWrapper wrapper;
+    if (!wrapper.InitCompress(p_bsc_text)) {
+        return false;
+    }
+
+    return wrapper.Compress(raw, compressed);
+}
+
 static std::vector<uint8_t> encodeAdaptiveFormatPart(const std::vector<uint8_t>& raw) {
-    std::vector<uint8_t> compressed;
-    bool ok = zstd::zstd_compress(raw, compressed);
+    std::vector<uint8_t> compressed_zstd;
+    std::vector<uint8_t> compressed_bsc;
+    bool ok_zstd = zstd::zstd_compress(raw, compressed_zstd);
+    bool ok_bsc = bscCompress(raw, compressed_bsc);
 
     uint8_t method = kAdaptiveMethodRaw;
     const std::vector<uint8_t>* payload = &raw;
-    if (ok && !compressed.empty() && compressed.size() + 12 < raw.size()) {
-        method = kAdaptiveMethodZstd;
-        payload = &compressed;
-    }
+
+    size_t best_size = raw.size();
+    auto consider = [&](uint8_t m, bool ok, const std::vector<uint8_t>& c) {
+        if (!ok || c.empty()) return;
+        if (c.size() + 12 >= raw.size()) return; // Not worth framing overhead.
+        if (c.size() < best_size) {
+            best_size = c.size();
+            method = m;
+            payload = &c;
+        }
+    };
+    consider(kAdaptiveMethodZstd, ok_zstd, compressed_zstd);
+    consider(kAdaptiveMethodBsc, ok_bsc, compressed_bsc);
 
     std::vector<uint8_t> framed;
     framed.reserve(12 + payload->size());

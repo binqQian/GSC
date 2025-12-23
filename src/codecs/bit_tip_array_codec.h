@@ -75,6 +75,11 @@ public:
 
     // Set expected array length
     void setExpectedLen(uint32_t len) { expected_len_ = len; }
+    uint32_t expectedLen() const { return expected_len_; }
+
+    // Fast typed decode for decompressor (avoids string conversion/parsing).
+    // Returns false for missing samples or invalid sample_pos/out_len.
+    bool decodeToInt32Array(uint32_t sample_pos, int32_t* out, uint32_t out_len) const;
 
 private:
     bool frozen_ = false;
@@ -100,6 +105,11 @@ private:
 
     // Sum cache for cross-field prediction
     std::vector<int64_t> sum_cache_;
+
+    // Per-sample payload indices for fast decode (prefix counts before sample_pos).
+    std::vector<uint32_t> special1_index_by_sample_;
+    std::vector<uint32_t> special2_index_by_sample_;
+    std::vector<uint32_t> dict_index_by_sample_;
 
     // Observation data
     struct ObservedArray {

@@ -466,55 +466,15 @@ void FormatFieldManager::finalizeRow(std::vector<uint8_t>& out, bool omit_rawstr
 std::string FormatFieldManager::decodeSample(const uint8_t* data, size_t len,
                                               uint32_t sample_pos,
                                               const std::vector<std::string>& format_keys) {
-    // Decode format: [field_count][field_name+codec_data]*
-    size_t pos = 0;
-    uint32_t field_count = vint_code::ReadVint(data, len, pos);
-
-    // First pass: deserialize codecs
-    std::unordered_map<std::string, std::unique_ptr<FormatFieldCodec>> decoded_codecs;
-    decoded_codecs.reserve(field_count);
-
-    for (uint32_t i = 0; i < field_count && pos < len; ++i) {
-        // Field name
-        uint32_t name_len = vint_code::ReadVint(data, len, pos);
-        std::string field_name(reinterpret_cast<const char*>(data + pos), name_len);
-        pos += name_len;
-
-        // Codec data size
-        uint32_t codec_size = vint_code::ReadVint(data, len, pos);
-
-        // Parse codec params to determine type
-        CodecParams params;
-        size_t header_size = params.deserialize(data + pos, codec_size);
-        if (header_size == 0 || header_size > codec_size) {
-            // Corrupted codec data; skip
-            pos += codec_size;
-            continue;
+    RowDecoder row;
+    if (!prepareRowDecoder(data, len, row)) {
+        // Corrupted row, return all missing
+        std::string result;
+        for (size_t i = 0; i < format_keys.size(); ++i) {
+            if (i > 0) result += ':';
+            result += '.';
         }
-
-        // Create codec and deserialize payload (skip header bytes)
-        auto codec = gsc::createCodec(params.type, field_name, params.array_len);
-        codec->deserialize(data + pos + header_size, codec_size - header_size);
-        pos += codec_size;
-
-        decoded_codecs.emplace(std::move(field_name), std::move(codec));
-    }
-
-    // Cross-field predictors for decoding (DP <- AD, optional GQ <- PL)
-    auto ad_it = decoded_codecs.find("AD");
-    auto dp_it = decoded_codecs.find("DP");
-    if (ad_it != decoded_codecs.end() && dp_it != decoded_codecs.end()) {
-        FormatFieldCodec* ad_codec = ad_it->second.get();
-        dp_it->second->setPredictor([ad_codec](uint32_t pos) -> int64_t {
-            return ad_codec->getComputedValue(pos);
-        });
-    }
-
-    // Second pass: decode values
-    std::unordered_map<std::string, std::string> decoded_fields;
-    decoded_fields.reserve(decoded_codecs.size());
-    for (const auto& kv : decoded_codecs) {
-        decoded_fields[kv.first] = kv.second->decode(sample_pos);
+        return result;
     }
 
     // Build output string in format key order
@@ -523,15 +483,67 @@ std::string FormatFieldManager::decodeSample(const uint8_t* data, size_t len,
         if (i > 0) result += ':';
 
         const std::string& key = format_keys[i];
-        auto it = decoded_fields.find(key);
-        if (it != decoded_fields.end()) {
-            result += it->second;
-        } else {
-            result += '.';  // Missing field
+        auto it = row.index_by_name.find(key);
+        if (it == row.index_by_name.end()) {
+            result += '.';
+            continue;
         }
+        std::string v = row.codecs[it->second]->decode(sample_pos);
+        if (v.empty()) v = "."; // not-present -> "." in VCF text
+        result += v;
     }
 
     return result;
+}
+
+bool FormatFieldManager::prepareRowDecoder(const uint8_t* data, size_t len, RowDecoder& out) const {
+    out.clear();
+    if (data == nullptr || len == 0) return false;
+
+    // Decode format: [field_count][field_name+codec_data]*
+    size_t pos = 0;
+    if (pos >= len) return false;
+    uint32_t field_count = vint_code::ReadVint(data, len, pos);
+    out.keys.reserve(field_count);
+    out.codecs.reserve(field_count);
+    out.index_by_name.reserve(field_count);
+
+    for (uint32_t i = 0; i < field_count; ++i) {
+        if (pos >= len) return false;
+
+        uint32_t name_len = vint_code::ReadVint(data, len, pos);
+        if (pos + name_len > len) return false;
+        std::string field_name(reinterpret_cast<const char*>(data + pos), name_len);
+        pos += name_len;
+
+        uint32_t codec_size = vint_code::ReadVint(data, len, pos);
+        if (pos + codec_size > len) return false;
+
+        CodecParams params;
+        size_t header_size = params.deserialize(data + pos, codec_size);
+        if (header_size == 0 || header_size > codec_size) return false;
+
+        auto codec = gsc::createCodec(params.type, field_name, params.array_len);
+        codec->deserialize(data + pos + header_size, codec_size - header_size);
+        pos += codec_size;
+
+        size_t idx = out.keys.size();
+        out.keys.push_back(field_name);
+        out.index_by_name.emplace(out.keys.back(), idx);
+        out.codecs.push_back(std::move(codec));
+    }
+
+    // Cross-field predictors for decoding (DP <- AD, optional GQ <- PL)
+    auto ad_it = out.index_by_name.find("AD");
+    auto dp_it = out.index_by_name.find("DP");
+    if (ad_it != out.index_by_name.end() && dp_it != out.index_by_name.end()) {
+        FormatFieldCodec* ad_codec = out.codecs[ad_it->second].get();
+        out.codecs[dp_it->second]->setPredictor([ad_codec](uint32_t pos) -> int64_t {
+            return ad_codec->getComputedValue(pos);
+        });
+    }
+
+    return true;
 }
 
 void FormatFieldManager::parseSampleFields(const char* sample_str, size_t len,

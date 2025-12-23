@@ -1,5 +1,7 @@
 #include "decompressor.h"
 #include "logger.h"
+#include "codecs/bit_tip_array_codec.h"
+#include "codecs/predicted_scalar_codec.h"
 #include <bitset>
 #include <chrono>
 #include <cstdlib>
@@ -1025,62 +1027,28 @@ void Decompressor::appendVCFToRec(variant_desc_t &_desc, vector<uint8_t> &_genot
         const bool is_sample_subset = (actual_samples != decompression_reader.n_samples);
 
 	    std::vector<std::string> adaptive_format_keys;
-	    if (can_use_adaptive_format) {
-	        const auto& row = *current_adaptive_format_row_;
-	        size_t pos = 0;
-	        if (!row.empty()) {
-	            uint32_t field_count = vint_code::ReadVint(row.data(), row.size(), pos);
-	            adaptive_format_keys.reserve(field_count);
-	            for (uint32_t fi = 0; fi < field_count && pos < row.size(); ++fi) {
-	                uint32_t name_len = vint_code::ReadVint(row.data(), row.size(), pos);
-	                if (pos + name_len > row.size()) break;
-	                adaptive_format_keys.emplace_back(reinterpret_cast<const char*>(row.data() + pos), name_len);
-	                pos += name_len;
-
-	                uint32_t codec_size = vint_code::ReadVint(row.data(), row.size(), pos);
-	                if (pos + codec_size > row.size()) break;
-	                pos += codec_size;
-	            }
-	        }
-
-	        if (adaptive_format_keys.empty()) {
-	            can_use_adaptive_format = false;
-	        }
-	    }
+        gsc::FormatFieldManager::RowDecoder adaptive_row_decoder;
+        if (can_use_adaptive_format) {
+            if (!format_field_manager_->prepareRowDecoder(
+                    current_adaptive_format_row_->data(),
+                    current_adaptive_format_row_->size(),
+                    adaptive_row_decoder)) {
+                can_use_adaptive_format = false;
+            } else {
+                adaptive_format_keys = adaptive_row_decoder.keys;
+                if (adaptive_format_keys.empty()) can_use_adaptive_format = false;
+            }
+        }
 
         // Decode adaptive row once (per sample) and keep per-tag values, then update tags
         // in the canonical FORMAT order as we iterate keys[] (this avoids FORMAT tag reordering).
         std::unordered_map<uint32_t, size_t> adaptive_field_idx_by_key_id;
-        std::vector<std::vector<std::string>> adaptive_values;
         if (can_use_adaptive_format) {
             adaptive_field_idx_by_key_id.reserve(adaptive_format_keys.size());
-            adaptive_values.assign(adaptive_format_keys.size(), std::vector<std::string>(actual_samples));
 
             for (size_t k = 0; k < adaptive_format_keys.size(); ++k) {
                 int tag_id = bcf_hdr_id2int(out_hdr, BCF_DT_ID, adaptive_format_keys[k].c_str());
                 if (tag_id >= 0) adaptive_field_idx_by_key_id[static_cast<uint32_t>(tag_id)] = k;
-            }
-
-            for (uint32_t out_sample_idx = 0; out_sample_idx < actual_samples; ++out_sample_idx) {
-                uint32_t orig_sample_idx = is_sample_subset ? sampleIDs[out_sample_idx] : out_sample_idx;
-                std::string decoded = format_field_manager_->decodeSample(
-                    current_adaptive_format_row_->data(), current_adaptive_format_row_->size(),
-                    orig_sample_idx, adaptive_format_keys);
-
-                size_t start = 0;
-                for (size_t k = 0; k < adaptive_format_keys.size(); ++k) {
-                    size_t sep = decoded.find(':', start);
-                    std::string v = (sep == std::string::npos)
-                                        ? decoded.substr(start)
-                                        : decoded.substr(start, sep - start);
-                    if (v.empty()) v = ".";
-                    adaptive_values[k][out_sample_idx] = std::move(v);
-                    if (sep == std::string::npos) {
-                        start = decoded.size();
-                    } else {
-                        start = sep + 1;
-                    }
-                }
             }
         }
 
@@ -1207,8 +1175,7 @@ void Decompressor::appendVCFToRec(variant_desc_t &_desc, vector<uint8_t> &_genot
                 }
             }
 
-            auto update_from_strings = [&](const std::vector<std::string>& vals) {
-                const char* tag = bcf_hdr_int2id(out_hdr, BCF_DT_ID, _keys[id].key_id);
+            auto update_from_strings = [&](const char* tag, const std::vector<std::string>& vals) {
                 auto countElems = [](const std::string& v) -> uint32_t {
                     if (v.empty() || v == ".") return 1;
                     uint32_t n = 1;
@@ -1294,7 +1261,54 @@ void Decompressor::appendVCFToRec(variant_desc_t &_desc, vector<uint8_t> &_genot
             if (can_use_adaptive_format) {
                 auto it_ad = adaptive_field_idx_by_key_id.find(_keys[id].key_id);
                 if (it_ad != adaptive_field_idx_by_key_id.end()) {
-                    update_from_strings(adaptive_values[it_ad->second]);
+                    const char* tag = bcf_hdr_int2id(out_hdr, BCF_DT_ID, _keys[id].key_id);
+                    const size_t codec_idx = it_ad->second;
+                    const auto* codec = (codec_idx < adaptive_row_decoder.codecs.size())
+                                            ? adaptive_row_decoder.codecs[codec_idx].get()
+                                            : nullptr;
+
+                    if (_keys[id].type == BCF_HT_INT && codec != nullptr) {
+                        if (codec->type() == gsc::CodecType::PredictedScalar) {
+                            const auto* ps = dynamic_cast<const gsc::PredictedScalarCodec*>(codec);
+                            std::vector<int32_t> out(actual_samples, bcf_int32_missing);
+                            if (ps) {
+                                for (uint32_t s = 0; s < actual_samples; ++s) {
+                                    uint32_t orig = is_sample_subset ? sampleIDs[s] : s;
+                                    int32_t v = 0;
+                                    if (ps->decodeToInt32(orig, v)) out[s] = v;
+                                }
+                            }
+                            bcf_update_format_int32(out_hdr, rec, tag, out.data(), static_cast<int>(out.size()));
+                            continue;
+                        }
+
+                        if (codec->type() == gsc::CodecType::BitTipArray) {
+                            const auto* ba = dynamic_cast<const gsc::BitTipArrayCodec*>(codec);
+                            const uint32_t len = ba ? ba->expectedLen() : 0;
+                            if (len > 0) {
+                                std::vector<int32_t> out(static_cast<size_t>(actual_samples) * len, bcf_int32_vector_end);
+                                for (uint32_t s = 0; s < actual_samples; ++s) {
+                                    uint32_t orig = is_sample_subset ? sampleIDs[s] : s;
+                                    const size_t off = static_cast<size_t>(s) * len;
+                                    if (!ba || !ba->decodeToInt32Array(orig, out.data() + off, len)) {
+                                        out[off] = bcf_int32_missing;
+                                    }
+                                }
+                                bcf_update_format_int32(out_hdr, rec, tag, out.data(), static_cast<int>(out.size()));
+                                continue;
+                            }
+                        }
+                    }
+
+                    // Fallback: decode to strings for this tag only.
+                    std::vector<std::string> vals(actual_samples);
+                    for (uint32_t s = 0; s < actual_samples; ++s) {
+                        uint32_t orig = is_sample_subset ? sampleIDs[s] : s;
+                        std::string v = codec ? codec->decode(orig) : ".";
+                        if (v.empty()) v = ".";
+                        vals[s] = std::move(v);
+                    }
+                    update_from_strings(tag, vals);
                     continue;
                 }
             }

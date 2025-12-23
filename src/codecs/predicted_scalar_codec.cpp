@@ -2,6 +2,7 @@
 #include "../vint_code.h"
 #include <cstdlib>
 #include <cstring>
+#include <limits>
 
 namespace gsc {
 
@@ -203,6 +204,26 @@ std::string PredictedScalarCodec::decode(uint32_t sample_pos) const {
     // Return predicted value
     int64_t predicted = getPredictedValue(sample_pos);
     return std::to_string(predicted);
+}
+
+bool PredictedScalarCodec::decodeToInt32(uint32_t sample_pos, int32_t& out) const {
+    if (not_present_set_.count(sample_pos) || missing_set_.count(sample_pos)) {
+        return false;
+    }
+
+    int64_t v = 0;
+    auto it = exception_map_.find(sample_pos);
+    if (it != exception_map_.end()) {
+        v = it->second;
+    } else {
+        v = getPredictedValue(sample_pos);
+    }
+
+    if (v < std::numeric_limits<int32_t>::min() + 2 || v > std::numeric_limits<int32_t>::max()) {
+        return false;
+    }
+    out = static_cast<int32_t>(v);
+    return true;
 }
 
 CodecParams PredictedScalarCodec::getParams() const {

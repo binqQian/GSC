@@ -46,6 +46,10 @@ public:
     size_t deserialize(const uint8_t* data, size_t len) override;
     std::string decode(uint32_t sample_pos) const override;
 
+    // Fast typed decode for decompressor (avoids string conversion/parsing).
+    // Returns false for missing / not-present samples.
+    bool decodeToInt32(uint32_t sample_pos, int32_t& out) const;
+
     CodecType type() const override { return CodecType::PredictedScalar; }
     CodecParams getParams() const override;
     void reset() override;
