@@ -39,6 +39,12 @@ enum class adaptive_format_part_backend_t
     zstd,
     brotli
 };
+
+enum class integrity_check_mode_t
+{
+    none,       // No integrity check (default)
+    xxhash64    // Use XXHash64 (fast, recommended)
+};
 enum class file_type
 {
     VCF_File,
@@ -107,6 +113,10 @@ struct GSC_Params
     adaptive_format_part_backend_t adaptive_format_part_backend;
     bool use_adaptive_format;  // Prefer adaptive FORMAT stream on decompression (VCF output recommended)
 
+    // Integrity verification settings
+    integrity_check_mode_t integrity_mode;
+    bool verify_on_decompress;  // Auto-verify on decompression if hash is present
+
     GSC_Params()
     {
         task_mode = task_mode_t::none;
@@ -154,5 +164,9 @@ struct GSC_Params
         adaptive_format_mode = adaptive_format_mode_t::off;
         adaptive_format_part_backend = adaptive_format_part_backend_t::auto_select;
         use_adaptive_format = false;
+
+        // Integrity verification defaults
+        integrity_mode = integrity_check_mode_t::none;  // Disabled by default
+        verify_on_decompress = true;  // Auto-verify if hash is present
     }
 };

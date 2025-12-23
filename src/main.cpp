@@ -120,6 +120,7 @@ Options:
 	    -d,  --depth [X]       Set maximum replication depth to [X] (default: 100, 0 means no matches).
 	    -m,  --merge [X]       Specify files to merge, separated by commas (e.g., -m chr1.vcf,chr2.vcf), or '@' followed by a file containing a list of VCF files (e.g., -m @file_with_IDs.txt). By default, all VCF files are compressed.
 	        --adaptive-format [off|shadow|primary]  FORMAT adaptive mode: off disables; shadow writes extra stream; primary omits legacy non-GT FORMAT.
+    -I,  --integrity [mode] Enable integrity hash: none (default), xxhash64/xxhash/fast.
 )");
 
     exit(0);
@@ -150,6 +151,8 @@ Options:
 	        -r,  --range [X]      Specify range in format [start],[end] (e.g., -r 4999756,4999852).
 	        -s,  --samples [X]    Samples separated by comms (e.g., -s HG03861,NA18639) OR '@' sign followed by the name of a file with sample name(s) separated by whitespaces (for exaple: -s @file_with_IDs.txt). By default all samples/individuals are decompressed.
 	        --use-adaptive-format Prefer adaptive_format_data for non-GT FORMAT reconstruction (recommended with VCF output).
+	        --verify              Force integrity verification if hash is present (default: enabled).
+	        --no-verify           Skip integrity verification even if hash is stored.
 	        --header-only         Output only the header of the VCF/BCF.
 	        --no-header           Output without the VCF/BCF header (only genotypes).
 	        -G,  --no-genotype    Don't output sample genotypes (only #CHROM, POS, ID, REF, ALT, QUAL, FILTER, and INFO columns).
@@ -433,10 +436,24 @@ int params_options(int argc, const char *argv[]){
 
                 temp = atoi(argv[i]);
 
-                if (temp < 1) 
+                if (temp < 1)
                     usage_compress();
 
                 params.no_threads = temp;
+            }
+            else if (strcmp(argv[i], "--integrity") == 0 || strcmp(argv[i], "-I") == 0){
+                i++;
+                if (i >= argc)
+                    return usage_compress();
+                std::string mode = argv[i];
+                if (mode == "none" || mode == "off") {
+                    params.integrity_mode = integrity_check_mode_t::none;
+                } else if (mode == "xxhash64" || mode == "xxhash" || mode == "fast") {
+                    params.integrity_mode = integrity_check_mode_t::xxhash64;
+                } else {
+                    logger->error("Unsupported --integrity mode: {}. Use 'none', 'xxhash64', or 'fast'.", mode);
+                    return usage_compress();
+                }
             }
         }
         if(isatty(STDIN_FILENO) && params.in_file_name == "-"){
@@ -582,6 +599,12 @@ int params_options(int argc, const char *argv[]){
             }
             else if (strcmp(argv[i], "--use-adaptive-format") == 0) {
                 params.use_adaptive_format = true;
+            }
+            else if (strcmp(argv[i], "--verify") == 0) {
+                params.verify_on_decompress = true;
+            }
+            else if (strcmp(argv[i], "--no-verify") == 0) {
+                params.verify_on_decompress = false;
             }
 
             else if (strcmp(argv[i], "-n") == 0){

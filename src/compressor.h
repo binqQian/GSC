@@ -13,6 +13,7 @@
 #include "queues.h"
 #include <tuple>
 #include "compression_strategy.h"
+#include "integrity_checker.h"
 // #include <filesystem>
 using namespace std;
 
@@ -126,9 +127,9 @@ class Compressor
     vector<key_desc> keys;
     int key_gt_id;
 
-    
-
-    
+    // Integrity checking support
+    std::unique_ptr<gsc::IntegrityManager> integrity_manager_;
+    gsc::HashResult final_hash_;
 
     bool OpenForWriting(const string &out_file_name);
     char bits_used(unsigned int n);

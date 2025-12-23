@@ -6,6 +6,7 @@
 #include <chrono>
 #include <cstring>
 #include <mutex>
+#include <fstream>
 #include <brotli/decode.h>
 #include <limits>
 
@@ -661,6 +662,59 @@ void DecompressionReader::close()
 
 	// file_handle2->Close();
 }
+
+//**********************************************************************************************************************
+// Read integrity hash footer from the end of the compressed file
+bool DecompressionReader::ReadIntegrityFooter(const std::string& file_path)
+{
+	auto logger = LogManager::Instance().Logger();
+
+	// Open file for reading at the end
+	std::ifstream file(file_path, std::ios::binary | std::ios::ate);
+	if (!file) {
+		return false;
+	}
+
+	// Get file size
+	std::streamsize file_size = file.tellg();
+
+	// Integrity footer size: 4 (magic) + 10 (HashResult) = 14 bytes
+	const size_t footer_size = 4 + gsc::HashResult::SerializedSize();
+
+	if (static_cast<size_t>(file_size) < footer_size) {
+		return false;
+	}
+
+	// Seek to potential footer location
+	file.seekg(-static_cast<std::streamoff>(footer_size), std::ios::end);
+
+	// Read magic marker
+	uint32_t magic = 0;
+	file.read(reinterpret_cast<char*>(&magic), sizeof(magic));
+
+	// Check magic marker "GSCI" = 0x47534349
+	if (magic != 0x47534349) {
+		// No integrity footer found
+		has_integrity_hash_ = false;
+		return false;
+	}
+
+	// Read hash data
+	uint8_t hash_data[gsc::HashResult::SerializedSize()];
+	file.read(reinterpret_cast<char*>(hash_data), sizeof(hash_data));
+
+	if (!stored_hash_.Deserialize(hash_data, sizeof(hash_data))) {
+		logger->warn("Failed to deserialize integrity hash");
+		has_integrity_hash_ = false;
+		return false;
+	}
+
+	has_integrity_hash_ = true;
+	logger->info("Found integrity hash in file: {}", stored_hash_.ToHexString());
+
+	return true;
+}
+
 //**********************************************************************************************************************
 bool DecompressionReader::decompress_other_fileds(SPackage *pck)
 {

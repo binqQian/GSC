@@ -303,9 +303,30 @@ bool Decompressor::decompressProcess()
     if(decompression_mode_type) {
         if(!decompression_reader.OpenReadingPart2(in_file_name))
             return false;
-        
-    }    
+
+    }
+
+    // Try to read integrity hash footer
+    decompression_reader.ReadIntegrityFooter(in_file_name);
+
+    // Initialize integrity verification if hash is present and verification is enabled
+    if (params.verify_on_decompress && decompression_reader.HasIntegrityHash()) {
+        auto logger = LogManager::Instance().Logger();
+        integrity_manager_ = std::make_unique<gsc::IntegrityManager>();
+        integrity_manager_->EnableDecompression(decompression_reader.GetStoredHash());
+        logger->info("Integrity verification enabled, expected hash: {}",
+            decompression_reader.GetStoredHash().ToHexString());
+    }
+
     decompression_reader.decompress_meta(v_samples, header);
+
+    // Update hash with header and samples if verification is enabled
+    if (integrity_manager_ && integrity_manager_->IsEnabled()) {
+        integrity_manager_->UpdateDecompressedData(header);
+        for (const auto& sample : v_samples) {
+            integrity_manager_->UpdateDecompressedData(sample);
+        }
+    }
     
     if(analyzeInputSamples(v_samples)) // Retrieving sample name.
         return false;
@@ -503,6 +524,19 @@ bool Decompressor::Close(){
         if(tmp_arr)
             delete[] tmp_arr;
     }
+
+    // Perform integrity verification if enabled
+    if (integrity_manager_ && integrity_manager_->IsEnabled()) {
+        auto logger = LogManager::Instance().Logger();
+        bool verified = integrity_manager_->VerifyDecompression();
+        if (!verified) {
+            logger->error("DATA INTEGRITY VERIFICATION FAILED!");
+            logger->error("The decompressed data does not match the original data.");
+            // Note: We still return true to allow the output file to be written,
+            // but the user is warned about the integrity failure.
+        }
+    }
+
     return true;
 }
 // *****************************************************************************************************************

@@ -74,6 +74,7 @@ gsc:	src/bit_memory.o \
 	src/codecs/predicted_scalar_codec.o \
 	src/codecs/bit_tip_array_codec.o \
 	src/codecs/sparse_dict_codec.o \
+	src/integrity_checker.o \
 	include/cpp-mmf/memory_mapped_file.o
 	$(CC) -o gsc \
 	src/bit_memory.o \
@@ -98,6 +99,7 @@ gsc:	src/bit_memory.o \
 	src/codecs/predicted_scalar_codec.o \
 	src/codecs/bit_tip_array_codec.o \
 	src/codecs/sparse_dict_codec.o \
+	src/integrity_checker.o \
 	include/cpp-mmf/memory_mapped_file.o \
 	$(LIBS_DIR)/libhts.a \
 	$(LIBS_DIR)/libsdsl.a \

@@ -37,6 +37,7 @@
 #include <array>
 #include <memory>
 #include "format_field_detector.h"
+#include "integrity_checker.h"
 #define MMAP
 
 #ifdef MMAP
@@ -118,6 +119,9 @@ class Decompressor {
     const std::vector<uint8_t>* current_adaptive_format_row_ = nullptr;
     std::vector<std::vector<uint8_t>> all_adaptive_format_rows;
     std::vector<std::vector<uint8_t>> all_adaptive_format_rows_io;
+
+    // Integrity verification
+    std::unique_ptr<gsc::IntegrityManager> integrity_manager_;
 
     uint32_t records_to_process;
 

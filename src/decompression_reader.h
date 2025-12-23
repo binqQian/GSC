@@ -17,6 +17,7 @@
 #include "utils.h"
 #include "compression_strategy.h"
 #include "vint_code.h"
+#include "integrity_checker.h"
 #define MMAP
 
 #ifdef MMAP
@@ -136,6 +137,10 @@ class DecompressionReader {
     std::vector<uint8_t> adaptive_format_buffer_;
     bool adaptive_format_eof_ = false;
 
+    // Integrity verification support
+    bool has_integrity_hash_ = false;
+    gsc::HashResult stored_hash_;
+
 	int64_t prev_pos;
 	// int id_block = 0;
 
@@ -202,6 +207,11 @@ public:
 
     bool HasAdaptiveFormat() const { return has_adaptive_format_; }
     bool GetNextAdaptiveFormatRow(std::vector<uint8_t>& row_data);
+
+    // Integrity verification
+    bool HasIntegrityHash() const { return has_integrity_hash_; }
+    const gsc::HashResult& GetStoredHash() const { return stored_hash_; }
+    bool ReadIntegrityFooter(const std::string& file_path);
 
 	// bool writeOtherFields(FILE* f,CompOtherFields<int,uint8_t,uint8_t> * fields_queue);
 	// bool readOtherFields(FILE* f,BlockingQueue<int,uint8_t,uint8_t> *fields_queue);

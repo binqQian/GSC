@@ -1,6 +1,7 @@
 #include "compressor.h"
 #include "logger.h"
 #include <iostream>
+#include <fstream>
 
 // **************************************************************************************************
 // write the compressed file
@@ -325,6 +326,29 @@ bool Compressor::writeCompressFlie()
 
     // std::cerr << "genotype compress file (" << params.out_file_name + ".gsc"<< ") created." << std::endl;
 
+    // Write integrity hash footer if enabled
+    if (integrity_manager_ && integrity_manager_->IsEnabled()) {
+        final_hash_ = integrity_manager_->FinalizeCompression();
+        logger->info("Computed integrity hash: {}", final_hash_.ToHexString());
+
+        // Append hash footer to file
+        if (!is_stdout && !fname.empty()) {
+            std::ofstream footer_out(fname, std::ios::binary | std::ios::app);
+            if (footer_out) {
+                // Write magic marker for integrity footer
+                const uint32_t magic = 0x47534349;  // "GSCI" in little-endian
+                footer_out.write(reinterpret_cast<const char*>(&magic), sizeof(magic));
+
+                // Write hash data
+                auto hash_data = final_hash_.Serialize();
+                footer_out.write(reinterpret_cast<const char*>(hash_data.data()), hash_data.size());
+
+                footer_out.close();
+                logger->info("Integrity hash written to file");
+            }
+        }
+    }
+
     return 0;
 }
 // open file for writing
@@ -461,6 +485,22 @@ bool Compressor::CompressProcess()
 
     // compress meta data
     compress_meta(v_samples, header);
+
+    // Initialize integrity checking if enabled
+    if (params.integrity_mode != integrity_check_mode_t::none) {
+        integrity_manager_ = std::make_unique<gsc::IntegrityManager>();
+        gsc::HashAlgorithm algo = gsc::HashAlgorithm::XXHASH64;
+        integrity_manager_->EnableCompression(algo);
+        logger->info("Integrity checking enabled: xxhash64");
+
+        // Hash the header
+        integrity_manager_->UpdateRawData(header);
+
+        // Hash sample names
+        for (const auto& sample : v_samples) {
+            integrity_manager_->UpdateRawData(sample);
+        }
+    }
 
     compression_reader->setNoVecBlock(params);
 
