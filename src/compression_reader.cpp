@@ -3,18 +3,21 @@
 #include "bsc.h"
 #include "vint_code.h"
 #include "zstd_compress.h"
+#include "compression_strategy.h"
 #include <iostream>
 #include <fstream>
 #include <sstream>
 #include <mutex>
 #include <limits>
 #include <htslib/vcf.h>
+#include <brotli/encode.h>
 
 namespace {
 constexpr uint8_t kAdaptiveMagic[4] = {'A', 'F', 'D', '1'}; // Adaptive Format Data v1
 constexpr uint8_t kAdaptiveMethodRaw = 0;
 constexpr uint8_t kAdaptiveMethodZstd = 1;
 constexpr uint8_t kAdaptiveMethodBsc = 2;
+constexpr uint8_t kAdaptiveMethodBrotli = 3;
 
 static void writeU32LE(uint32_t v, std::vector<uint8_t>& out) {
     out.push_back(static_cast<uint8_t>(v & 0xffu));
@@ -35,17 +38,44 @@ static bool bscCompress(const std::vector<uint8_t>& raw, std::vector<uint8_t>& c
     return wrapper.Compress(raw, compressed);
 }
 
-static std::vector<uint8_t> encodeAdaptiveFormatPart(const std::vector<uint8_t>& raw) {
-    std::vector<uint8_t> compressed_zstd;
-    std::vector<uint8_t> compressed_bsc;
-    bool ok_zstd = zstd::zstd_compress(raw, compressed_zstd);
-    bool ok_bsc = bscCompress(raw, compressed_bsc);
+static bool brotliCompress(const std::vector<uint8_t>& raw, std::vector<uint8_t>& compressed) {
+    size_t max_out = BrotliEncoderMaxCompressedSize(raw.size());
+    if (max_out == 0) return false;
+    compressed.resize(max_out);
+    size_t encoded = max_out;
+    const bool ok = BrotliEncoderCompress(
+        BROTLI_DEFAULT_QUALITY,
+        BROTLI_DEFAULT_WINDOW,
+        BROTLI_MODE_GENERIC,
+        raw.size(),
+        raw.data(),
+        &encoded,
+        compressed.data());
+    if (!ok) return false;
+    compressed.resize(encoded);
+    return true;
+}
+
+static std::vector<uint8_t> encodeAdaptiveFormatPart(const std::vector<uint8_t>& raw,
+                                                     adaptive_format_part_backend_t config,
+                                                     compression_backend_t follow_backend) {
+    // Resolve config -> concrete method.
+    if (config == adaptive_format_part_backend_t::follow) {
+        switch (follow_backend) {
+            case compression_backend_t::bsc:    config = adaptive_format_part_backend_t::bsc; break;
+            case compression_backend_t::zstd:   config = adaptive_format_part_backend_t::zstd; break;
+            case compression_backend_t::brotli: config = adaptive_format_part_backend_t::brotli; break;
+            default:                            config = adaptive_format_part_backend_t::bsc; break;
+        }
+    }
 
     uint8_t method = kAdaptiveMethodRaw;
     const std::vector<uint8_t>* payload = &raw;
+    std::vector<uint8_t> compressed_zstd;
+    std::vector<uint8_t> compressed_bsc;
+    std::vector<uint8_t> compressed_brotli;
 
-    size_t best_size = raw.size();
-    auto consider = [&](uint8_t m, bool ok, const std::vector<uint8_t>& c) {
+    auto consider = [&](uint8_t m, bool ok, const std::vector<uint8_t>& c, size_t& best_size) {
         if (!ok || c.empty()) return;
         if (c.size() + 12 >= raw.size()) return; // Not worth framing overhead.
         if (c.size() < best_size) {
@@ -54,8 +84,39 @@ static std::vector<uint8_t> encodeAdaptiveFormatPart(const std::vector<uint8_t>&
             payload = &c;
         }
     };
-    consider(kAdaptiveMethodZstd, ok_zstd, compressed_zstd);
-    consider(kAdaptiveMethodBsc, ok_bsc, compressed_bsc);
+
+    size_t best_size = raw.size();
+    switch (config) {
+        case adaptive_format_part_backend_t::raw:
+            method = kAdaptiveMethodRaw;
+            payload = &raw;
+            break;
+        case adaptive_format_part_backend_t::zstd: {
+            bool ok = zstd::zstd_compress(raw, compressed_zstd);
+            consider(kAdaptiveMethodZstd, ok, compressed_zstd, best_size);
+            break;
+        }
+        case adaptive_format_part_backend_t::bsc: {
+            bool ok = bscCompress(raw, compressed_bsc);
+            consider(kAdaptiveMethodBsc, ok, compressed_bsc, best_size);
+            break;
+        }
+        case adaptive_format_part_backend_t::brotli: {
+            bool ok = brotliCompress(raw, compressed_brotli);
+            consider(kAdaptiveMethodBrotli, ok, compressed_brotli, best_size);
+            break;
+        }
+        case adaptive_format_part_backend_t::auto_select:
+        default: {
+            bool ok_zstd = zstd::zstd_compress(raw, compressed_zstd);
+            bool ok_bsc = bscCompress(raw, compressed_bsc);
+            bool ok_brotli = brotliCompress(raw, compressed_brotli);
+            consider(kAdaptiveMethodZstd, ok_zstd, compressed_zstd, best_size);
+            consider(kAdaptiveMethodBsc, ok_bsc, compressed_bsc, best_size);
+            consider(kAdaptiveMethodBrotli, ok_brotli, compressed_brotli, best_size);
+            break;
+        }
+    }
 
     std::vector<uint8_t> framed;
     framed.reserve(12 + payload->size());
@@ -959,8 +1020,10 @@ bool CompressionReader::SetVariantOtherFields(vector<field_desc> &fields)
             adaptive_data.begin(), adaptive_data.end());
 
         // Check if buffer is full, flush to stream
-        if (adaptive_format_buffer_.size() >= max_buffer_size) {
-            std::vector<uint8_t> framed = encodeAdaptiveFormatPart(adaptive_format_buffer_);
+            if (adaptive_format_buffer_.size() >= max_buffer_size) {
+            std::vector<uint8_t> framed = encodeAdaptiveFormatPart(adaptive_format_buffer_,
+                                                                   adaptive_format_part_backend_,
+                                                                   backend_);
             int part_id = file_handle2->AddPartPrepare(adaptive_format_stream_id_);
             file_handle2->AddPartComplete(adaptive_format_stream_id_, part_id, framed);
             adaptive_format_buffer_.clear();
@@ -1836,7 +1899,9 @@ void CompressionReader::CloseFiles()
         // Flush remaining adaptive FORMAT data
         if (use_adaptive_format_ && adaptive_format_stream_id_ >= 0 &&
             !adaptive_format_buffer_.empty()) {
-            std::vector<uint8_t> framed = encodeAdaptiveFormatPart(adaptive_format_buffer_);
+            std::vector<uint8_t> framed = encodeAdaptiveFormatPart(adaptive_format_buffer_,
+                                                                   adaptive_format_part_backend_,
+                                                                   backend_);
             int part_id = file_handle2->AddPartPrepare(adaptive_format_stream_id_);
             file_handle2->AddPartComplete(adaptive_format_stream_id_, part_id, framed);
             adaptive_format_buffer_.clear();

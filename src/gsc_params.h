@@ -29,6 +29,16 @@ enum class adaptive_format_mode_t
     shadow,  // Write adaptive stream in addition to legacy FORMAT fields
     primary  // Write adaptive stream and omit legacy non-GT FORMAT fields
 };
+
+enum class adaptive_format_part_backend_t
+{
+    auto_select, // Try multiple codecs and pick smallest
+    follow,      // Follow --compressor backend
+    raw,         // Store raw bytes (no compression)
+    bsc,
+    zstd,
+    brotli
+};
 enum class file_type
 {
     VCF_File,
@@ -94,6 +104,7 @@ struct GSC_Params
 
     // Adaptive FORMAT compression / decompression
     adaptive_format_mode_t adaptive_format_mode;
+    adaptive_format_part_backend_t adaptive_format_part_backend;
     bool use_adaptive_format;  // Prefer adaptive FORMAT stream on decompression (VCF output recommended)
 
     GSC_Params()
@@ -141,6 +152,7 @@ struct GSC_Params
 
         // Keep legacy behavior by default unless explicitly enabled via CLI.
         adaptive_format_mode = adaptive_format_mode_t::off;
+        adaptive_format_part_backend = adaptive_format_part_backend_t::auto_select;
         use_adaptive_format = false;
     }
 };

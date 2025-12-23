@@ -28,6 +28,7 @@ GSC 的 lossless 压缩大体分层：
 ### 2.1 压缩端
 
 `./gsc compress --adaptive-format off|shadow|primary ...`
+`./gsc compress --adaptive-format-compressor auto|follow|raw|bsc|zstd|brotli ...`
 
 - `off`：完全关闭 adaptive（不写 `adaptive_format_data`），与历史行为等价。
 - `shadow`：同时写 legacy non-GT FORMAT（other_fields 路径）+ `adaptive_format_data`（用于回归验证；体积可能更大）。
@@ -101,7 +102,7 @@ GSC 的 lossless 压缩大体分层：
 做法：
 - `adaptive_format_data` 的每个 part 写入 **带 framing 的 payload**：
   - magic：`AFD1`
-  - method：`0=raw`，`1=zstd`
+  - method：`0=raw`，`1=zstd`，`2=bsc`，`3=brotli`
   - raw_size：`uint32 little-endian`
   - payload：raw 或 zstd 压缩后的 bytes
 - 解压端识别 magic；若为 zstd 则解压后再喂给 row parser；否则兼容旧 raw part。

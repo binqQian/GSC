@@ -33,6 +33,7 @@ class CompressionReader {
     bool in_open;
     bool vcf_hdr_read;
     compress_mode_t compress_mode;
+    compression_backend_t backend_;
     bool merge_flag;
     bool merge_failure_flag;
 
@@ -100,6 +101,7 @@ class CompressionReader {
     std::unique_ptr<gsc::FormatFieldManager> format_field_manager_;
     bool use_adaptive_format_ = false;  // Enable adaptive FORMAT compression
     bool adaptive_format_primary_ = false;  // Omit legacy non-GT FORMAT fields when true
+    adaptive_format_part_backend_t adaptive_format_part_backend_ = adaptive_format_part_backend_t::auto_select;
     std::vector<std::string> current_format_keys_;  // FORMAT keys for current row
     uint32_t current_allele_count_ = 2;  // Allele count for current row
 
@@ -172,6 +174,7 @@ public:
         in_file_name = params.in_file_name;
         in_type = params.in_type;
         compress_mode = params.compress_mode;
+        backend_ = params.backend;
         merge_flag = params.merge_file_flag;
         merge_failure_flag = false;
         v_vcf_data_compress.reserve(no_variants_in_buf);
@@ -188,6 +191,7 @@ public:
         use_adaptive_format_ = (params.compress_mode == compress_mode_t::lossless_mode) &&
                               (params.adaptive_format_mode != adaptive_format_mode_t::off);
         adaptive_format_primary_ = (params.adaptive_format_mode == adaptive_format_mode_t::primary);
+        adaptive_format_part_backend_ = params.adaptive_format_part_backend;
     }
     
   

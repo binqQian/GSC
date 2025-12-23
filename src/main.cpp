@@ -65,6 +65,16 @@ compression_backend_t parse_backend(const std::string &name) {
     if (name == "brotli") return compression_backend_t::brotli;
     return compression_backend_t::bsc;
 }
+
+adaptive_format_part_backend_t parse_adaptive_part_backend(const std::string& name) {
+    if (name == "auto") return adaptive_format_part_backend_t::auto_select;
+    if (name == "follow") return adaptive_format_part_backend_t::follow;
+    if (name == "raw") return adaptive_format_part_backend_t::raw;
+    if (name == "bsc") return adaptive_format_part_backend_t::bsc;
+    if (name == "zstd") return adaptive_format_part_backend_t::zstd;
+    if (name == "brotli") return adaptive_format_part_backend_t::brotli;
+    return adaptive_format_part_backend_t::auto_select;
+}
 //--------------------------------------------------------------------------------
 GSC_Params params;
 // Show execution options
@@ -97,6 +107,7 @@ Where:
     -i,  --in [in_file]    Specify the input file (default: VCF or VCF.GZ). If omitted, input is taken from standard input (stdin).
     -o,  --out [out_file]  Specify the output file. If omitted, output is sent to standard output (stdout).
     --compressor [name]    Select compressor: bsc (default), zstd, brotli.
+    --adaptive-format-compressor [name]  Select compressor for adaptive_format_data parts: auto (default), follow, raw, bsc, zstd, brotli.
 
 Options:
 
@@ -127,6 +138,7 @@ Where:
     -i,  --in [in_file]    Specify the input file . If omitted, input is taken from standard input (stdin).
     -o,  --out [out_file]  Specify the output file (default: VCF). If omitted, output is sent to standard output (stdout).
     --compressor [name]    Select compressor: bsc (default), zstd, brotli.
+    --adaptive-format-compressor [name]  (compression only) Select compressor for adaptive_format_data parts: auto (default), follow, raw, bsc, zstd, brotli.
 
 Options:
 
@@ -337,6 +349,18 @@ int params_options(int argc, const char *argv[]){
                     return usage_compress();
                 }
                 params.backend = parse_backend(backend_name);
+            }
+            else if (strcmp(argv[i], "--adaptive-format-compressor") == 0) {
+                i++;
+                if (i >= argc)
+                    return usage_compress();
+                std::string backend_name = argv[i];
+                if (backend_name != "auto" && backend_name != "follow" && backend_name != "raw" &&
+                    backend_name != "bsc" && backend_name != "zstd" && backend_name != "brotli") {
+                    logger->error("Unsupported --adaptive-format-compressor: {}", backend_name);
+                    return usage_compress();
+                }
+                params.adaptive_format_part_backend = parse_adaptive_part_backend(backend_name);
             }
             else if (strcmp(argv[i], "--adaptive-format") == 0) {
                 i++;
@@ -549,6 +573,12 @@ int params_options(int argc, const char *argv[]){
                     return usage_decompress();
                 }
                 params.backend = parse_backend(backend_name);
+            }
+            else if (strcmp(argv[i], "--adaptive-format-compressor") == 0) {
+                // Decompression reads the actual backend from the file; accept and ignore for CLI symmetry.
+                i++;
+                if (i >= argc)
+                    return usage_decompress();
             }
             else if (strcmp(argv[i], "--use-adaptive-format") == 0) {
                 params.use_adaptive_format = true;

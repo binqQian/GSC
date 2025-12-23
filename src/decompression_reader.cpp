@@ -6,6 +6,7 @@
 #include <chrono>
 #include <cstring>
 #include <mutex>
+#include <brotli/decode.h>
 #include <limits>
 
 using namespace std::chrono;
@@ -571,6 +572,34 @@ bool DecompressionReader::refillAdaptiveFormatBuffer(size_t min_bytes)
                 std::vector<uint8_t> payload_vec(payload, payload + payload_size);
                 if (!CBSCWrapper::Decompress(payload_vec, decoded)) {
                     decoded = part;
+                }
+            } else if (method == 3) {
+                BrotliDecoderState* state = BrotliDecoderCreateInstance(nullptr, nullptr, nullptr);
+                if (!state) {
+                    decoded = part;
+                } else {
+                    size_t available_in = payload_size;
+                    const uint8_t* next_in = payload;
+                    std::vector<uint8_t> buffer(1024);
+                    decoded.clear();
+
+                    BrotliDecoderResult result = BROTLI_DECODER_RESULT_NEEDS_MORE_OUTPUT;
+                    while (result == BROTLI_DECODER_RESULT_NEEDS_MORE_OUTPUT ||
+                           result == BROTLI_DECODER_RESULT_NEEDS_MORE_INPUT) {
+                        size_t available_out = buffer.size();
+                        uint8_t* next_out = buffer.data();
+                        result = BrotliDecoderDecompressStream(state, &available_in, &next_in,
+                                                              &available_out, &next_out, nullptr);
+                        const size_t produced = buffer.size() - available_out;
+                        decoded.insert(decoded.end(), buffer.data(), buffer.data() + produced);
+                        if (result == BROTLI_DECODER_RESULT_NEEDS_MORE_OUTPUT) {
+                            buffer.resize(buffer.size() * 2);
+                        }
+                    }
+                    BrotliDecoderDestroyInstance(state);
+                    if (result != BROTLI_DECODER_RESULT_SUCCESS) {
+                        decoded = part;
+                    }
                 }
             } else {
                 decoded = part;

@@ -18,6 +18,10 @@
 - `shadow`：同时写 legacy non-GT FORMAT（other_fields 路径）+ `adaptive_format_data`（用于回归验证；体积通常最大）。
 - `primary`：写 `adaptive_format_data`，并**只对 adaptive row 实际包含的 tag 抑制 legacy non-GT FORMAT**；adaptive 未覆盖的 tag 仍走 legacy。
   - `primary` 额外策略：若某 tag 的 codec 退化成 `RawString`，该 tag 会被 **omit** 出 adaptive row（避免“typed+后端压缩”退化成“raw string + 元数据”导致体积暴涨）。
+- `--adaptive-format-compressor auto|follow|raw|bsc|zstd|brotli`：选择 `adaptive_format_data` 的 part 压缩后端。
+  - `auto`（默认）：在 `zstd/bsc/brotli` 中择优（挑最小）。
+  - `follow`：跟随全局 `--compressor`。
+  - `raw`：不压缩（仅 framing）。
 
 ### 解压端
 
@@ -42,7 +46,7 @@
 
 - stream：`adaptive_format_data`（写入/读取在 `File_Handle_2` 内）
 - part framing（新）：`AFD1` + `method` + `raw_size(u32le)` + `payload`
-  - `method=0` raw；`method=1` zstd；`method=2` bsc
+  - `method=0` raw；`method=1` zstd；`method=2` bsc；`method=3` brotli
   - payload 解压后为 row stream bytes（见下）
 - 兼容性：老文件可能是“无 framing 的 raw part”；读端会自动兼容。
 
@@ -149,4 +153,3 @@ ls -lh toy/test_off.gsc toy/test_primary.gsc
 ./gsc decompress --use-adaptive-format --in toy/test_primary.gsc --out tmp/primary.vcf
 diff -q tmp/off.vcf tmp/primary.vcf
 ```
-
