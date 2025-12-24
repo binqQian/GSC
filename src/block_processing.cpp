@@ -65,7 +65,10 @@ void BlockProcess::permute_range_vec(uint64_t id_start, uint64_t id_stop, vector
 
     // uint8_t* comp_samples_indexes = new uint8_t[max_no_vec_in_block*max_no_vec_in_block];
     vector<uint32_t> sparse_matrix_cols;
-    sparse_matrix_cols.reserve(max_no_vec_in_block*n_h_samples);
+    // Avoid pathological reserve for large cohorts (can allocate GBs on tiled layouts).
+    size_t reserve_hint = max_no_vec_in_block * static_cast<size_t>(64);
+    reserve_hint = std::min(reserve_hint, max_no_vec_in_block * n_h_samples);
+    sparse_matrix_cols.reserve(reserve_hint);
 
     no_copy = 0;
 

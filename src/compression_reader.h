@@ -125,10 +125,11 @@ class CompressionReader {
     vector<int64_t> chunks_min_pos;
     bool start_flag;
 
-    // Parallel VCF reading
-    gsc::ParallelVCFReader* parallel_reader_;
-    int num_parse_threads_;
-    bool use_parallel_reading_;
+	    // Parallel VCF reading
+	    gsc::ParallelVCFReader* parallel_reader_;
+	    int num_parse_threads_;
+	    bool use_parallel_reading_;
+        uint64_t max_memory_mb_;
 
     // int temp_count = 0;
     #ifdef LOG_INFO
@@ -148,7 +149,7 @@ class CompressionReader {
     
 public:
 
-    CompressionReader() {
+	    CompressionReader() {
         in_open = false;
         vcf_hdr_read = false;
         no_samples = 0;
@@ -159,11 +160,12 @@ public:
         no_vec = 0;
         start_flag = true;
         field_order_flag = false;
-        parallel_reader_ = nullptr;
-        num_parse_threads_ = 1;
-        use_parallel_reading_ = false;
-    }
-    CompressionReader(const GSC_Params & params) {
+	        parallel_reader_ = nullptr;
+	        num_parse_threads_ = 1;
+	        use_parallel_reading_ = false;
+            max_memory_mb_ = 0;
+	    }
+	    CompressionReader(const GSC_Params & params) {
         in_open = false;
         vcf_hdr_read = false;
         no_samples = 0;
@@ -182,14 +184,15 @@ public:
         no_vec = 0;
         start_flag = true;
         field_order_flag = false;
-        parallel_reader_ = nullptr;
-        num_parse_threads_ = params.no_threads;
-        use_parallel_reading_ = (num_parse_threads_ > 1);
+	        parallel_reader_ = nullptr;
+	        num_parse_threads_ = (params.no_parse_threads == 0) ? 1 : static_cast<int>(params.no_parse_threads);
+	        use_parallel_reading_ = (num_parse_threads_ > 1);
+            max_memory_mb_ = params.max_memory_mb;
 
-        // Initialize adaptive FORMAT compression
-        format_field_manager_ = std::make_unique<gsc::FormatFieldManager>();
-        use_adaptive_format_ = (params.compress_mode == compress_mode_t::lossless_mode) &&
-                              (params.adaptive_format_mode != adaptive_format_mode_t::off);
+	        // Initialize adaptive FORMAT compression
+	        format_field_manager_ = std::make_unique<gsc::FormatFieldManager>();
+	        use_adaptive_format_ = (params.compress_mode == compress_mode_t::lossless_mode) &&
+	                              (params.adaptive_format_mode != adaptive_format_mode_t::off);
         adaptive_format_primary_ = (params.adaptive_format_mode == adaptive_format_mode_t::primary);
         adaptive_format_part_backend_ = params.adaptive_format_part_backend;
     }

@@ -83,6 +83,9 @@ struct GSC_Params
 
     uint32_t no_threads;
     uint32_t no_gt_threads;
+    uint32_t no_parse_threads;       // Threads for VCF parsing
+    uint32_t queue_capacity;         // Max blocks in GT queue (0 = auto)
+    uint64_t max_memory_mb;          // Memory limit in MB (0 = no limit)
     uint32_t var_in_block;
     uint32_t ploidy;
     uint64_t vec_len;
@@ -128,8 +131,12 @@ struct GSC_Params
         max_block_rows = 10000;
         max_block_cols = 10000;
         ploidy = 2;
-        no_threads = 5;
+        no_threads = 4;
+        // Conservative defaults for large cohorts; users can override explicitly.
         no_gt_threads = 1;
+        no_parse_threads = 1;
+        queue_capacity = 0;          // 0 = auto (will be calculated based on memory)
+        max_memory_mb = 0;           // 0 = no limit (use system memory)
         var_in_block = 0;
         vec_len = 0;
         n_samples = 0;

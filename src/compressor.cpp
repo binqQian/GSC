@@ -1,5 +1,6 @@
 #include "compressor.h"
 #include "logger.h"
+#include "memory_monitor.h"
 #include <iostream>
 #include <fstream>
 
@@ -514,8 +515,37 @@ bool Compressor::CompressProcess()
                       (params.max_block_cols == 0 || params.max_block_cols >= total_haplotypes) &&
                       (params.max_block_rows == 0 || params.max_block_rows == total_haplotypes);
 
-    logger->info("Number of GT threads: {}", params.no_gt_threads);
-    GtBlockQueue inGtBlockQueue(max((int)(params.no_blocks * params.no_gt_threads), 8));
+    // Calculate queue capacity based on memory limit or use specified value
+    size_t queue_capacity = params.queue_capacity;
+    if (queue_capacity == 0) {
+        // Auto-calculate based on memory limit or reasonable defaults
+        // Each GT block uses approximately: col_vec_len * max_block_rows * 2 bytes per column block
+        size_t bytes_per_row_block = 0;
+        for (uint32_t cb = 0; cb < n_col_blocks; ++cb) {
+            bytes_per_row_block += col_block_vec_lens[cb] * params.max_block_rows * 2;
+        }
+        bytes_per_row_block = std::max(bytes_per_row_block, (size_t)(1024 * 1024)); // At least 1MB estimate
+
+        if (params.max_memory_mb > 0) {
+            // Use 30% of max memory for GT queue
+            size_t queue_memory = (params.max_memory_mb * 1024 * 1024) * 30 / 100;
+            queue_capacity = std::max((size_t)4, queue_memory / bytes_per_row_block);
+        } else {
+            // Default: small queue to limit memory
+            queue_capacity = std::max((size_t)4, std::min((size_t)16, (size_t)(params.no_gt_threads * 4)));
+        }
+    }
+
+    logger->info("Number of GT threads: {}, queue capacity: {}", params.no_gt_threads, queue_capacity);
+    logger->info("Column blocks: {}, total haplotypes: {}", n_col_blocks, total_haplotypes);
+    logger->info("Current memory: {}", gsc::MemoryMonitor::GetMemoryUsageString());
+    if (params.max_memory_mb > 0) {
+        logger->info("Memory limit: {} MB", params.max_memory_mb);
+    } else {
+        uint64_t available_mb = gsc::MemoryMonitor::GetAvailableMemoryKB() / 1024;
+        logger->info("Available system memory: {} MB", available_mb);
+    }
+    GtBlockQueue inGtBlockQueue(queue_capacity);
 
     // VarBlockQueue<fixed_fixed_field_block> inVarBlockQueue(max((int)params.no_threads * 2, 8));
     VarBlockQueue<fixed_field_chunk> sortVarBlockQueue(max((int)params.no_threads * 2, 8));
