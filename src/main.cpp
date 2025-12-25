@@ -24,16 +24,12 @@
 #include "decompressor.h"
 
 #include "logger.h"
-#include "memory_monitor.h"
-#include "resource_manager.h"
 
 // #include <algorithm>
 
 #include <cstdio>
 
 #include <vector>
-#include <new>
-#include <exception>
 
 // #include <list>
 
@@ -117,19 +113,14 @@ Options:
 
     -M,  --mode_lossly     Choose lossy compression mode (lossless by default).
     -b,  --bcf             Input is a BCF file (default: VCF or VCF.GZ).
-	    -p,  --ploidy [X]      Set ploidy of samples in input VCF to [X] (default: 2).
-	        --max-block-rows [X]  Max variants per GT block (default: 10000).
-	        --max-block-cols [X]  Max haplotypes (samples * ploidy) per GT column block (default: 10000).
-		    -t,  --threads [X]     Set number of compression threads to [X] (default: auto).
-	        --gt-threads [X]   Set number of genotype processing threads (default: auto; 0 = auto).
-	        --parse-threads [X] Set number of VCF parsing threads (default: auto; 0 = auto).
-	        --queue-capacity [X] Set max blocks in GT queue (0 = auto; default: auto).
-	        --max-memory [X]   Hard memory limit in MB via RLIMIT_AS (default: no limit).
-	        --show-resource-plan  Print auto-configured resource plan (threads/memory/queue).
-		    -d,  --depth [X]       Set maximum replication depth to [X] (default: 100, 0 means no matches).
-		    -m,  --merge [X]       Specify files to merge, separated by commas (e.g., -m chr1.vcf,chr2.vcf), or '@' followed by a file containing a list of VCF files (e.g., -m @file_with_IDs.txt). By default, all VCF files are compressed.
-		        --adaptive-format [off|shadow|primary]  FORMAT adaptive mode: off disables; shadow writes extra stream; primary omits legacy non-GT FORMAT.
-	    -I,  --integrity [mode] Enable integrity hash: none (default), xxhash64/xxhash/fast.
+    -p,  --ploidy [X]      Set ploidy of samples in input VCF to [X] (default: 2).
+        --max-block-rows [X]  Max variants per GT block (default: 10000).
+        --max-block-cols [X]  Max haplotypes (samples * ploidy) per GT column block (default: 10000).
+	    -t,  --threads [X]     Set number of threads to [X] (default: 1).
+	    -d,  --depth [X]       Set maximum replication depth to [X] (default: 100, 0 means no matches).
+	    -m,  --merge [X]       Specify files to merge, separated by commas (e.g., -m chr1.vcf,chr2.vcf), or '@' followed by a file containing a list of VCF files (e.g., -m @file_with_IDs.txt). By default, all VCF files are compressed.
+	        --adaptive-format [off|shadow|primary]  FORMAT adaptive mode: off disables; shadow writes extra stream; primary omits legacy non-GT FORMAT.
+    -I,  --integrity [mode] Enable integrity hash: none (default), xxhash64/xxhash/fast.
 )");
 
     exit(0);
@@ -162,7 +153,6 @@ Options:
 	        --use-adaptive-format Prefer adaptive_format_data for non-GT FORMAT reconstruction (recommended with VCF output).
 	        --verify              Force integrity verification if hash is present (default: enabled).
 	        --no-verify           Skip integrity verification even if hash is stored.
-	        --max-memory [X]      Limit memory usage to [X] MB (default: no limit).
 	        --header-only         Output only the header of the VCF/BCF.
 	        --no-header           Output without the VCF/BCF header (only genotypes).
 	        -G,  --no-genotype    Don't output sample genotypes (only #CHROM, POS, ID, REF, ALT, QUAL, FILTER, and INFO columns).
@@ -451,44 +441,6 @@ int params_options(int argc, const char *argv[]){
 
                 params.no_threads = temp;
             }
-            else if (strcmp(argv[i], "--gt-threads") == 0){
-                i++;
-                if (i >= argc)
-                    return usage_compress();
-                temp = atoi(argv[i]);
-                if (temp < 0)
-                    usage_compress();
-                params.no_gt_threads = temp;
-            }
-            else if (strcmp(argv[i], "--parse-threads") == 0){
-                i++;
-                if (i >= argc)
-                    return usage_compress();
-                temp = atoi(argv[i]);
-                if (temp < 0)
-                    usage_compress();
-                params.no_parse_threads = temp;
-            }
-            else if (strcmp(argv[i], "--queue-capacity") == 0){
-                i++;
-                if (i >= argc)
-                    return usage_compress();
-                temp = atoi(argv[i]);
-                if (temp < 0)
-                    usage_compress();
-                params.queue_capacity = temp;
-            }
-            else if (strcmp(argv[i], "--max-memory") == 0){
-                i++;
-                if (i >= argc)
-                    return usage_compress();
-                long long mem_mb = atoll(argv[i]);
-                if (mem_mb < 100) {
-                    logger->error("--max-memory must be at least 100 MB");
-                    usage_compress();
-                }
-                params.max_memory_mb = static_cast<uint64_t>(mem_mb);
-            }
             else if (strcmp(argv[i], "--integrity") == 0 || strcmp(argv[i], "-I") == 0){
                 i++;
                 if (i >= argc)
@@ -502,9 +454,6 @@ int params_options(int argc, const char *argv[]){
                     logger->error("Unsupported --integrity mode: {}. Use 'none', 'xxhash64', or 'fast'.", mode);
                     return usage_compress();
                 }
-            }
-            else if (strcmp(argv[i], "--show-resource-plan") == 0){
-                params.show_resource_plan = true;
             }
         }
         if(isatty(STDIN_FILENO) && params.in_file_name == "-"){
@@ -589,17 +538,6 @@ int params_options(int argc, const char *argv[]){
                     usage_decompress();
 
                 params.no_threads = temp;
-            }
-            else if (strcmp(argv[i], "--max-memory") == 0){
-                i++;
-                if (i >= argc)
-                    return usage_decompress();
-                long long mem_mb = atoll(argv[i]);
-                if (mem_mb < 100) {
-                    logger->error("--max-memory must be at least 100 MB");
-                    return usage_decompress();
-                }
-                params.max_memory_mb = static_cast<uint64_t>(mem_mb);
             }
             else if (strcmp(argv[i], "--level") == 0 || strcmp(argv[i], "-l") == 0){
                 
@@ -843,36 +781,13 @@ int compress_entry()
 
 {
 
-    auto logger = LogManager::Instance().Logger();
-    if (params.max_memory_mb > 0)
-    {
-        if (!gsc::MemoryMonitor::ApplyMemoryLimitMB(params.max_memory_mb))
-        {
-            logger->warn("Failed to apply memory limit ({} MB); continuing without hard limit", params.max_memory_mb);
-        }
-        else
-        {
-            logger->info("Applied hard memory limit: {} MB", params.max_memory_mb);
-        }
-    }
+    Compressor compressor(params);  //Passing compression parameters.
+    if(!compressor.CompressProcess())
+        return 1;
 
-    try
-    {
-        Compressor compressor(params);  //Passing compression parameters.
-        if(!compressor.CompressProcess())
-            return 1;
-        return 0;
-    }
-    catch (const std::bad_alloc& e)
-    {
-        logger->error("Out of memory: {}", e.what());
-        return 1;
-    }
-    catch (const std::exception& e)
-    {
-        logger->error("Unhandled exception: {}", e.what());
-        return 1;
-    }
+
+
+    return 0;
 }    
 // *********************************************************************************************************************
 //  Program decompression inlet
@@ -883,34 +798,14 @@ int decompress_entry(){
 
         return usage_decompress();
 
-    auto logger = LogManager::Instance().Logger();
-    if (params.max_memory_mb > 0)
-    {
-        if (!gsc::MemoryMonitor::ApplyMemoryLimitMB(params.max_memory_mb))
-        {
-            logger->warn("Failed to apply memory limit ({} MB); continuing without hard limit", params.max_memory_mb);
-        }
-        else
-        {
-            logger->info("Applied hard memory limit: {} MB", params.max_memory_mb);
-        }
-    }
+    Decompressor decompressor(params);    // Load settings and data
 
-    try
-    {
-        Decompressor decompressor(params);    // Load settings and data
-        if(!decompressor.decompressProcess())
-            return 1;
-        return 0;
-    }
-    catch (const std::bad_alloc& e)
-    {
-        logger->error("Out of memory: {}", e.what());
+    // decompressor.getChrom();              //Obtaining chromosome information.
+
+       
+    if(!decompressor.decompressProcess())
         return 1;
-    }
-    catch (const std::exception& e)
-    {
-        logger->error("Unhandled exception: {}", e.what());
-        return 1;
-    }
+        
+
+    return 0;
 }

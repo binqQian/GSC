@@ -4,7 +4,7 @@
 
 namespace gsc {
 
-ParallelVCFReader::ParallelVCFReader(int threads, size_t batch_size)
+ParallelVCFReader::ParallelVCFReader(int threads)
     : fp_hts_(nullptr)
     , hdr_(nullptr)
     , num_threads_(threads)
@@ -14,7 +14,6 @@ ParallelVCFReader::ParallelVCFReader(int threads, size_t batch_size)
     , next_seq_to_process_(0)
     , total_parsed_(0)
     , parsing_finished_(false)
-    , batch_size_(batch_size ? batch_size : VCF_PARSE_DEFAULT_BATCH_SIZE)
 {
 }
 
@@ -145,11 +144,11 @@ std::vector<bcf1_t*> ParallelVCFReader::ParseNextBatch()
     }
 
     std::vector<bcf1_t*> batch_records;
-    batch_records.reserve(batch_size_);
+    batch_records.reserve(VCF_PARSE_BATCH_SIZE);
 
     // BCF mode: direct bcf_read() call (no parallelization needed)
     if (!use_parallel_parsing_) {
-        for (size_t i = 0; i < batch_size_; ++i) {
+        for (size_t i = 0; i < VCF_PARSE_BATCH_SIZE; ++i) {
             bcf1_t* rec = bcf_init();
             if (bcf_read(fp_hts_, hdr_, rec) == 0) {
                 batch_records.push_back(rec);
@@ -168,7 +167,7 @@ std::vector<bcf1_t*> ParallelVCFReader::ParseNextBatch()
     kstring_t kstr = {0, 0, nullptr};
 
     // Read and submit lines to parser threads
-    while (batch_count < batch_size_) {
+    while (batch_count < VCF_PARSE_BATCH_SIZE) {
         int ret;
         if (fp_hts_->format.compression == htsCompression::bgzf) {
             ret = bgzf_getline(fp_hts_->fp.bgzf, '\n', &kstr);

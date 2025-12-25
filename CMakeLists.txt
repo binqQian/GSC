@@ -80,7 +80,6 @@ set(SOURCES
     src/codecs/bit_tip_array_codec.cpp
     src/codecs/sparse_dict_codec.cpp
     src/integrity_checker.cpp
-    src/resource_manager.cpp
     include/cpp-mmf/memory_mapped_file.cpp
 )
 

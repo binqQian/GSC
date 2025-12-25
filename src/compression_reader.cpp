@@ -9,136 +9,105 @@
 #include <sstream>
 #include <mutex>
 #include <limits>
-#include <cstdint>
-#include <cstdlib>
 #include <htslib/vcf.h>
-#include <htslib/hts.h>
 #include <brotli/encode.h>
 
-namespace
-{
-    constexpr uint8_t kAdaptiveMagic[4] = {'A', 'F', 'D', '1'}; // Adaptive Format Data v1
-    constexpr uint8_t kAdaptiveMethodRaw = 0;
-    constexpr uint8_t kAdaptiveMethodZstd = 1;
-    constexpr uint8_t kAdaptiveMethodBsc = 2;
-    constexpr uint8_t kAdaptiveMethodBrotli = 3;
+namespace {
+constexpr uint8_t kAdaptiveMagic[4] = {'A', 'F', 'D', '1'}; // Adaptive Format Data v1
+constexpr uint8_t kAdaptiveMethodRaw = 0;
+constexpr uint8_t kAdaptiveMethodZstd = 1;
+constexpr uint8_t kAdaptiveMethodBsc = 2;
+constexpr uint8_t kAdaptiveMethodBrotli = 3;
 
-    static void writeU32LE(uint32_t v, std::vector<uint8_t> &out)
-    {
-        out.push_back(static_cast<uint8_t>(v & 0xffu));
-        out.push_back(static_cast<uint8_t>((v >> 8) & 0xffu));
-        out.push_back(static_cast<uint8_t>((v >> 16) & 0xffu));
-        out.push_back(static_cast<uint8_t>((v >> 24) & 0xffu));
+static void writeU32LE(uint32_t v, std::vector<uint8_t>& out) {
+    out.push_back(static_cast<uint8_t>(v & 0xffu));
+    out.push_back(static_cast<uint8_t>((v >> 8) & 0xffu));
+    out.push_back(static_cast<uint8_t>((v >> 16) & 0xffu));
+    out.push_back(static_cast<uint8_t>((v >> 24) & 0xffu));
+}
+
+static bool bscCompress(const std::vector<uint8_t>& raw, std::vector<uint8_t>& compressed) {
+    static std::once_flag init_flag;
+    std::call_once(init_flag, []() { CBSCWrapper::InitLibrary(p_bsc_features); });
+
+    CBSCWrapper wrapper;
+    if (!wrapper.InitCompress(p_bsc_text)) {
+        return false;
     }
 
-    static bool bscCompress(const std::vector<uint8_t> &raw, std::vector<uint8_t> &compressed)
-    {
-        static std::once_flag init_flag;
-        std::call_once(init_flag, []()
-                       { CBSCWrapper::InitLibrary(p_bsc_features); });
+    return wrapper.Compress(raw, compressed);
+}
 
-        CBSCWrapper wrapper;
-        if (!wrapper.InitCompress(p_bsc_text))
-        {
-            return false;
+static bool brotliCompress(const std::vector<uint8_t>& raw, std::vector<uint8_t>& compressed) {
+    size_t max_out = BrotliEncoderMaxCompressedSize(raw.size());
+    if (max_out == 0) return false;
+    compressed.resize(max_out);
+    size_t encoded = max_out;
+    const bool ok = BrotliEncoderCompress(
+        BROTLI_DEFAULT_QUALITY,
+        BROTLI_DEFAULT_WINDOW,
+        BROTLI_MODE_GENERIC,
+        raw.size(),
+        raw.data(),
+        &encoded,
+        compressed.data());
+    if (!ok) return false;
+    compressed.resize(encoded);
+    return true;
+}
+
+static std::vector<uint8_t> encodeAdaptiveFormatPart(const std::vector<uint8_t>& raw,
+                                                     adaptive_format_part_backend_t config,
+                                                     compression_backend_t follow_backend) {
+    // Resolve config -> concrete method.
+    if (config == adaptive_format_part_backend_t::follow) {
+        switch (follow_backend) {
+            case compression_backend_t::bsc:    config = adaptive_format_part_backend_t::bsc; break;
+            case compression_backend_t::zstd:   config = adaptive_format_part_backend_t::zstd; break;
+            case compression_backend_t::brotli: config = adaptive_format_part_backend_t::brotli; break;
+            default:                            config = adaptive_format_part_backend_t::bsc; break;
         }
-
-        return wrapper.Compress(raw, compressed);
     }
 
-    static bool brotliCompress(const std::vector<uint8_t> &raw, std::vector<uint8_t> &compressed)
-    {
-        size_t max_out = BrotliEncoderMaxCompressedSize(raw.size());
-        if (max_out == 0)
-            return false;
-        compressed.resize(max_out);
-        size_t encoded = max_out;
-        const bool ok = BrotliEncoderCompress(
-            BROTLI_DEFAULT_QUALITY,
-            BROTLI_DEFAULT_WINDOW,
-            BROTLI_MODE_GENERIC,
-            raw.size(),
-            raw.data(),
-            &encoded,
-            compressed.data());
-        if (!ok)
-            return false;
-        compressed.resize(encoded);
-        return true;
-    }
+    uint8_t method = kAdaptiveMethodRaw;
+    const std::vector<uint8_t>* payload = &raw;
+    std::vector<uint8_t> compressed_zstd;
+    std::vector<uint8_t> compressed_bsc;
+    std::vector<uint8_t> compressed_brotli;
 
-    static std::vector<uint8_t> encodeAdaptiveFormatPart(const std::vector<uint8_t> &raw,
-                                                         adaptive_format_part_backend_t config,
-                                                         compression_backend_t follow_backend)
-    {
-        // Resolve config -> concrete method.
-        if (config == adaptive_format_part_backend_t::follow)
-        {
-            switch (follow_backend)
-            {
-            case compression_backend_t::bsc:
-                config = adaptive_format_part_backend_t::bsc;
-                break;
-            case compression_backend_t::zstd:
-                config = adaptive_format_part_backend_t::zstd;
-                break;
-            case compression_backend_t::brotli:
-                config = adaptive_format_part_backend_t::brotli;
-                break;
-            default:
-                config = adaptive_format_part_backend_t::bsc;
-                break;
-            }
+    auto consider = [&](uint8_t m, bool ok, const std::vector<uint8_t>& c, size_t& best_size) {
+        if (!ok || c.empty()) return;
+        if (c.size() + 12 >= raw.size()) return; // Not worth framing overhead.
+        if (c.size() < best_size) {
+            best_size = c.size();
+            method = m;
+            payload = &c;
         }
+    };
 
-        uint8_t method = kAdaptiveMethodRaw;
-        const std::vector<uint8_t> *payload = &raw;
-        std::vector<uint8_t> compressed_zstd;
-        std::vector<uint8_t> compressed_bsc;
-        std::vector<uint8_t> compressed_brotli;
-
-        auto consider = [&](uint8_t m, bool ok, const std::vector<uint8_t> &c, size_t &best_size)
-        {
-            if (!ok || c.empty())
-                return;
-            if (c.size() + 12 >= raw.size())
-                return; // Not worth framing overhead.
-            if (c.size() < best_size)
-            {
-                best_size = c.size();
-                method = m;
-                payload = &c;
-            }
-        };
-
-        size_t best_size = raw.size();
-        switch (config)
-        {
+    size_t best_size = raw.size();
+    switch (config) {
         case adaptive_format_part_backend_t::raw:
             method = kAdaptiveMethodRaw;
             payload = &raw;
             break;
-        case adaptive_format_part_backend_t::zstd:
-        {
+        case adaptive_format_part_backend_t::zstd: {
             bool ok = zstd::zstd_compress(raw, compressed_zstd);
             consider(kAdaptiveMethodZstd, ok, compressed_zstd, best_size);
             break;
         }
-        case adaptive_format_part_backend_t::bsc:
-        {
+        case adaptive_format_part_backend_t::bsc: {
             bool ok = bscCompress(raw, compressed_bsc);
             consider(kAdaptiveMethodBsc, ok, compressed_bsc, best_size);
             break;
         }
-        case adaptive_format_part_backend_t::brotli:
-        {
+        case adaptive_format_part_backend_t::brotli: {
             bool ok = brotliCompress(raw, compressed_brotli);
             consider(kAdaptiveMethodBrotli, ok, compressed_brotli, best_size);
             break;
         }
         case adaptive_format_part_backend_t::auto_select:
-        default:
-        {
+        default: {
             bool ok_zstd = zstd::zstd_compress(raw, compressed_zstd);
             bool ok_bsc = bscCompress(raw, compressed_bsc);
             bool ok_brotli = brotliCompress(raw, compressed_brotli);
@@ -147,159 +116,129 @@ namespace
             consider(kAdaptiveMethodBrotli, ok_brotli, compressed_brotli, best_size);
             break;
         }
-        }
-
-        std::vector<uint8_t> framed;
-        framed.reserve(12 + payload->size());
-        framed.push_back(kAdaptiveMagic[0]);
-        framed.push_back(kAdaptiveMagic[1]);
-        framed.push_back(kAdaptiveMagic[2]);
-        framed.push_back(kAdaptiveMagic[3]);
-        framed.push_back(method);
-        framed.push_back(0);
-        framed.push_back(0);
-        framed.push_back(0);
-        writeU32LE(static_cast<uint32_t>(raw.size()), framed);
-        framed.insert(framed.end(), payload->begin(), payload->end());
-        return framed;
     }
 
-    static std::unordered_set<uint32_t> parseAdaptiveRowKeyIds(const std::vector<uint8_t> &adaptive_row,
-                                                               bcf_hdr_t *hdr)
-    {
-        std::unordered_set<uint32_t> ids;
-        if (adaptive_row.empty() || hdr == nullptr)
-            return ids;
+    std::vector<uint8_t> framed;
+    framed.reserve(12 + payload->size());
+    framed.push_back(kAdaptiveMagic[0]);
+    framed.push_back(kAdaptiveMagic[1]);
+    framed.push_back(kAdaptiveMagic[2]);
+    framed.push_back(kAdaptiveMagic[3]);
+    framed.push_back(method);
+    framed.push_back(0);
+    framed.push_back(0);
+    framed.push_back(0);
+    writeU32LE(static_cast<uint32_t>(raw.size()), framed);
+    framed.insert(framed.end(), payload->begin(), payload->end());
+    return framed;
+}
 
-        size_t pos = 0;
-        uint32_t field_count = vint_code::ReadVint(adaptive_row.data(), adaptive_row.size(), pos);
-        ids.reserve(field_count);
+static std::unordered_set<uint32_t> parseAdaptiveRowKeyIds(const std::vector<uint8_t>& adaptive_row,
+                                                           bcf_hdr_t* hdr) {
+    std::unordered_set<uint32_t> ids;
+    if (adaptive_row.empty() || hdr == nullptr) return ids;
 
-        for (uint32_t fi = 0; fi < field_count && pos < adaptive_row.size(); ++fi)
-        {
-            uint32_t name_len = vint_code::ReadVint(adaptive_row.data(), adaptive_row.size(), pos);
-            if (pos + name_len > adaptive_row.size())
-                break;
-            std::string name(reinterpret_cast<const char *>(adaptive_row.data() + pos), name_len);
-            pos += name_len;
+    size_t pos = 0;
+    uint32_t field_count = vint_code::ReadVint(adaptive_row.data(), adaptive_row.size(), pos);
+    ids.reserve(field_count);
 
-            int tag_id = bcf_hdr_id2int(hdr, BCF_DT_ID, name.c_str());
-            if (tag_id >= 0)
-                ids.insert(static_cast<uint32_t>(tag_id));
+    for (uint32_t fi = 0; fi < field_count && pos < adaptive_row.size(); ++fi) {
+        uint32_t name_len = vint_code::ReadVint(adaptive_row.data(), adaptive_row.size(), pos);
+        if (pos + name_len > adaptive_row.size()) break;
+        std::string name(reinterpret_cast<const char*>(adaptive_row.data() + pos), name_len);
+        pos += name_len;
 
-            uint32_t codec_size = vint_code::ReadVint(adaptive_row.data(), adaptive_row.size(), pos);
-            if (pos + codec_size > adaptive_row.size())
-                break;
-            pos += codec_size;
-        }
+        int tag_id = bcf_hdr_id2int(hdr, BCF_DT_ID, name.c_str());
+        if (tag_id >= 0) ids.insert(static_cast<uint32_t>(tag_id));
 
-        return ids;
+        uint32_t codec_size = vint_code::ReadVint(adaptive_row.data(), adaptive_row.size(), pos);
+        if (pos + codec_size > adaptive_row.size()) break;
+        pos += codec_size;
     }
+
+    return ids;
+}
 } // namespace
 
 // Helper function to convert binary FORMAT field data to string
 // Returns the string representation of the field value for a specific sample
-static std::string formatFieldToString(const char *data, uint32_t data_size,
-                                       int bcf_type, uint32_t sample_idx,
-                                       uint32_t values_per_sample)
-{
-    if (data == nullptr || data_size == 0)
-    {
+static std::string formatFieldToString(const char* data, uint32_t data_size,
+                                        int bcf_type, uint32_t sample_idx,
+                                        uint32_t values_per_sample) {
+    if (data == nullptr || data_size == 0) {
         return ".";
     }
 
     std::string result;
 
-    switch (bcf_type)
-    {
-    case BCF_HT_INT:
-    {
-        const int32_t *int_data = reinterpret_cast<const int32_t *>(data);
-        uint32_t total_values = data_size / sizeof(int32_t);
-        uint32_t start = sample_idx * values_per_sample;
-        uint32_t end = std::min(start + values_per_sample, total_values);
+    switch (bcf_type) {
+        case BCF_HT_INT: {
+            const int32_t* int_data = reinterpret_cast<const int32_t*>(data);
+            uint32_t total_values = data_size / sizeof(int32_t);
+            uint32_t start = sample_idx * values_per_sample;
+            uint32_t end = std::min(start + values_per_sample, total_values);
 
-        for (uint32_t i = start; i < end; ++i)
-        {
-            int32_t val = int_data[i];
-            // Stop at vector_end (this preserves "." vs ".,." semantics for fixed-length tags).
-            if (val == bcf_int32_vector_end)
-            {
-                break;
+            for (uint32_t i = start; i < end; ++i) {
+                int32_t val = int_data[i];
+                // Stop at vector_end (this preserves "." vs ".,." semantics for fixed-length tags).
+                if (val == bcf_int32_vector_end) {
+                    break;
+                }
+                if (!result.empty()) result += ',';
+                // Missing value
+                if (val == bcf_int32_missing) {
+                    result += '.';
+                } else {
+                    result += std::to_string(val);
+                }
             }
-            if (!result.empty())
-                result += ',';
-            // Missing value
-            if (val == bcf_int32_missing)
-            {
-                result += '.';
-            }
-            else
-            {
-                result += std::to_string(val);
-            }
+            break;
         }
-        break;
-    }
-    case BCF_HT_REAL:
-    {
-        const float *float_data = reinterpret_cast<const float *>(data);
-        uint32_t total_values = data_size / sizeof(float);
-        uint32_t start = sample_idx * values_per_sample;
-        uint32_t end = std::min(start + values_per_sample, total_values);
+        case BCF_HT_REAL: {
+            const float* float_data = reinterpret_cast<const float*>(data);
+            uint32_t total_values = data_size / sizeof(float);
+            uint32_t start = sample_idx * values_per_sample;
+            uint32_t end = std::min(start + values_per_sample, total_values);
 
-        for (uint32_t i = start; i < end; ++i)
-        {
-            float val = float_data[i];
-            if (bcf_float_is_vector_end(val))
-            {
-                break;
+            for (uint32_t i = start; i < end; ++i) {
+                float val = float_data[i];
+                if (bcf_float_is_vector_end(val)) {
+                    break;
+                }
+                if (!result.empty()) result += ',';
+                if (bcf_float_is_missing(val)) {
+                    result += '.';
+                } else {
+                    // Use fixed precision for real numbers
+                    char buf[32];
+                    snprintf(buf, sizeof(buf), "%.6g", val);
+                    result += buf;
+                }
             }
-            if (!result.empty())
-                result += ',';
-            if (bcf_float_is_missing(val))
-            {
-                result += '.';
-            }
-            else
-            {
-                // Use fixed precision for real numbers
-                char buf[32];
-                snprintf(buf, sizeof(buf), "%.6g", val);
-                result += buf;
-            }
+            break;
         }
-        break;
-    }
-    case BCF_HT_STR:
-    {
-        // String data is stored as null-padded char array per sample
-        // Each sample has a fixed-width slot
-        if (values_per_sample > 0 && data_size > 0)
-        {
-            uint32_t bytes_per_sample = data_size / (sample_idx + 1); // Approximate
-            // For simplicity, return the substring for this sample
-            // String handling is more complex in BCF; fallback to raw
-            const char *str_start = data + sample_idx * bytes_per_sample;
-            size_t len = strnlen(str_start, bytes_per_sample);
-            if (len > 0)
-            {
-                result.assign(str_start, len);
-            }
-            else
-            {
+        case BCF_HT_STR: {
+            // String data is stored as null-padded char array per sample
+            // Each sample has a fixed-width slot
+            if (values_per_sample > 0 && data_size > 0) {
+                uint32_t bytes_per_sample = data_size / (sample_idx + 1);  // Approximate
+                // For simplicity, return the substring for this sample
+                // String handling is more complex in BCF; fallback to raw
+                const char* str_start = data + sample_idx * bytes_per_sample;
+                size_t len = strnlen(str_start, bytes_per_sample);
+                if (len > 0) {
+                    result.assign(str_start, len);
+                } else {
+                    result = ".";
+                }
+            } else {
                 result = ".";
             }
+            break;
         }
-        else
-        {
+        default:
             result = ".";
-        }
-        break;
-    }
-    default:
-        result = ".";
-        break;
+            break;
     }
 
     return result.empty() ? "." : result;
@@ -516,7 +455,7 @@ void CompressionReader::initializeColumnBlocks()
     col_vec_read_in_block.resize(n_col_blocks, 0);
 
     logger->debug("Column tiling: TILED mode (n_col_blocks={}, total_haplotypes={}, max_block_cols={}, no_vec_in_block={})",
-                  n_col_blocks, total_haplotypes, max_block_cols, no_vec_in_block);
+                 n_col_blocks, total_haplotypes, max_block_cols, no_vec_in_block);
 
     for (uint32_t cb = 0; cb < n_col_blocks; ++cb)
     {
@@ -532,7 +471,7 @@ void CompressionReader::initializeColumnBlocks()
         // Initialize buffer for this column block
         uint64_t col_block_max_size = block_vec_len * no_vec_in_block + 1;
         logger->debug("  Column block {}: haplotypes={}, vec_len={}, buffer_size={}",
-                      cb, block_size, block_vec_len, col_block_max_size);
+                     cb, block_size, block_vec_len, col_block_max_size);
         col_bv_buffers[cb].Create(col_block_max_size);
     }
 }
@@ -628,11 +567,10 @@ void CompressionReader::InitVarinats(File_Handle_2 *_file_handle2)
             // std::cerr<<"InfoIdToFieldId:"<<FormatIdToFieldId[keys[i].key_id]<<endl;
 
             // Collect FORMAT field info for adaptive compression (skip GT)
-            if (use_adaptive_format_ && static_cast<int>(i) != key_gt_id)
-            {
+            if (use_adaptive_format_ && static_cast<int>(i) != key_gt_id) {
                 format_field_indices_.push_back(i);
                 // Get field name from vcf_hdr
-                const char *field_name = vcf_hdr->id[BCF_DT_ID][keys[i].key_id].key;
+                const char* field_name = vcf_hdr->id[BCF_DT_ID][keys[i].key_id].key;
                 key_id_to_name_[keys[i].key_id] = field_name;
             }
             break;
@@ -652,14 +590,12 @@ void CompressionReader::InitVarinats(File_Handle_2 *_file_handle2)
     }
 
     // Register stream for adaptive FORMAT compression
-    if (use_adaptive_format_ && !format_field_indices_.empty())
-    {
+    if (use_adaptive_format_ && !format_field_indices_.empty()) {
         adaptive_format_stream_id_ = file_handle2->RegisterStream("adaptive_format_data");
 
         // Build format keys list for FormatFieldManager
         current_format_keys_.clear();
-        for (uint32_t idx : format_field_indices_)
-        {
+        for (uint32_t idx : format_field_indices_) {
             current_format_keys_.push_back(key_id_to_name_[keys[idx].key_id]);
         }
 
@@ -942,26 +878,23 @@ bool CompressionReader::GetVariantFromRec(bcf1_t *rec, vector<field_desc> &field
 // *******************************************************************************************************************************
 // Helper: Build sample FORMAT string from binary field data
 static std::string buildSampleFormatString(
-    const std::vector<uint32_t> &format_indices,
-    const std::vector<field_desc> &fields,
-    const std::vector<key_desc> &keys,
+    const std::vector<uint32_t>& format_indices,
+    const std::vector<field_desc>& fields,
+    const std::vector<key_desc>& keys,
     uint32_t sample_idx,
     uint32_t no_samples,
     uint32_t allele_count)
 {
     std::string result;
 
-    for (size_t fi = 0; fi < format_indices.size(); ++fi)
-    {
-        if (fi > 0)
-            result += ':';
+    for (size_t fi = 0; fi < format_indices.size(); ++fi) {
+        if (fi > 0) result += ':';
 
         uint32_t idx = format_indices[fi];
-        const field_desc &field = fields[idx];
-        const key_desc &key = keys[idx];
+        const field_desc& field = fields[idx];
+        const key_desc& key = keys[idx];
 
-        if (!field.present || field.data == nullptr || field.data_size == 0)
-        {
+        if (!field.present || field.data == nullptr || field.data_size == 0) {
             result += '.';
             continue;
         }
@@ -970,8 +903,7 @@ static std::string buildSampleFormatString(
         uint32_t total_values = 0;
         uint32_t values_per_sample = 1;
 
-        switch (key.type)
-        {
+        switch (key.type) {
         case BCF_HT_INT:
             total_values = field.data_size / sizeof(int32_t);
             values_per_sample = total_values / no_samples;
@@ -984,14 +916,11 @@ static std::string buildSampleFormatString(
             // String handling is complex, use raw data
             {
                 uint32_t bytes_per_sample = field.data_size / no_samples;
-                const char *str_start = field.data + sample_idx * bytes_per_sample;
+                const char* str_start = field.data + sample_idx * bytes_per_sample;
                 size_t len = strnlen(str_start, bytes_per_sample);
-                if (len > 0)
-                {
+                if (len > 0) {
                     result.append(str_start, len);
-                }
-                else
-                {
+                } else {
                     result += '.';
                 }
             }
@@ -1003,13 +932,13 @@ static std::string buildSampleFormatString(
 
         // Extract values for this sample
         result += formatFieldToString(field.data, field.data_size,
-                                      key.type, sample_idx, values_per_sample);
+                                       key.type, sample_idx, values_per_sample);
     }
 
     return result;
 }
 
-bool CompressionReader::SetVariantOtherFields(bcf1_t *vcf_rec, vector<field_desc> &fields)
+bool CompressionReader::SetVariantOtherFields(vector<field_desc> &fields)
 {
     // Phase 4: Full adaptive FORMAT compression integration
     //
@@ -1025,56 +954,43 @@ bool CompressionReader::SetVariantOtherFields(bcf1_t *vcf_rec, vector<field_desc
                        format_field_manager_ != nullptr;
 
     std::unordered_set<uint32_t> adaptive_row_key_ids;
-    if (do_adaptive)
-    {
+    if (do_adaptive) {
         std::vector<uint32_t> row_format_indices;
         std::vector<std::string> row_format_keys;
         row_format_indices.reserve(format_field_indices_.size());
         row_format_keys.reserve(format_field_indices_.size());
 
         // Preserve per-record FORMAT tag set and order (excluding GT).
-        if (vcf_rec != nullptr && vcf_rec->n_fmt && vcf_rec->d.fmt != nullptr)
-        {
-            bcf_fmt_t *fmt = vcf_rec->d.fmt;
-            for (int fi = 0; fi < (int)vcf_rec->n_fmt; ++fi)
-            {
+        if (vcf_record != nullptr && vcf_record->n_fmt && vcf_record->d.fmt != nullptr) {
+            bcf_fmt_t* fmt = vcf_record->d.fmt;
+            for (int fi = 0; fi < (int)vcf_record->n_fmt; ++fi) {
                 int tag_id = fmt[fi].id;
-                if (tag_id < 0 || tag_id >= (int)FormatIdToFieldId.size())
-                    continue;
+                if (tag_id < 0 || tag_id >= (int)FormatIdToFieldId.size()) continue;
 
                 uint32_t field_idx = static_cast<uint32_t>(FormatIdToFieldId[tag_id]);
-                if (static_cast<int>(field_idx) == key_gt_id)
-                    continue;
-                if (field_idx >= fields.size() || field_idx >= keys.size())
-                    continue;
-                if (!fields[field_idx].present)
-                    continue;
+                if (static_cast<int>(field_idx) == key_gt_id) continue;
+                if (field_idx >= fields.size() || field_idx >= keys.size()) continue;
+                if (!fields[field_idx].present) continue;
 
                 row_format_indices.push_back(field_idx);
                 row_format_keys.push_back(key_id_to_name_[keys[field_idx].key_id]);
             }
-        }
-        else
-        {
+        } else {
             // Fallback: use header-collected indices, filtered by presence.
-            for (uint32_t field_idx : format_field_indices_)
-            {
-                if (field_idx >= fields.size() || field_idx >= keys.size())
-                    continue;
-                if (!fields[field_idx].present)
-                    continue;
+            for (uint32_t field_idx : format_field_indices_) {
+                if (field_idx >= fields.size() || field_idx >= keys.size()) continue;
+                if (!fields[field_idx].present) continue;
                 row_format_indices.push_back(field_idx);
                 row_format_keys.push_back(key_id_to_name_[keys[field_idx].key_id]);
             }
         }
 
         // Initialize FormatFieldManager for this row
-        uint32_t allele_count = (vcf_rec != nullptr) ? vcf_rec->n_allele : 2;
+        uint32_t allele_count = (vcf_record != nullptr) ? vcf_record->n_allele : 2;
         format_field_manager_->initRow(row_format_keys, allele_count);
 
         // Process each sample
-        for (uint32_t sample_idx = 0; sample_idx < no_samples; ++sample_idx)
-        {
+        for (uint32_t sample_idx = 0; sample_idx < no_samples; ++sample_idx) {
             // Build FORMAT string for this sample
             std::string sample_format = buildSampleFormatString(
                 row_format_indices, fields, keys,
@@ -1090,8 +1006,7 @@ bool CompressionReader::SetVariantOtherFields(bcf1_t *vcf_rec, vector<field_desc
         format_field_manager_->finalizeRow(adaptive_data, adaptive_format_primary_);
 
         // In primary mode, suppress legacy only for tags actually emitted to adaptive stream.
-        if (adaptive_format_primary_)
-        {
+        if (adaptive_format_primary_) {
             adaptive_row_key_ids = parseAdaptiveRowKeyIds(adaptive_data, vcf_hdr);
         }
 
@@ -1099,14 +1014,13 @@ bool CompressionReader::SetVariantOtherFields(bcf1_t *vcf_rec, vector<field_desc
         // Format: [row_size:4bytes][row_data]
         uint32_t row_size = static_cast<uint32_t>(adaptive_data.size());
         adaptive_format_buffer_.insert(adaptive_format_buffer_.end(),
-                                       reinterpret_cast<uint8_t *>(&row_size),
-                                       reinterpret_cast<uint8_t *>(&row_size) + sizeof(row_size));
+            reinterpret_cast<uint8_t*>(&row_size),
+            reinterpret_cast<uint8_t*>(&row_size) + sizeof(row_size));
         adaptive_format_buffer_.insert(adaptive_format_buffer_.end(),
-                                       adaptive_data.begin(), adaptive_data.end());
+            adaptive_data.begin(), adaptive_data.end());
 
         // Check if buffer is full, flush to stream
-        if (adaptive_format_buffer_.size() >= max_buffer_size)
-        {
+            if (adaptive_format_buffer_.size() >= max_buffer_size) {
             std::vector<uint8_t> framed = encodeAdaptiveFormatPart(adaptive_format_buffer_,
                                                                    adaptive_format_part_backend_,
                                                                    backend_);
@@ -1249,7 +1163,7 @@ bool CompressionReader::ProcessInVCF()
                         logger->error("Repair VCF file OR set correct ploidy using -p option.");
                         exit(9);
                     }
-                    if (tmpi % 100 == 0)
+                    if (tmpi % 100000 == 0)
                     {
                         logger->info("Processed {} variants...", tmpi);
                     }
@@ -1257,7 +1171,7 @@ bool CompressionReader::ProcessInVCF()
                     {
                         std::vector<field_desc> curr_field(keys.size());
                         GetVariantFromRec(vcf_record, curr_field);
-                        SetVariantOtherFields(vcf_record, curr_field);
+                        SetVariantOtherFields(curr_field);
                         for (size_t j = 0; j < keys.size(); ++j)
                         {
                             if (curr_field[j].data_size > 0)
@@ -1303,7 +1217,7 @@ bool CompressionReader::ProcessInVCF()
                     logger->error("Repair VCF file OR set correct ploidy using -p option.");
                     exit(9);
                 }
-                if (tmpi % 100 == 0)
+                if (tmpi % 100000 == 0)
                 {
                     logger->info("Processed {} variants...", tmpi);
                 }
@@ -1314,7 +1228,7 @@ bool CompressionReader::ProcessInVCF()
 
                     GetVariantFromRec(vcf_record, curr_field);
 
-                    SetVariantOtherFields(vcf_record, curr_field);
+                    SetVariantOtherFields(curr_field);
 
                     for (size_t j = 0; j < keys.size(); ++j)
                     {
@@ -1340,14 +1254,11 @@ bool CompressionReader::ProcessInVCF()
         order = topo_sort(field_order_graph, inDegree);
     if (cur_g_data)
     {
-        std::free(cur_g_data);
-        cur_g_data = nullptr;
-        ncur_g_data = 0;
+        delete[] cur_g_data;
     }
     if (gt_data)
     {
         delete[] gt_data;
-        gt_data = nullptr;
     }
 
     logger->info("Read all the variants and genotypes.");
@@ -1656,7 +1567,7 @@ void CompressionReader::addVariant(int *gt_data, int ngt_data, variant_desc_t &d
             {
                 auto logger = LogManager::Instance().Logger();
                 logger->debug("Pushing row block {}: {} variants across {} column blocks",
-                              block_id, v_vcf_data_compress.size(), n_col_blocks);
+                             block_id, v_vcf_data_compress.size(), n_col_blocks);
 
                 for (uint32_t col_block_id = 0; col_block_id < n_col_blocks; ++col_block_id)
                 {
@@ -1664,7 +1575,7 @@ void CompressionReader::addVariant(int *gt_data, int ngt_data, variant_desc_t &d
                     col_bv.TakeOwnership();
 
                     logger->debug("  Pushing col_block {}: block_id={}, num_rows={}, buffer_size={}",
-                                  col_block_id, block_id, no_vec_in_block, col_bv.mem_buffer_pos);
+                                 col_block_id, block_id, no_vec_in_block, col_bv.mem_buffer_pos);
 
                     // Only the last column block carries the variant descriptors
                     // Other column blocks get empty vectors to avoid duplicate storage
@@ -1838,13 +1749,20 @@ void CompressionReader::addVariant(int *gt_data, int ngt_data, variant_desc_t &d
 // ***************************************************************************************************************************************
 uint32_t CompressionReader::setNoVecBlock(GSC_Params &params)
 {
-    auto logger = LogManager::Instance().Logger();
     params.var_in_block = params.max_block_rows ? params.max_block_rows : (no_samples * params.ploidy);
 
-    // Note: Thread auto-configuration is now handled by ResourceManager in compressor.cpp
-    // This function only sets block-related parameters
+    int numThreads = std::thread::hardware_concurrency() / 2;
 
-    logger->debug("Block size: {} variants", params.var_in_block);
+    int numChunks = 1 + (params.var_in_block / 1024);
+
+    if (numChunks < numThreads)
+    {
+
+        numThreads = numChunks;
+    }
+
+    params.no_gt_threads = numThreads;
+    // params.no_gt_threads = 1;
 
     if (params.var_in_block < 1024)
     {
@@ -1980,8 +1898,7 @@ void CompressionReader::CloseFiles()
 
         // Flush remaining adaptive FORMAT data
         if (use_adaptive_format_ && adaptive_format_stream_id_ >= 0 &&
-            !adaptive_format_buffer_.empty())
-        {
+            !adaptive_format_buffer_.empty()) {
             std::vector<uint8_t> framed = encodeAdaptiveFormatPart(adaptive_format_buffer_,
                                                                    adaptive_format_part_backend_,
                                                                    backend_);
