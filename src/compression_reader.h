@@ -17,6 +17,7 @@
 #include <unordered_map>
 #include <stack>
 #include <memory>
+#include <cstdint>
 #include "parallel_vcf_reader.h"
 #include "format_field_detector.h"
 
@@ -55,8 +56,8 @@ class CompressionReader {
 
     vector<string> samples_list;
     vector<variant_desc_t> v_vcf_data_compress;
-    int *cur_g_data = nullptr;
-    int ncur_g_data;
+    int32_t *cur_g_data = nullptr;
+    int ncur_g_data = 0;
     int *gt_data = nullptr;
     int temp;
     int64_t cur_pos;
@@ -125,10 +126,11 @@ class CompressionReader {
     vector<int64_t> chunks_min_pos;
     bool start_flag;
 
-    // Parallel VCF reading
-    gsc::ParallelVCFReader* parallel_reader_;
-    int num_parse_threads_;
-    bool use_parallel_reading_;
+	    // Parallel VCF reading
+	    gsc::ParallelVCFReader* parallel_reader_;
+	    int num_parse_threads_;
+	    bool use_parallel_reading_;
+        uint64_t max_memory_mb_;
 
     // int temp_count = 0;
     #ifdef LOG_INFO
@@ -140,7 +142,7 @@ class CompressionReader {
     bool GetVariantFromRec(bcf1_t* rec, vector<field_desc>& fields);
     bool GetFilterInfoFormatKeys(int &no_flt_keys, int &no_info_keys, int &no_fmt_keys, vector<key_desc> &keys);
     void ProcessFixedVariants(bcf1_t *vcf_record, variant_desc_t &desc);
-	bool SetVariantOtherFields(vector<field_desc> &fields);
+	bool SetVariantOtherFields(bcf1_t *vcf_rec, vector<field_desc> &fields);
     vector<int> topoSort(unordered_map<int, unordered_set<int>>& graph);
     vector<int> topo_sort(unordered_map<int, unordered_set<int>> &graph,unordered_map<int, int> inDegree);
 
@@ -148,7 +150,7 @@ class CompressionReader {
     
 public:
 
-    CompressionReader() {
+	    CompressionReader() {
         in_open = false;
         vcf_hdr_read = false;
         no_samples = 0;
@@ -159,11 +161,12 @@ public:
         no_vec = 0;
         start_flag = true;
         field_order_flag = false;
-        parallel_reader_ = nullptr;
-        num_parse_threads_ = 1;
-        use_parallel_reading_ = false;
-    }
-    CompressionReader(const GSC_Params & params) {
+	        parallel_reader_ = nullptr;
+	        num_parse_threads_ = 1;
+	        use_parallel_reading_ = false;
+            max_memory_mb_ = 0;
+	    }
+	    CompressionReader(const GSC_Params & params) {
         in_open = false;
         vcf_hdr_read = false;
         no_samples = 0;
@@ -182,14 +185,15 @@ public:
         no_vec = 0;
         start_flag = true;
         field_order_flag = false;
-        parallel_reader_ = nullptr;
-        num_parse_threads_ = params.no_threads;
-        use_parallel_reading_ = (num_parse_threads_ > 1);
+	        parallel_reader_ = nullptr;
+	        num_parse_threads_ = (params.no_parse_threads == 0) ? 1 : static_cast<int>(params.no_parse_threads);
+	        use_parallel_reading_ = (num_parse_threads_ > 1);
+            max_memory_mb_ = params.max_memory_mb;
 
-        // Initialize adaptive FORMAT compression
-        format_field_manager_ = std::make_unique<gsc::FormatFieldManager>();
-        use_adaptive_format_ = (params.compress_mode == compress_mode_t::lossless_mode) &&
-                              (params.adaptive_format_mode != adaptive_format_mode_t::off);
+	        // Initialize adaptive FORMAT compression
+	        format_field_manager_ = std::make_unique<gsc::FormatFieldManager>();
+	        use_adaptive_format_ = (params.compress_mode == compress_mode_t::lossless_mode) &&
+	                              (params.adaptive_format_mode != adaptive_format_mode_t::off);
         adaptive_format_primary_ = (params.adaptive_format_mode == adaptive_format_mode_t::primary);
         adaptive_format_part_backend_ = params.adaptive_format_part_backend;
     }

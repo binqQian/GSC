@@ -1,5 +1,7 @@
 #include "compressor.h"
 #include "logger.h"
+#include "memory_monitor.h"
+#include "resource_manager.h"
 #include <iostream>
 #include <fstream>
 
@@ -453,6 +455,18 @@ bool Compressor::CompressProcess()
 
     MyBarrier my_barrier(3);
 
+    // ========== Early Auto-Configuration (Parsing Threads) ==========
+    // CompressionReader captures parse thread settings in its constructor.
+    // Ensure auto parse threads are resolved before instantiating it.
+    gsc::SystemInfo sys_info = gsc::SystemInfo::Detect();
+    const uint32_t user_no_parse_threads = params.no_parse_threads;
+    if (params.no_parse_threads == 0) {
+        int available_cores = std::max(1, (int)sys_info.cpu_cores - 1);
+        uint32_t auto_parse_threads = std::min(2u, (uint32_t)(available_cores / 4 + 1));
+        if (auto_parse_threads == 0) auto_parse_threads = 1;
+        params.no_parse_threads = auto_parse_threads;
+    }
+
     unique_ptr<CompressionReader> compression_reader(new CompressionReader(params));
 
     if (!compression_reader->OpenForReading(params.in_file_name))
@@ -514,8 +528,61 @@ bool Compressor::CompressProcess()
                       (params.max_block_cols == 0 || params.max_block_cols >= total_haplotypes) &&
                       (params.max_block_rows == 0 || params.max_block_rows == total_haplotypes);
 
-    logger->info("Number of GT threads: {}", params.no_gt_threads);
-    GtBlockQueue inGtBlockQueue(max((int)(params.no_blocks * params.no_gt_threads), 8));
+    // ========== Resource Auto-Configuration ==========
+    // Use ResourceManager for intelligent thread and memory allocation
+    gsc::ResourceManager resource_mgr;
+
+    // Set system information
+    resource_mgr.SetSystemInfo(sys_info);
+
+    // Set workload characteristics
+    gsc::WorkloadEstimate workload;
+    workload.n_samples = params.n_samples;
+    workload.ploidy = params.ploidy;
+    workload.max_block_rows = params.max_block_rows;
+    workload.n_col_blocks = n_col_blocks;
+    workload.backend = params.backend;
+    resource_mgr.SetWorkload(workload);
+
+    // Set user limits (0 = auto for each parameter)
+    GSC_Params user_limits = params;
+    user_limits.no_parse_threads = user_no_parse_threads;
+    resource_mgr.SetUserLimits(user_limits);
+
+    // Configure resources
+    gsc::ThreadConfig thread_cfg = resource_mgr.Configure();
+
+    // Apply configured values back to params (for any that were auto-configured)
+    if (params.no_threads == 0) {
+        params.no_threads = thread_cfg.no_threads;
+    }
+    if (params.no_gt_threads == 0) {
+        params.no_gt_threads = thread_cfg.no_gt_threads;
+    }
+    // Note: parse threads are resolved before CompressionReader construction.
+
+    size_t queue_capacity = (params.queue_capacity > 0) ?
+        params.queue_capacity : thread_cfg.queue_capacity;
+
+    // Log resource plan if requested or in debug mode
+    if (params.show_resource_plan) {
+        resource_mgr.LogResourcePlan();
+    } else {
+        // Standard logging
+        logger->info("Threads: compress={}, gt={}, parse={}",
+                     params.no_threads, params.no_gt_threads, params.no_parse_threads);
+        logger->info("Queue capacity: {} blocks", queue_capacity);
+        logger->info("Column blocks: {}, total haplotypes: {}", n_col_blocks, total_haplotypes);
+        logger->info("Current memory: {}", gsc::MemoryMonitor::GetMemoryUsageString());
+
+        const auto& budget = resource_mgr.GetMemoryBudget();
+        if (budget.user_specified) {
+            logger->info("Memory limit: {} MB (user specified)", budget.total_budget_mb);
+        } else {
+            logger->info("Memory budget: {} MB (auto: 70% of available)", budget.total_budget_mb);
+        }
+    }
+    GtBlockQueue inGtBlockQueue(queue_capacity);
 
     // VarBlockQueue<fixed_fixed_field_block> inVarBlockQueue(max((int)params.no_threads * 2, 8));
     VarBlockQueue<fixed_field_chunk> sortVarBlockQueue(max((int)params.no_threads * 2, 8));

@@ -2,6 +2,7 @@
 #include "logger.h"
 #include "codecs/bit_tip_array_codec.h"
 #include "codecs/predicted_scalar_codec.h"
+#include "resource_manager.h"
 #include <bitset>
 #include <chrono>
 #include <cstdlib>
@@ -289,8 +290,20 @@ bool Decompressor::initDecompression(DecompressionReader &decompression_reader){
 // Official Decompress Program Entry
 bool Decompressor::decompressProcess()
 {
+    auto logger = LogManager::Instance().Logger();
     MyBarrier  my_barrier(3);
-    
+
+    // ========== Resource Auto-Configuration for Decompression ==========
+    if (params.no_threads == 0) {
+        gsc::SystemInfo sys_info = gsc::SystemInfo::Detect();
+        // For decompression, use half of available cores (simpler workload)
+        int available_cores = std::max(1, (int)sys_info.cpu_cores - 1);
+        uint32_t auto_threads = static_cast<uint32_t>(available_cores / 2);
+        auto_threads = std::max(1u, std::min(auto_threads, 8u));
+        params.no_threads = auto_threads;
+        logger->debug("Auto-configured decompression threads: {}", params.no_threads);
+    }
+
     decompression_reader.SetNoThreads(params.no_threads);
     // unique_ptr<CompressedFileLoading> cfile(new CompressedFileLoading());
 

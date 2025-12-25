@@ -1,6 +1,12 @@
 # GSC (Genotype Sparse Compression)
 Genotype Sparse Compression (GSC) is an advanced tool for compression of VCF files, designed to efficiently store and manage VCF files in a compressed format. It accepts VCF/BCF files as input and utilizes advanced compression techniques to significantly reduce storage requirements while ensuring fast query capabilities. In our study, we successfully compressed the VCF files from the 1000 Genomes Project (1000G phase 3), consisting of 2504 samples and 80 million variants, from an uncompressed VCF file of 803.70GB to approximately 1GB.
 
+## Key Features
+- Lossless compression of VCF/BCF into `.gsc` with fast decompression and range/sample queries.
+- Pluggable compression backend for most streams: `bsc` (default), `zstd`, `brotli` via `--compressor`.
+- Optional **adaptive FORMAT** stream (`adaptive_format_data`) for seen-in-practice FORMAT tags (currently most effective on AD/PL/DP-like data).
+- Optional **integrity verification** using XXHash64 to ensure data consistency after compression/decompression.
+
 ## Requirements
 GSC requires:
 
@@ -57,6 +63,14 @@ docker run -it gsc_project
 ```
 
 ## Usage
+Quick reference (run `./gsc compress` / `./gsc decompress` for the full list):
+
+- `--compressor bsc|zstd|brotli`: select backend for the majority of streams (choice is stored in the `.gsc` file).
+- Adaptive FORMAT (lossless mode only):
+  - `compress --adaptive-format off|shadow|primary`
+  - `compress --adaptive-format-compressor auto|follow|raw|bsc|zstd|brotli` (controls `adaptive_format_data` part compression; default `auto`)
+  - `decompress --use-adaptive-format` (required when decompressing a `.gsc` created with `--adaptive-format primary`)
+
 ```bash
 Usage: gsc [option] [arguments] 
 Available options: 
@@ -75,6 +89,8 @@ Where:
         -i,  --in [in_file]    Specify the input file (default: VCF or VCF.GZ). If omitted, input is taken from standard input (stdin).
         -o,  --out [out_file]  Specify the output file. If omitted, output is sent to standard output (stdout).
         --compressor [name]    Select compressor: bsc (default), zstd, brotli.
+        --adaptive-format [off|shadow|primary]  Adaptive FORMAT mode (lossless only).
+        --adaptive-format-compressor [name]  Compressor for `adaptive_format_data` parts: auto (default), follow, raw, bsc, zstd, brotli.
 
 Options:
 
@@ -83,9 +99,10 @@ Options:
         -p,  --ploidy [X]      Set ploidy of samples in input VCF to [X] (default: 2).
         --max-block-rows [X]   Max variants per GT block (default: 10000).
         --max-block-cols [X]   Max haplotypes (samples * ploidy) per GT column block (default: 10000).
-        -t,  --threads [X]     Set number of threads to [X] (default: 5).
+        -t,  --threads [X]     Set number of threads to [X] (default: auto).
         -d,  --depth [X]       Set maximum replication depth to [X] (default: 100, 0 means no matches).
         -m,  --merge [X]       Specify files to merge, separated by commas (e.g., -m chr1.vcf,chr2.vcf), or '@' followed by a file containing a list of VCF files (e.g., -m @file_with_IDs.txt). By default, all VCF files are compressed.
+        -I,  --integrity [mode]  Enable integrity hash: none (default), xxhash64/xxhash/fast.
 ```
 - Decompress / Query
 ```bash
@@ -98,6 +115,7 @@ Where:
         -i,  --in [in_file]    Specify the input file . If omitted, input is taken from standard input (stdin).
         -o,  --out [out_file]  Specify the output file (default: VCF). If omitted, output is sent to standard output (stdout).
         --compressor [name]    Select compressor: bsc (default), zstd, brotli.
+        --use-adaptive-format  Prefer `adaptive_format_data` stream for non-GT FORMAT reconstruction (recommended with VCF output).
 
 Options:
 
@@ -105,9 +123,14 @@ Options:
 
         -M,  --mode_lossly      Choose lossy compression mode (default: lossless).
         -b,  --bcf              Output a BCF file (default: VCF).
-        -t,  --threads [X]      Set number of threads to [X] (default: 5).
+        -t,  --threads [X]      Set number of threads to [X] (default: auto).
         -l,  --level [0-9]      When writing to `.vcf.gz`, set bgzip level (0 = uncompressed).
         --make-bed              Output PLINK BED/BIM/FAM instead of VCF/BCF.
+
+    Integrity Verification:
+
+        --verify                Force integrity verification if hash is present (default: enabled).
+        --no-verify             Skip integrity verification even if hash is stored.
 
     Filter / Query options:
 
@@ -127,11 +150,128 @@ Options:
         --max-qual [X]          Include only sites with QUAL <= X.
 ```
 
+## Adaptive FORMAT Compression (Experimental)
+
+GSC has an optional **adaptive FORMAT** stream (`adaptive_format_data`) for lossless compression of non-GT FORMAT subfields. This is designed to:
+- provide field-aware encoding for common tags (currently most effective on AD/PL/DP-like patterns),
+- allow correct sample-subset output for non-GT FORMAT when using `-s/--samples` (legacy non-GT FORMAT cannot be safely subsetted),
+- remain backward-compatible (old `.gsc` without the adaptive stream still decompress as before).
+
+### Modes
+Enable on compression with:
+```bash
+./gsc compress --adaptive-format off|shadow|primary ...
+```
+- `off` (default): legacy behavior; no adaptive stream is written.
+- `shadow`: writes both legacy non-GT FORMAT (other_fields) and adaptive stream (larger file; useful for regression).
+- `primary`: writes adaptive stream and **suppresses legacy only for tags actually emitted to adaptive**; tags not covered by adaptive remain in legacy streams.
+
+Important: If you compress with `--adaptive-format primary`, you should decompress with `--use-adaptive-format`, otherwise suppressed tags will not be reconstructed.
+
+### Part compression (adaptive stream only)
+Adaptive stream parts use a small framing header (`AFD1`) and can be independently compressed:
+```bash
+./gsc compress --adaptive-format primary \
+  --adaptive-format-compressor auto|follow|raw|bsc|zstd|brotli \
+  --in input.vcf --out output.gsc
+```
+- `auto` (default): tries `zstd/bsc/brotli` and picks the smallest.
+- `follow`: uses the same backend as `--compressor` (legacy streams).
+- `raw`: stores uncompressed payloads (debug only; can be much larger).
+
+Note: this option affects **only** `adaptive_format_data`; other streams still follow `--compressor`.
+
+### Current limitations
+- Adaptive decoding is currently intended for **VCF output** (`--out *.vcf` / `*.vcf.gz`). For BCF output, legacy typed FORMAT is preferred.
+- PL “AB pattern” is only enabled for biallelic diploid PL vectors (len==3) for correctness; multi-allelic reconstruction needs further work.
+
+### Practical guidance / FAQ
+
+#### “Why is `--adaptive-format primary` sometimes larger than `off`?”
+This can happen when legacy other_fields streams compress extremely well (chunk-level compression) while adaptive data is stored row-wise with additional metadata.
+
+Recommendations:
+- Start with `--adaptive-format-compressor auto` (default) or `--adaptive-format-compressor follow` (match `--compressor`), then compare sizes:
+  ```bash
+  ./gsc compress --adaptive-format off     -i input.vcf -o tmp/off.gsc
+  ./gsc compress --adaptive-format primary -i input.vcf -o tmp/primary.gsc
+  ls -lh tmp/off.gsc tmp/primary.gsc
+  ```
+- Use `--adaptive-format shadow` to validate correctness while keeping the legacy stream intact:
+  ```bash
+  ./gsc compress --adaptive-format shadow -i input.vcf -o tmp/shadow.gsc
+  ./gsc decompress --in tmp/shadow.gsc --out tmp/shadow.vcf
+  ```
+- If you see many non-GT FORMAT tags that are effectively “free text” (codec falls back to `RawString`), adaptive will intentionally omit them in `primary` to avoid size regressions; in that case, overall gains may be limited to AD/PL/DP-like tags.
+
+#### “Do I need `--use-adaptive-format` on decompression?”
+- If the `.gsc` was created with `--adaptive-format off` or `shadow`: decompression without `--use-adaptive-format` is fine (legacy path includes all tags).
+- If the `.gsc` was created with `--adaptive-format primary`: you should use `--use-adaptive-format`, otherwise suppressed tags cannot be reconstructed.
+
+#### “Why are non-GT FORMAT fields missing when using `-s/--samples`?”
+Legacy non-GT FORMAT streams cannot be safely subsetted without re-encoding, so in sample-subset mode GSC only outputs non-GT FORMAT fields that can be reconstructed safely. Enabling adaptive FORMAT (`--adaptive-format primary` on compression + `--use-adaptive-format` on decompression) is the intended solution.
+
+## Integrity Verification (Hash)
+
+GSC supports optional **integrity verification** using XXHash64 to ensure data consistency after compression/decompression.
+
+### How It Works
+- **Compression**: When enabled with `--integrity xxhash64`, GSC computes a hash of the VCF header and sample names, then writes this hash to a footer at the end of the `.gsc` file.
+- **Decompression**: GSC automatically detects the hash footer and verifies the decompressed data matches the original. If verification fails, a warning is logged.
+
+### Usage
+```bash
+# Compress with integrity hash
+./gsc compress --integrity xxhash64 -i input.vcf -o output.gsc
+
+# Decompress with automatic verification (default behavior)
+./gsc decompress -i output.gsc -o restored.vcf
+
+# Skip verification if needed
+./gsc decompress --no-verify -i output.gsc -o restored.vcf
+```
+
+### Default Behavior
+- **Compression**: Integrity checking is **disabled by default**. Use `--integrity xxhash64` to enable.
+- **Decompression**: If a hash is present in the file, verification is **automatic**. Use `--no-verify` to skip.
+
+### Technical Details
+- Uses **XXHash64** algorithm (speed: ~13.8 GB/s, much faster than MD5/SHA)
+- Hash is stored as a 14-byte footer at the end of the `.gsc` file
+- Backward compatible: old GSC versions ignore the footer; new versions can read old files without hash
+
 ## Logging
 GSC logs to stderr and to a rotating file `gsc.log` (up to ~10MB, keep 3 rotated files). Use `GSC_LOG_LEVEL` to control verbosity:
 ```bash
 export GSC_LOG_LEVEL=debug   # trace|debug|info|warn|error|critical|off
 ```
+
+## Validation / Smoke Tests
+The `toy/` directory contains small fixtures for manual verification.
+
+Lossless round-trip (legacy):
+```bash
+./gsc compress --in toy/toy.vcf --out tmp/toy_off.gsc
+./gsc decompress --in tmp/toy_off.gsc --out tmp/toy_off.vcf
+```
+
+Lossless round-trip (adaptive primary, recommended flags):
+```bash
+./gsc compress --adaptive-format primary --in toy/toy.vcf --out tmp/toy_primary.gsc
+./gsc decompress --use-adaptive-format --in tmp/toy_primary.gsc --out tmp/toy_primary.vcf
+diff -q tmp/toy_off.vcf tmp/toy_primary.vcf
+```
+
+Compare file sizes:
+```bash
+ls -lh tmp/toy_off.gsc tmp/toy_primary.gsc
+```
+
+## Developer Notes
+- Adaptive FORMAT implementation/plan:
+  - `ADAPTIVE_FORMAT_HANDOFF.md`
+  - `ADAPTIVE_FORMAT_IMPLEMENTATION_NOTES.md`
+  - `ADAPTIVE_FORMAT_COMPRESSION_PLAN.md`
 
 ## Example
 There is an example VCF/VCF.gz/BCF file, `toy.vcf`/`toy.vcf.gz`/`toy.bcf`, in the toy folder, which can be used to test GSC
@@ -148,6 +288,17 @@ The input file format is VCF. You can compress a VCF file in lossless mode using
    Select a different compressor backend (the choice is stored in the `.gsc` file and auto-detected during decompression):
    ```bash
    ./gsc compress --compressor zstd --in toy/toy.vcf --out toy/toy_lossless_zstd.gsc
+   ```
+   Adaptive FORMAT (shadow for regression; primary for production):
+   ```bash
+   ./gsc compress --adaptive-format shadow  --in toy/toy.vcf --out tmp/toy_shadow.gsc
+   ./gsc compress --adaptive-format primary --in toy/toy.vcf --out tmp/toy_primary.gsc
+   ./gsc decompress --use-adaptive-format --in tmp/toy_primary.gsc --out tmp/toy_primary.vcf
+   ```
+   Control adaptive stream part compressor independently:
+   ```bash
+   ./gsc compress --adaptive-format primary --adaptive-format-compressor follow --compressor brotli \
+     --in toy/toy.vcf --out tmp/toy_primary_follow_brotli.gsc
    ```
 2. **Input file parameter and output redirection**:
    
@@ -199,6 +350,12 @@ Write a gzipped VCF (bgzip) with a chosen compression level:
 ```bash
 ./gsc decompress --in toy/toy_lossless.gsc --out toy/toy_lossless.vcf.gz --level 6
 ```
+Decompress a `.gsc` produced with `--adaptive-format primary`:
+```bash
+./gsc decompress --use-adaptive-format --in tmp/toy_primary.gsc --out tmp/toy_primary.vcf
+```
+
+Note: `decompress --compressor ...` is generally not needed. The backend used to compress the `.gsc` is stored in the file and auto-detected during decompression.
 #### Lossy decompression:
 
 To decompress the compressed toy_lossy.gsc into a VCF file named toy_lossy.vcf:
