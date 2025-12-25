@@ -2,6 +2,7 @@
 #include "logger.h"
 #include "bsc.h"
 #include "zstd_compress.h"
+#include "adaptive_format_known_fields.h"
 #include <algorithm>
 #include <chrono>
 #include <cstring>
@@ -471,15 +472,62 @@ bool DecompressionReader::OpenReadingPart2(const string &in_file_name)
 
 	InitDecompressParams();
 
-	// Check if adaptive FORMAT compression data exists
-	adaptive_format_stream_id_ = file_handle2->GetStreamId("adaptive_format_data");
-	has_adaptive_format_ = (adaptive_format_stream_id_ >= 0);
-	if (has_adaptive_format_) {
-		logger->info("Detected adaptive FORMAT compression data");
-        file_handle2->ResetStreamPartIterator(adaptive_format_stream_id_);
-        adaptive_format_buffer_.clear();
-        adaptive_format_eof_ = false;
-	}
+		// Check if adaptive FORMAT compression data exists
+		adaptive_format_stream_id_ = file_handle2->GetStreamId("adaptive_format_data");
+		has_adaptive_format_ = (adaptive_format_stream_id_ >= 0);
+		if (has_adaptive_format_) {
+			logger->info("Detected adaptive FORMAT compression data");
+	        file_handle2->ResetStreamPartIterator(adaptive_format_stream_id_);
+	        adaptive_format_buffer_.clear();
+	        adaptive_format_eof_ = false;
+
+	        // Optional dictionaries for known-field adaptive FORMAT codec.
+	        adaptive_format_ad_dict_stream_id_ = file_handle2->GetStreamId("adaptive_format_ad_dict");
+	        adaptive_format_pl_dict_stream_id_ = file_handle2->GetStreamId("adaptive_format_pl_dict");
+	        adaptive_format_pid_dict_stream_id_ = file_handle2->GetStreamId("adaptive_format_pid_dict");
+	        has_adaptive_format_dicts_ = false;
+
+	        auto readAllParts = [&](int stream_id, std::vector<uint8_t>& out) -> bool {
+	            out.clear();
+	            if (stream_id < 0) return false;
+	            file_handle2->ResetStreamPartIterator(stream_id);
+	            std::vector<uint8_t> part;
+	            while (file_handle2->GetPart(stream_id, part)) {
+	                out.insert(out.end(), part.begin(), part.end());
+	            }
+	            return !out.empty();
+	        };
+
+	        if (adaptive_format_ad_dict_stream_id_ >= 0 &&
+	            adaptive_format_pl_dict_stream_id_ >= 0 &&
+	            adaptive_format_pid_dict_stream_id_ >= 0)
+	        {
+	            std::vector<uint8_t> ad_bytes, pl_bytes, pid_bytes;
+	            bool ok_ad = readAllParts(adaptive_format_ad_dict_stream_id_, ad_bytes) &&
+	                         gsc::AdaptiveKnownFieldsDicts::Deserialize(ad_bytes, adaptive_format_ad_dict_items_);
+	            bool ok_pl = readAllParts(adaptive_format_pl_dict_stream_id_, pl_bytes) &&
+	                         gsc::AdaptiveKnownFieldsDicts::Deserialize(pl_bytes, adaptive_format_pl_dict_items_);
+	            bool ok_pid = readAllParts(adaptive_format_pid_dict_stream_id_, pid_bytes) &&
+	                          gsc::AdaptiveKnownFieldsDicts::Deserialize(pid_bytes, adaptive_format_pid_dict_items_);
+
+	            if (ok_ad && ok_pl && ok_pid)
+	            {
+	                has_adaptive_format_dicts_ = true;
+	                logger->info("Loaded adaptive FORMAT dictionaries: AD={}, PL={}, PID={}",
+	                             adaptive_format_ad_dict_items_.size(),
+	                             adaptive_format_pl_dict_items_.size(),
+	                             adaptive_format_pid_dict_items_.size());
+	            }
+	            else
+	            {
+	                adaptive_format_ad_dict_items_.clear();
+	                adaptive_format_pl_dict_items_.clear();
+	                adaptive_format_pid_dict_items_.clear();
+	                has_adaptive_format_dicts_ = false;
+	                logger->warn("Failed to load adaptive FORMAT dictionaries; falling back to legacy/adaptive v0 decoding when possible");
+	            }
+	        }
+		}
 
 	for (uint32_t i = 0; i < no_keys; ++i)
 	{

@@ -69,6 +69,7 @@ gsc:	src/bit_memory.o \
 	src/zstd_compress.o \
 	src/compression_strategy.o \
 	src/logger.o \
+	src/adaptive_format_known_fields.o \
 	src/format_field_codec.o \
 	src/format_field_detector.o \
 	src/codecs/predicted_scalar_codec.o \
@@ -95,6 +96,7 @@ gsc:	src/bit_memory.o \
 	src/zstd_compress.o \
 	src/compression_strategy.o \
 	src/logger.o \
+	src/adaptive_format_known_fields.o \
 	src/format_field_codec.o \
 	src/format_field_detector.o \
 	src/codecs/predicted_scalar_codec.o \

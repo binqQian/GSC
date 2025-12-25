@@ -137,6 +137,15 @@ class DecompressionReader {
     std::vector<uint8_t> adaptive_format_buffer_;
     bool adaptive_format_eof_ = false;
 
+    // Adaptive FORMAT known-field dictionaries (optional)
+    int adaptive_format_ad_dict_stream_id_ = -1;
+    int adaptive_format_pl_dict_stream_id_ = -1;
+    int adaptive_format_pid_dict_stream_id_ = -1;
+    std::vector<std::string> adaptive_format_ad_dict_items_;
+    std::vector<std::string> adaptive_format_pl_dict_items_;
+    std::vector<std::string> adaptive_format_pid_dict_items_;
+    bool has_adaptive_format_dicts_ = false;
+
     // Integrity verification support
     bool has_integrity_hash_ = false;
     gsc::HashResult stored_hash_;
@@ -207,6 +216,11 @@ public:
 
     bool HasAdaptiveFormat() const { return has_adaptive_format_; }
     bool GetNextAdaptiveFormatRow(std::vector<uint8_t>& row_data);
+
+    bool HasAdaptiveFormatDicts() const { return has_adaptive_format_dicts_; }
+    const std::vector<std::string>& GetAdaptiveFormatADDict() const { return adaptive_format_ad_dict_items_; }
+    const std::vector<std::string>& GetAdaptiveFormatPLDict() const { return adaptive_format_pl_dict_items_; }
+    const std::vector<std::string>& GetAdaptiveFormatPIDDict() const { return adaptive_format_pid_dict_items_; }
 
     // Integrity verification
     bool HasIntegrityHash() const { return has_integrity_hash_; }

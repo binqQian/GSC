@@ -19,7 +19,7 @@
 #include <memory>
 #include <cstdint>
 #include "parallel_vcf_reader.h"
-#include "format_field_detector.h"
+#include "adaptive_format_known_fields.h"
 
 class CompressionReader {
 
@@ -98,21 +98,18 @@ class CompressionReader {
     File_Handle_2 * file_handle2 = nullptr;
     PartQueue<SPackage> * part_queue = nullptr;
 
-    // Adaptive FORMAT field compression
-    std::unique_ptr<gsc::FormatFieldManager> format_field_manager_;
     bool use_adaptive_format_ = false;  // Enable adaptive FORMAT compression
-    bool adaptive_format_primary_ = false;  // Omit legacy non-GT FORMAT fields when true
+    bool adaptive_format_primary_ = false;  // Omit legacy known FORMAT fields when true
     adaptive_format_part_backend_t adaptive_format_part_backend_ = adaptive_format_part_backend_t::auto_select;
-    std::vector<std::string> current_format_keys_;  // FORMAT keys for current row
-    uint32_t current_allele_count_ = 2;  // Allele count for current row
+    gsc::AdaptiveKnownFieldsIndices adaptive_known_indices_;
+    gsc::AdaptiveKnownFieldsDicts adaptive_known_dicts_;
 
     // Stream IDs for adaptive FORMAT compression
     int adaptive_format_stream_id_ = -1;
     std::vector<uint8_t> adaptive_format_buffer_;  // Buffer for adaptive FORMAT data
-
-    // FORMAT field indices in keys array (non-GT FORMAT fields)
-    std::vector<uint32_t> format_field_indices_;
-    std::unordered_map<uint32_t, std::string> key_id_to_name_;  // key_id -> field name
+    int adaptive_format_ad_dict_stream_id_ = -1;
+    int adaptive_format_pl_dict_stream_id_ = -1;
+    int adaptive_format_pid_dict_stream_id_ = -1;
 
     unordered_map<int, unordered_set<int>> field_order_graph;
     bool field_order_flag;
@@ -190,13 +187,12 @@ public:
 	        use_parallel_reading_ = (num_parse_threads_ > 1);
             max_memory_mb_ = params.max_memory_mb;
 
-	        // Initialize adaptive FORMAT compression
-	        format_field_manager_ = std::make_unique<gsc::FormatFieldManager>();
-	        use_adaptive_format_ = (params.compress_mode == compress_mode_t::lossless_mode) &&
-	                              (params.adaptive_format_mode != adaptive_format_mode_t::off);
-        adaptive_format_primary_ = (params.adaptive_format_mode == adaptive_format_mode_t::primary);
-        adaptive_format_part_backend_ = params.adaptive_format_part_backend;
-    }
+		        // Adaptive FORMAT compression (known-field codec; see adaptive_format_known_fields.*)
+		        use_adaptive_format_ = (params.compress_mode == compress_mode_t::lossless_mode) &&
+		                              (params.adaptive_format_mode != adaptive_format_mode_t::off);
+	        adaptive_format_primary_ = (params.adaptive_format_mode == adaptive_format_mode_t::primary);
+	        adaptive_format_part_backend_ = params.adaptive_format_part_backend;
+	    }
     
   
     

@@ -2,10 +2,12 @@
 #include "logger.h"
 #include "codecs/bit_tip_array_codec.h"
 #include "codecs/predicted_scalar_codec.h"
+#include "adaptive_format_known_fields.h"
 #include "resource_manager.h"
 #include <bitset>
 #include <chrono>
 #include <cstdlib>
+#include <cstring>
 #include <limits>
 
 using namespace std::chrono;
@@ -1062,44 +1064,114 @@ void Decompressor::appendVCFToRec(variant_desc_t &_desc, vector<uint8_t> &_genot
         }
 	    }
 
-	    // Adaptive FORMAT (non-GT) override: reconstruct from adaptive_format_data stream.
-	    // This path updates FORMAT tags via typed APIs (recommended for VCF output).
-	    bool can_use_adaptive_format = use_adaptive_format_ &&
-	                                  current_adaptive_format_row_ != nullptr &&
-	                                  !current_adaptive_format_row_->empty() &&
-	                                  format_field_manager_ != nullptr &&
-	                                  out_type != file_type::BCF_File;
+		    // Adaptive FORMAT (non-GT) override: reconstruct from adaptive_format_data stream.
+		    // This path updates FORMAT tags via typed APIs (recommended for VCF output).
+		    bool can_use_adaptive_format = use_adaptive_format_ &&
+		                                  current_adaptive_format_row_ != nullptr &&
+		                                  !current_adaptive_format_row_->empty() &&
+		                                  out_type != file_type::BCF_File;
+	
+	        const uint32_t actual_samples = static_cast<uint32_t>(_standard_block_size / decompression_reader.ploidy);
+	        const bool is_sample_subset = (actual_samples != decompression_reader.n_samples);
+	
+	        // New (known-field) adaptive row: "FMD1" payload (AD/DP/PL/GQ/PGT/PID only).
+	        gsc::AdaptiveKnownFieldsRowV1 known_row;
+	        bool has_known_row = false;
+	        if (can_use_adaptive_format &&
+	            current_adaptive_format_row_->size() >= 4 &&
+	            std::memcmp(current_adaptive_format_row_->data(),
+	                        gsc::AdaptiveKnownFieldsRowV1::kMagic, 4) == 0)
+	        {
+	            has_known_row = known_row.Parse(current_adaptive_format_row_->data(),
+	                                            current_adaptive_format_row_->size());
+	        }
+	
+		    // Legacy adaptive row (FormatFieldManager) fallback.
+		    std::vector<std::string> adaptive_format_keys;
+	        gsc::FormatFieldManager::RowDecoder adaptive_row_decoder;
+	        std::unordered_map<uint32_t, size_t> adaptive_field_idx_by_key_id;
+	        if (can_use_adaptive_format && !has_known_row) {
+	            if (format_field_manager_ == nullptr ||
+	                !format_field_manager_->prepareRowDecoder(
+	                    current_adaptive_format_row_->data(),
+	                    current_adaptive_format_row_->size(),
+	                    adaptive_row_decoder)) {
+	                can_use_adaptive_format = false;
+	            } else {
+	                adaptive_format_keys = adaptive_row_decoder.keys;
+	                if (adaptive_format_keys.empty()) can_use_adaptive_format = false;
+	            }
+	
+	            if (can_use_adaptive_format) {
+	                adaptive_field_idx_by_key_id.reserve(adaptive_format_keys.size());
+	                for (size_t k = 0; k < adaptive_format_keys.size(); ++k) {
+	                    int tag_id = bcf_hdr_id2int(out_hdr, BCF_DT_ID, adaptive_format_keys[k].c_str());
+	                    if (tag_id >= 0) adaptive_field_idx_by_key_id[static_cast<uint32_t>(tag_id)] = k;
+	                }
+	            }
+		        }
 
-        const uint32_t actual_samples = static_cast<uint32_t>(_standard_block_size / decompression_reader.ploidy);
-        const bool is_sample_subset = (actual_samples != decompression_reader.n_samples);
+	        const int tag_id_AD = bcf_hdr_id2int(out_hdr, BCF_DT_ID, "AD");
+	        const int tag_id_DP = bcf_hdr_id2int(out_hdr, BCF_DT_ID, "DP");
+	        const int tag_id_PL = bcf_hdr_id2int(out_hdr, BCF_DT_ID, "PL");
+	        const int tag_id_GQ = bcf_hdr_id2int(out_hdr, BCF_DT_ID, "GQ");
+	        const int tag_id_PGT = bcf_hdr_id2int(out_hdr, BCF_DT_ID, "PGT");
+	        const int tag_id_PID = bcf_hdr_id2int(out_hdr, BCF_DT_ID, "PID");
 
-	    std::vector<std::string> adaptive_format_keys;
-        gsc::FormatFieldManager::RowDecoder adaptive_row_decoder;
-        if (can_use_adaptive_format) {
-            if (!format_field_manager_->prepareRowDecoder(
-                    current_adaptive_format_row_->data(),
-                    current_adaptive_format_row_->size(),
-                    adaptive_row_decoder)) {
-                can_use_adaptive_format = false;
-            } else {
-                adaptive_format_keys = adaptive_row_decoder.keys;
-                if (adaptive_format_keys.empty()) can_use_adaptive_format = false;
-            }
-        }
+	        bool known_ad_decoded = false;
+	        bool known_dp_decoded = false;
+	        bool known_pl_decoded = false;
+	        bool known_gq_decoded = false;
+	        bool known_pgt_decoded = false;
+	        bool known_pid_decoded = false;
 
-        // Decode adaptive row once (per sample) and keep per-tag values, then update tags
-        // in the canonical FORMAT order as we iterate keys[] (this avoids FORMAT tag reordering).
-        std::unordered_map<uint32_t, size_t> adaptive_field_idx_by_key_id;
-        if (can_use_adaptive_format) {
-            adaptive_field_idx_by_key_id.reserve(adaptive_format_keys.size());
+	        std::vector<int32_t> known_ad_all;
+	        std::vector<int32_t> known_dp_all;
+	        std::vector<int32_t> known_pl_all;
+	        std::vector<int32_t> known_gq_all;
+	        std::vector<std::string> known_pgt_all;
+	        std::vector<std::string> known_pid_all;
 
-            for (size_t k = 0; k < adaptive_format_keys.size(); ++k) {
-                int tag_id = bcf_hdr_id2int(out_hdr, BCF_DT_ID, adaptive_format_keys[k].c_str());
-                if (tag_id >= 0) adaptive_field_idx_by_key_id[static_cast<uint32_t>(tag_id)] = k;
-            }
-        }
+	        std::vector<uint32_t> known_ad_sum;
+	        std::vector<uint8_t> known_ad_has_sum;
+	        std::vector<int32_t> known_pl_pred_gq;
+	        std::vector<uint8_t> known_pl_has_pred;
 
-	    // // FORMAT
+	        auto build_subset_int32 = [&](const std::vector<int32_t>& all_vals,
+	                                      uint32_t elems_per_sample,
+	                                      std::vector<int32_t>& out_vals)
+	        {
+	            const int32_t fill = (elems_per_sample == 1) ? bcf_int32_missing : bcf_int32_vector_end;
+	            out_vals.assign(static_cast<size_t>(actual_samples) * elems_per_sample, fill);
+	            for (uint32_t s = 0; s < actual_samples; ++s)
+	            {
+	                uint32_t orig = sampleIDs ? sampleIDs[s] : s;
+	                const size_t src_off = static_cast<size_t>(orig) * elems_per_sample;
+	                const size_t dst_off = static_cast<size_t>(s) * elems_per_sample;
+	                if (src_off + elems_per_sample <= all_vals.size() &&
+	                    dst_off + elems_per_sample <= out_vals.size())
+	                {
+	                    std::copy_n(all_vals.data() + src_off, elems_per_sample, out_vals.data() + dst_off);
+	                }
+	                else
+	                {
+	                    out_vals[dst_off] = bcf_int32_missing;
+	                }
+	            }
+	        };
+
+	        auto build_subset_strings = [&](const std::vector<std::string>& all_vals,
+	                                       std::vector<std::string>& out_vals)
+	        {
+	            out_vals.assign(actual_samples, ".");
+	            for (uint32_t s = 0; s < actual_samples; ++s)
+	            {
+	                uint32_t orig = sampleIDs ? sampleIDs[s] : s;
+	                if (orig < all_vals.size()) out_vals[s] = all_vals[orig];
+	            }
+	        };
+	
+		    // // FORMAT
 
 	    // field_desc gt_phased;
 	    for (size_t i = 0; i < _keys.size(); i++)
@@ -1214,13 +1286,25 @@ void Decompressor::appendVCFToRec(variant_desc_t &_desc, vector<uint8_t> &_genot
         {
             // In sample subset mode, skip non-GT FORMAT fields as they contain data for all samples
             // In sample subset mode: legacy non-GT FORMAT fields cannot be subsetted.
-            if (is_sample_subset) {
-                if (!can_use_adaptive_format) continue;
-                auto it_ad = adaptive_field_idx_by_key_id.find(_keys[id].key_id);
-                if (it_ad == adaptive_field_idx_by_key_id.end()) {
-                    continue;
-                }
-            }
+	            if (is_sample_subset) {
+	                if (!can_use_adaptive_format) continue;
+	                if (has_known_row) {
+	                    const uint32_t kid = _keys[id].key_id;
+	                    bool ok = false;
+	                    if (tag_id_AD >= 0 && kid == static_cast<uint32_t>(tag_id_AD) && known_row.Has(gsc::AdaptiveKnownFieldsRowV1::kMaskAD)) ok = true;
+	                    else if (tag_id_DP >= 0 && kid == static_cast<uint32_t>(tag_id_DP) && known_row.Has(gsc::AdaptiveKnownFieldsRowV1::kMaskDP)) ok = true;
+	                    else if (tag_id_PL >= 0 && kid == static_cast<uint32_t>(tag_id_PL) && known_row.Has(gsc::AdaptiveKnownFieldsRowV1::kMaskPL)) ok = true;
+	                    else if (tag_id_GQ >= 0 && kid == static_cast<uint32_t>(tag_id_GQ) && known_row.Has(gsc::AdaptiveKnownFieldsRowV1::kMaskGQ)) ok = true;
+	                    else if (tag_id_PGT >= 0 && kid == static_cast<uint32_t>(tag_id_PGT) && known_row.Has(gsc::AdaptiveKnownFieldsRowV1::kMaskPGT)) ok = true;
+	                    else if (tag_id_PID >= 0 && kid == static_cast<uint32_t>(tag_id_PID) && known_row.Has(gsc::AdaptiveKnownFieldsRowV1::kMaskPID)) ok = true;
+	                    if (!ok) continue;
+	                } else {
+	                    auto it_ad = adaptive_field_idx_by_key_id.find(_keys[id].key_id);
+	                    if (it_ad == adaptive_field_idx_by_key_id.end()) {
+	                        continue;
+	                    }
+	                }
+	            }
 
             auto update_from_strings = [&](const char* tag, const std::vector<std::string>& vals) {
                 auto countElems = [](const std::string& v) -> uint32_t {
@@ -1305,11 +1389,126 @@ void Decompressor::appendVCFToRec(variant_desc_t &_desc, vector<uint8_t> &_genot
                 }
             };
 
-            if (can_use_adaptive_format) {
-                auto it_ad = adaptive_field_idx_by_key_id.find(_keys[id].key_id);
-                if (it_ad != adaptive_field_idx_by_key_id.end()) {
-                    const char* tag = bcf_hdr_int2id(out_hdr, BCF_DT_ID, _keys[id].key_id);
-                    const size_t codec_idx = it_ad->second;
+	            if (can_use_adaptive_format && has_known_row) {
+	                const uint32_t kid = _keys[id].key_id;
+	                const char* tag = bcf_hdr_int2id(out_hdr, BCF_DT_ID, _keys[id].key_id);
+
+	                if (tag_id_AD >= 0 && kid == static_cast<uint32_t>(tag_id_AD) &&
+	                    known_row.Has(gsc::AdaptiveKnownFieldsRowV1::kMaskAD) &&
+	                    _keys[id].type == BCF_HT_INT)
+	                {
+	                    if (!known_ad_decoded) {
+	                        known_ad_decoded = known_row.DecodeAD(decompression_reader.n_samples,
+	                                                             decompression_reader.GetAdaptiveFormatADDict(),
+	                                                             known_ad_all, &known_ad_sum, &known_ad_has_sum);
+	                    }
+	                    const uint32_t len = known_row.ADCnt();
+	                    std::vector<int32_t> out_vals;
+	                    if (is_sample_subset) build_subset_int32(known_ad_all, len, out_vals);
+	                    else out_vals = known_ad_all;
+	                    if (out_vals.empty()) out_vals.assign(static_cast<size_t>(actual_samples) * len, bcf_int32_missing);
+	                    bcf_update_format_int32(out_hdr, rec, tag, out_vals.data(), static_cast<int>(out_vals.size()));
+	                    continue;
+	                }
+
+	                if (tag_id_DP >= 0 && kid == static_cast<uint32_t>(tag_id_DP) &&
+	                    known_row.Has(gsc::AdaptiveKnownFieldsRowV1::kMaskDP) &&
+	                    _keys[id].type == BCF_HT_INT)
+	                {
+	                    if (!known_dp_decoded) {
+	                        if (known_row.Has(gsc::AdaptiveKnownFieldsRowV1::kMaskAD) && !known_ad_decoded) {
+	                            known_ad_decoded = known_row.DecodeAD(decompression_reader.n_samples,
+	                                                                 decompression_reader.GetAdaptiveFormatADDict(),
+	                                                                 known_ad_all, &known_ad_sum, &known_ad_has_sum);
+	                        }
+	                        known_dp_decoded = known_row.DecodeDP(decompression_reader.n_samples,
+	                                                             known_ad_sum, known_ad_has_sum,
+	                                                             known_dp_all);
+	                    }
+	                    std::vector<int32_t> out_vals;
+	                    if (is_sample_subset) build_subset_int32(known_dp_all, 1, out_vals);
+	                    else out_vals = known_dp_all;
+	                    if (out_vals.empty()) out_vals.assign(actual_samples, bcf_int32_missing);
+	                    bcf_update_format_int32(out_hdr, rec, tag, out_vals.data(), static_cast<int>(out_vals.size()));
+	                    continue;
+	                }
+
+	                if (tag_id_PL >= 0 && kid == static_cast<uint32_t>(tag_id_PL) &&
+	                    known_row.Has(gsc::AdaptiveKnownFieldsRowV1::kMaskPL) &&
+	                    _keys[id].type == BCF_HT_INT)
+	                {
+	                    if (!known_pl_decoded) {
+	                        known_pl_decoded = known_row.DecodePL(decompression_reader.n_samples,
+	                                                             decompression_reader.GetAdaptiveFormatPLDict(),
+	                                                             known_pl_all, &known_pl_pred_gq, &known_pl_has_pred);
+	                    }
+	                    const uint32_t len = known_row.PLCnt();
+	                    std::vector<int32_t> out_vals;
+	                    if (is_sample_subset) build_subset_int32(known_pl_all, len, out_vals);
+	                    else out_vals = known_pl_all;
+	                    if (out_vals.empty()) out_vals.assign(static_cast<size_t>(actual_samples) * len, bcf_int32_missing);
+	                    bcf_update_format_int32(out_hdr, rec, tag, out_vals.data(), static_cast<int>(out_vals.size()));
+	                    continue;
+	                }
+
+	                if (tag_id_GQ >= 0 && kid == static_cast<uint32_t>(tag_id_GQ) &&
+	                    known_row.Has(gsc::AdaptiveKnownFieldsRowV1::kMaskGQ) &&
+	                    _keys[id].type == BCF_HT_INT)
+	                {
+	                    if (!known_gq_decoded) {
+	                        if (known_row.Has(gsc::AdaptiveKnownFieldsRowV1::kMaskPL) && !known_pl_decoded) {
+	                            known_pl_decoded = known_row.DecodePL(decompression_reader.n_samples,
+	                                                                 decompression_reader.GetAdaptiveFormatPLDict(),
+	                                                                 known_pl_all, &known_pl_pred_gq, &known_pl_has_pred);
+	                        }
+	                        known_gq_decoded = known_row.DecodeGQ(decompression_reader.n_samples,
+	                                                             known_pl_pred_gq, known_pl_has_pred,
+	                                                             known_gq_all);
+	                    }
+	                    std::vector<int32_t> out_vals;
+	                    if (is_sample_subset) build_subset_int32(known_gq_all, 1, out_vals);
+	                    else out_vals = known_gq_all;
+	                    if (out_vals.empty()) out_vals.assign(actual_samples, bcf_int32_missing);
+	                    bcf_update_format_int32(out_hdr, rec, tag, out_vals.data(), static_cast<int>(out_vals.size()));
+	                    continue;
+	                }
+
+	                if (tag_id_PGT >= 0 && kid == static_cast<uint32_t>(tag_id_PGT) &&
+	                    known_row.Has(gsc::AdaptiveKnownFieldsRowV1::kMaskPGT) &&
+	                    _keys[id].type == BCF_HT_STR)
+	                {
+	                    if (!known_pgt_decoded) {
+	                        known_pgt_decoded = known_row.DecodePGT(decompression_reader.n_samples, known_pgt_all);
+	                    }
+	                    std::vector<std::string> vals;
+	                    if (is_sample_subset) build_subset_strings(known_pgt_all, vals);
+	                    else vals = known_pgt_all;
+	                    update_from_strings(tag, vals);
+	                    continue;
+	                }
+
+	                if (tag_id_PID >= 0 && kid == static_cast<uint32_t>(tag_id_PID) &&
+	                    known_row.Has(gsc::AdaptiveKnownFieldsRowV1::kMaskPID) &&
+	                    _keys[id].type == BCF_HT_STR)
+	                {
+	                    if (!known_pid_decoded) {
+	                        known_pid_decoded = known_row.DecodePID(decompression_reader.n_samples,
+	                                                               decompression_reader.GetAdaptiveFormatPIDDict(),
+	                                                               known_pid_all);
+	                    }
+	                    std::vector<std::string> vals;
+	                    if (is_sample_subset) build_subset_strings(known_pid_all, vals);
+	                    else vals = known_pid_all;
+	                    update_from_strings(tag, vals);
+	                    continue;
+	                }
+	            }
+
+	            if (can_use_adaptive_format && !has_known_row) {
+	                auto it_ad = adaptive_field_idx_by_key_id.find(_keys[id].key_id);
+	                if (it_ad != adaptive_field_idx_by_key_id.end()) {
+	                    const char* tag = bcf_hdr_int2id(out_hdr, BCF_DT_ID, _keys[id].key_id);
+	                    const size_t codec_idx = it_ad->second;
                     const auto* codec = (codec_idx < adaptive_row_decoder.codecs.size())
                                             ? adaptive_row_decoder.codecs[codec_idx].get()
                                             : nullptr;

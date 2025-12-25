@@ -11,6 +11,7 @@
 #include <limits>
 #include <cstdint>
 #include <cstdlib>
+#include <cstring>
 #include <htslib/vcf.h>
 #include <htslib/hts.h>
 #include <brotli/encode.h>
@@ -164,146 +165,8 @@ namespace
         return framed;
     }
 
-    static std::unordered_set<uint32_t> parseAdaptiveRowKeyIds(const std::vector<uint8_t> &adaptive_row,
-                                                               bcf_hdr_t *hdr)
-    {
-        std::unordered_set<uint32_t> ids;
-        if (adaptive_row.empty() || hdr == nullptr)
-            return ids;
-
-        size_t pos = 0;
-        uint32_t field_count = vint_code::ReadVint(adaptive_row.data(), adaptive_row.size(), pos);
-        ids.reserve(field_count);
-
-        for (uint32_t fi = 0; fi < field_count && pos < adaptive_row.size(); ++fi)
-        {
-            uint32_t name_len = vint_code::ReadVint(adaptive_row.data(), adaptive_row.size(), pos);
-            if (pos + name_len > adaptive_row.size())
-                break;
-            std::string name(reinterpret_cast<const char *>(adaptive_row.data() + pos), name_len);
-            pos += name_len;
-
-            int tag_id = bcf_hdr_id2int(hdr, BCF_DT_ID, name.c_str());
-            if (tag_id >= 0)
-                ids.insert(static_cast<uint32_t>(tag_id));
-
-            uint32_t codec_size = vint_code::ReadVint(adaptive_row.data(), adaptive_row.size(), pos);
-            if (pos + codec_size > adaptive_row.size())
-                break;
-            pos += codec_size;
-        }
-
-        return ids;
-    }
 } // namespace
 
-// Helper function to convert binary FORMAT field data to string
-// Returns the string representation of the field value for a specific sample
-static std::string formatFieldToString(const char *data, uint32_t data_size,
-                                       int bcf_type, uint32_t sample_idx,
-                                       uint32_t values_per_sample)
-{
-    if (data == nullptr || data_size == 0)
-    {
-        return ".";
-    }
-
-    std::string result;
-
-    switch (bcf_type)
-    {
-    case BCF_HT_INT:
-    {
-        const int32_t *int_data = reinterpret_cast<const int32_t *>(data);
-        uint32_t total_values = data_size / sizeof(int32_t);
-        uint32_t start = sample_idx * values_per_sample;
-        uint32_t end = std::min(start + values_per_sample, total_values);
-
-        for (uint32_t i = start; i < end; ++i)
-        {
-            int32_t val = int_data[i];
-            // Stop at vector_end (this preserves "." vs ".,." semantics for fixed-length tags).
-            if (val == bcf_int32_vector_end)
-            {
-                break;
-            }
-            if (!result.empty())
-                result += ',';
-            // Missing value
-            if (val == bcf_int32_missing)
-            {
-                result += '.';
-            }
-            else
-            {
-                result += std::to_string(val);
-            }
-        }
-        break;
-    }
-    case BCF_HT_REAL:
-    {
-        const float *float_data = reinterpret_cast<const float *>(data);
-        uint32_t total_values = data_size / sizeof(float);
-        uint32_t start = sample_idx * values_per_sample;
-        uint32_t end = std::min(start + values_per_sample, total_values);
-
-        for (uint32_t i = start; i < end; ++i)
-        {
-            float val = float_data[i];
-            if (bcf_float_is_vector_end(val))
-            {
-                break;
-            }
-            if (!result.empty())
-                result += ',';
-            if (bcf_float_is_missing(val))
-            {
-                result += '.';
-            }
-            else
-            {
-                // Use fixed precision for real numbers
-                char buf[32];
-                snprintf(buf, sizeof(buf), "%.6g", val);
-                result += buf;
-            }
-        }
-        break;
-    }
-    case BCF_HT_STR:
-    {
-        // String data is stored as null-padded char array per sample
-        // Each sample has a fixed-width slot
-        if (values_per_sample > 0 && data_size > 0)
-        {
-            uint32_t bytes_per_sample = data_size / (sample_idx + 1); // Approximate
-            // For simplicity, return the substring for this sample
-            // String handling is more complex in BCF; fallback to raw
-            const char *str_start = data + sample_idx * bytes_per_sample;
-            size_t len = strnlen(str_start, bytes_per_sample);
-            if (len > 0)
-            {
-                result.assign(str_start, len);
-            }
-            else
-            {
-                result = ".";
-            }
-        }
-        else
-        {
-            result = ".";
-        }
-        break;
-    }
-    default:
-        result = ".";
-        break;
-    }
-
-    return result.empty() ? "." : result;
-}
 // ***************************************************************************************************************************************
 // ***************************************************************************************************************************************
 bool CompressionReader::OpenForReading(string &file_name)
@@ -599,11 +462,13 @@ void CompressionReader::InitVarinats(File_Handle_2 *_file_handle2)
     v_buf_ids_data.resize(no_keys, -1);
     // std::cerr << "no_keys:" << no_keys << endl;
 
-    // Clear adaptive FORMAT compression state
-    format_field_indices_.clear();
-    key_id_to_name_.clear();
-    current_format_keys_.clear();
+    // Clear adaptive FORMAT compression state (known-field codec).
+    adaptive_known_indices_ = gsc::AdaptiveKnownFieldsIndices();
+    adaptive_known_dicts_ = gsc::AdaptiveKnownFieldsDicts();
     adaptive_format_stream_id_ = -1;
+    adaptive_format_ad_dict_stream_id_ = -1;
+    adaptive_format_pl_dict_stream_id_ = -1;
+    adaptive_format_pid_dict_stream_id_ = -1;
     adaptive_format_buffer_.clear();
 
     for (uint32_t i = 0; i < no_keys; i++)
@@ -627,13 +492,19 @@ void CompressionReader::InitVarinats(File_Handle_2 *_file_handle2)
             FormatIdToFieldId[keys[i].key_id] = i;
             // std::cerr<<"InfoIdToFieldId:"<<FormatIdToFieldId[keys[i].key_id]<<endl;
 
-            // Collect FORMAT field info for adaptive compression (skip GT)
+            // Collect known FORMAT fields for adaptive compression (skip GT).
             if (use_adaptive_format_ && static_cast<int>(i) != key_gt_id)
             {
-                format_field_indices_.push_back(i);
-                // Get field name from vcf_hdr
                 const char *field_name = vcf_hdr->id[BCF_DT_ID][keys[i].key_id].key;
-                key_id_to_name_[keys[i].key_id] = field_name;
+                if (field_name)
+                {
+                    if (strcmp(field_name, "AD") == 0) adaptive_known_indices_.ad = static_cast<int>(i);
+                    else if (strcmp(field_name, "DP") == 0) adaptive_known_indices_.dp = static_cast<int>(i);
+                    else if (strcmp(field_name, "PL") == 0) adaptive_known_indices_.pl = static_cast<int>(i);
+                    else if (strcmp(field_name, "GQ") == 0) adaptive_known_indices_.gq = static_cast<int>(i);
+                    else if (strcmp(field_name, "PGT") == 0) adaptive_known_indices_.pgt = static_cast<int>(i);
+                    else if (strcmp(field_name, "PID") == 0) adaptive_known_indices_.pid = static_cast<int>(i);
+                }
             }
             break;
         }
@@ -651,20 +522,23 @@ void CompressionReader::InitVarinats(File_Handle_2 *_file_handle2)
         // std::cerr<<v_buf_ids_data[i]<<endl;
     }
 
-    // Register stream for adaptive FORMAT compression
-    if (use_adaptive_format_ && !format_field_indices_.empty())
+    // Register streams for adaptive known-field FORMAT compression.
+    if (use_adaptive_format_)
     {
-        adaptive_format_stream_id_ = file_handle2->RegisterStream("adaptive_format_data");
-
-        // Build format keys list for FormatFieldManager
-        current_format_keys_.clear();
-        for (uint32_t idx : format_field_indices_)
-        {
-            current_format_keys_.push_back(key_id_to_name_[keys[idx].key_id]);
-        }
-
         auto logger = LogManager::Instance().Logger();
-        logger->info("Adaptive FORMAT compression enabled for {} fields", format_field_indices_.size());
+        if (!adaptive_known_indices_.Any())
+        {
+            logger->warn("Adaptive FORMAT enabled, but no known fields (AD/DP/PL/GQ/PGT/PID) found in header; disabling adaptive FORMAT.");
+            use_adaptive_format_ = false;
+        }
+        else
+        {
+            adaptive_format_stream_id_ = file_handle2->RegisterStream("adaptive_format_data");
+            adaptive_format_ad_dict_stream_id_ = file_handle2->RegisterStream("adaptive_format_ad_dict");
+            adaptive_format_pl_dict_stream_id_ = file_handle2->RegisterStream("adaptive_format_pl_dict");
+            adaptive_format_pid_dict_stream_id_ = file_handle2->RegisterStream("adaptive_format_pid_dict");
+            logger->info("Adaptive FORMAT (known-field) compression enabled");
+        }
     }
 }
 // ***************************************************************************************************************************************
@@ -939,172 +813,22 @@ bool CompressionReader::GetVariantFromRec(bcf1_t *rec, vector<field_desc> &field
     return true;
 }
 
-// *******************************************************************************************************************************
-// Helper: Build sample FORMAT string from binary field data
-static std::string buildSampleFormatString(
-    const std::vector<uint32_t> &format_indices,
-    const std::vector<field_desc> &fields,
-    const std::vector<key_desc> &keys,
-    uint32_t sample_idx,
-    uint32_t no_samples,
-    uint32_t allele_count)
-{
-    std::string result;
-
-    for (size_t fi = 0; fi < format_indices.size(); ++fi)
-    {
-        if (fi > 0)
-            result += ':';
-
-        uint32_t idx = format_indices[fi];
-        const field_desc &field = fields[idx];
-        const key_desc &key = keys[idx];
-
-        if (!field.present || field.data == nullptr || field.data_size == 0)
-        {
-            result += '.';
-            continue;
-        }
-
-        // Calculate values per sample based on field type
-        uint32_t total_values = 0;
-        uint32_t values_per_sample = 1;
-
-        switch (key.type)
-        {
-        case BCF_HT_INT:
-            total_values = field.data_size / sizeof(int32_t);
-            values_per_sample = total_values / no_samples;
-            break;
-        case BCF_HT_REAL:
-            total_values = field.data_size / sizeof(float);
-            values_per_sample = total_values / no_samples;
-            break;
-        case BCF_HT_STR:
-            // String handling is complex, use raw data
-            {
-                uint32_t bytes_per_sample = field.data_size / no_samples;
-                const char *str_start = field.data + sample_idx * bytes_per_sample;
-                size_t len = strnlen(str_start, bytes_per_sample);
-                if (len > 0)
-                {
-                    result.append(str_start, len);
-                }
-                else
-                {
-                    result += '.';
-                }
-            }
-            continue;
-        default:
-            result += '.';
-            continue;
-        }
-
-        // Extract values for this sample
-        result += formatFieldToString(field.data, field.data_size,
-                                      key.type, sample_idx, values_per_sample);
-    }
-
-    return result;
-}
-
 bool CompressionReader::SetVariantOtherFields(bcf1_t *vcf_rec, vector<field_desc> &fields)
 {
-    // Phase 4: Full adaptive FORMAT compression integration
-    //
-    // Strategy:
-    // 1. For FORMAT fields (non-GT): use FormatFieldManager for adaptive compression
-    // 2. For FILTER/INFO fields: use existing per-type compression
-    // 3. Store adaptive FORMAT data in dedicated stream
-
-    // Check if we should use adaptive FORMAT compression
-    bool do_adaptive = use_adaptive_format_ &&
-                       adaptive_format_stream_id_ >= 0 &&
-                       !format_field_indices_.empty() &&
-                       format_field_manager_ != nullptr;
-
-    std::unordered_set<uint32_t> adaptive_row_key_ids;
+    // Known-field adaptive FORMAT compression: encode only AD/DP/PL/GQ/PGT/PID into adaptive_format_data.
+    const bool do_adaptive = use_adaptive_format_ && adaptive_format_stream_id_ >= 0;
     if (do_adaptive)
     {
-        std::vector<uint32_t> row_format_indices;
-        std::vector<std::string> row_format_keys;
-        row_format_indices.reserve(format_field_indices_.size());
-        row_format_keys.reserve(format_field_indices_.size());
+        std::vector<uint8_t> row;
+        gsc::EncodeAdaptiveKnownFieldsRowV1(vcf_rec, no_samples, fields, adaptive_known_indices_, adaptive_known_dicts_, row);
 
-        // Preserve per-record FORMAT tag set and order (excluding GT).
-        if (vcf_rec != nullptr && vcf_rec->n_fmt && vcf_rec->d.fmt != nullptr)
-        {
-            bcf_fmt_t *fmt = vcf_rec->d.fmt;
-            for (int fi = 0; fi < (int)vcf_rec->n_fmt; ++fi)
-            {
-                int tag_id = fmt[fi].id;
-                if (tag_id < 0 || tag_id >= (int)FormatIdToFieldId.size())
-                    continue;
-
-                uint32_t field_idx = static_cast<uint32_t>(FormatIdToFieldId[tag_id]);
-                if (static_cast<int>(field_idx) == key_gt_id)
-                    continue;
-                if (field_idx >= fields.size() || field_idx >= keys.size())
-                    continue;
-                if (!fields[field_idx].present)
-                    continue;
-
-                row_format_indices.push_back(field_idx);
-                row_format_keys.push_back(key_id_to_name_[keys[field_idx].key_id]);
-            }
-        }
-        else
-        {
-            // Fallback: use header-collected indices, filtered by presence.
-            for (uint32_t field_idx : format_field_indices_)
-            {
-                if (field_idx >= fields.size() || field_idx >= keys.size())
-                    continue;
-                if (!fields[field_idx].present)
-                    continue;
-                row_format_indices.push_back(field_idx);
-                row_format_keys.push_back(key_id_to_name_[keys[field_idx].key_id]);
-            }
-        }
-
-        // Initialize FormatFieldManager for this row
-        uint32_t allele_count = (vcf_rec != nullptr) ? vcf_rec->n_allele : 2;
-        format_field_manager_->initRow(row_format_keys, allele_count);
-
-        // Process each sample
-        for (uint32_t sample_idx = 0; sample_idx < no_samples; ++sample_idx)
-        {
-            // Build FORMAT string for this sample
-            std::string sample_format = buildSampleFormatString(
-                row_format_indices, fields, keys,
-                sample_idx, no_samples, allele_count);
-
-            // Feed to FormatFieldManager
-            format_field_manager_->processSample(
-                sample_format.c_str(), sample_format.size(), sample_idx);
-        }
-
-        // Finalize row and get compressed data
-        std::vector<uint8_t> adaptive_data;
-        format_field_manager_->finalizeRow(adaptive_data, adaptive_format_primary_);
-
-        // In primary mode, suppress legacy only for tags actually emitted to adaptive stream.
-        if (adaptive_format_primary_)
-        {
-            adaptive_row_key_ids = parseAdaptiveRowKeyIds(adaptive_data, vcf_hdr);
-        }
-
-        // Append to adaptive format buffer
         // Format: [row_size:4bytes][row_data]
-        uint32_t row_size = static_cast<uint32_t>(adaptive_data.size());
+        uint32_t row_size = static_cast<uint32_t>(row.size());
         adaptive_format_buffer_.insert(adaptive_format_buffer_.end(),
                                        reinterpret_cast<uint8_t *>(&row_size),
                                        reinterpret_cast<uint8_t *>(&row_size) + sizeof(row_size));
-        adaptive_format_buffer_.insert(adaptive_format_buffer_.end(),
-                                       adaptive_data.begin(), adaptive_data.end());
+        adaptive_format_buffer_.insert(adaptive_format_buffer_.end(), row.begin(), row.end());
 
-        // Check if buffer is full, flush to stream
         if (adaptive_format_buffer_.size() >= max_buffer_size)
         {
             std::vector<uint8_t> framed = encodeAdaptiveFormatPart(adaptive_format_buffer_,
@@ -1119,12 +843,12 @@ bool CompressionReader::SetVariantOtherFields(bcf1_t *vcf_rec, vector<field_desc
     // Process all fields (including FORMAT for backwards compatibility)
     for (uint32_t i = 0; i < no_keys; i++)
     {
-        // In primary adaptive mode, omit legacy non-GT FORMAT fields. They will be reconstructed from
-        // adaptive_format_data on decompression when enabled.
-        bool suppress_legacy_fmt = adaptive_format_primary_ &&
-                                   keys[i].keys_type == key_type_t::fmt &&
-                                   static_cast<int>(i) != key_gt_id &&
-                                   adaptive_row_key_ids.find(keys[i].key_id) != adaptive_row_key_ids.end();
+        // In primary mode, omit legacy known FORMAT fields, and reconstruct them from adaptive_format_data.
+        const bool suppress_legacy_fmt = adaptive_format_primary_ &&
+                                         keys[i].keys_type == key_type_t::fmt &&
+                                         static_cast<int>(i) != key_gt_id &&
+                                         adaptive_known_indices_.IsKnownFieldIndex(static_cast<int>(i)) &&
+                                         fields[i].present;
 
         switch (keys[i].type)
         {
@@ -1978,16 +1702,39 @@ void CompressionReader::CloseFiles()
             part_queue->Push(pck);
         }
 
-        // Flush remaining adaptive FORMAT data
-        if (use_adaptive_format_ && adaptive_format_stream_id_ >= 0 &&
-            !adaptive_format_buffer_.empty())
+        // Flush remaining adaptive FORMAT data and write dictionaries (known-field codec).
+        if (use_adaptive_format_ && adaptive_format_stream_id_ >= 0)
         {
-            std::vector<uint8_t> framed = encodeAdaptiveFormatPart(adaptive_format_buffer_,
-                                                                   adaptive_format_part_backend_,
-                                                                   backend_);
-            int part_id = file_handle2->AddPartPrepare(adaptive_format_stream_id_);
-            file_handle2->AddPartComplete(adaptive_format_stream_id_, part_id, framed);
-            adaptive_format_buffer_.clear();
+            if (!adaptive_format_buffer_.empty())
+            {
+                std::vector<uint8_t> framed = encodeAdaptiveFormatPart(adaptive_format_buffer_,
+                                                                       adaptive_format_part_backend_,
+                                                                       backend_);
+                int part_id = file_handle2->AddPartPrepare(adaptive_format_stream_id_);
+                file_handle2->AddPartComplete(adaptive_format_stream_id_, part_id, framed);
+                adaptive_format_buffer_.clear();
+            }
+
+            std::vector<uint8_t> ad_dict_bytes;
+            std::vector<uint8_t> pl_dict_bytes;
+            std::vector<uint8_t> pid_dict_bytes;
+            adaptive_known_dicts_.Serialize(ad_dict_bytes, pl_dict_bytes, pid_dict_bytes);
+
+            if (adaptive_format_ad_dict_stream_id_ >= 0)
+            {
+                int part_id = file_handle2->AddPartPrepare(adaptive_format_ad_dict_stream_id_);
+                file_handle2->AddPartComplete(adaptive_format_ad_dict_stream_id_, part_id, ad_dict_bytes);
+            }
+            if (adaptive_format_pl_dict_stream_id_ >= 0)
+            {
+                int part_id = file_handle2->AddPartPrepare(adaptive_format_pl_dict_stream_id_);
+                file_handle2->AddPartComplete(adaptive_format_pl_dict_stream_id_, part_id, pl_dict_bytes);
+            }
+            if (adaptive_format_pid_dict_stream_id_ >= 0)
+            {
+                int part_id = file_handle2->AddPartPrepare(adaptive_format_pid_dict_stream_id_);
+                file_handle2->AddPartComplete(adaptive_format_pid_dict_stream_id_, part_id, pid_dict_bytes);
+            }
         }
 
         part_queue->Complete();
