@@ -16,11 +16,7 @@
 #include <unordered_set>
 #include <unordered_map>
 #include <stack>
-#include <memory>
-#include <cstdint>
 #include "parallel_vcf_reader.h"
-#include "adaptive_format_known_fields.h"
-
 class CompressionReader {
 
     
@@ -34,7 +30,6 @@ class CompressionReader {
     bool in_open;
     bool vcf_hdr_read;
     compress_mode_t compress_mode;
-    compression_backend_t backend_;
     bool merge_flag;
     bool merge_failure_flag;
 
@@ -56,8 +51,8 @@ class CompressionReader {
 
     vector<string> samples_list;
     vector<variant_desc_t> v_vcf_data_compress;
-    int32_t *cur_g_data = nullptr;
-    int ncur_g_data = 0;
+    int *cur_g_data = nullptr;
+    int ncur_g_data;
     int *gt_data = nullptr;
     int temp;
     int64_t cur_pos;
@@ -97,20 +92,6 @@ class CompressionReader {
 	vector<int> v_buf_ids_data;
     File_Handle_2 * file_handle2 = nullptr;
     PartQueue<SPackage> * part_queue = nullptr;
-
-    bool use_adaptive_format_ = false;  // Enable adaptive FORMAT compression
-    bool adaptive_format_primary_ = false;  // Omit legacy known FORMAT fields when true
-    adaptive_format_part_backend_t adaptive_format_part_backend_ = adaptive_format_part_backend_t::auto_select;
-    gsc::AdaptiveKnownFieldsIndices adaptive_known_indices_;
-    gsc::AdaptiveKnownFieldsDicts adaptive_known_dicts_;
-
-    // Stream IDs for adaptive FORMAT compression
-    int adaptive_format_stream_id_ = -1;
-    std::vector<uint8_t> adaptive_format_buffer_;  // Buffer for adaptive FORMAT data
-    int adaptive_format_ad_dict_stream_id_ = -1;
-    int adaptive_format_pl_dict_stream_id_ = -1;
-    int adaptive_format_pid_dict_stream_id_ = -1;
-
     unordered_map<int, unordered_set<int>> field_order_graph;
     bool field_order_flag;
     // unordered_map<int, unordered_set<int>> graph;
@@ -123,11 +104,10 @@ class CompressionReader {
     vector<int64_t> chunks_min_pos;
     bool start_flag;
 
-	    // Parallel VCF reading
-	    gsc::ParallelVCFReader* parallel_reader_;
-	    int num_parse_threads_;
-	    bool use_parallel_reading_;
-        uint64_t max_memory_mb_;
+    // Parallel VCF reading
+    gsc::ParallelVCFReader* parallel_reader_;
+    int num_parse_threads_;
+    bool use_parallel_reading_;
 
     // int temp_count = 0;
     #ifdef LOG_INFO
@@ -139,7 +119,7 @@ class CompressionReader {
     bool GetVariantFromRec(bcf1_t* rec, vector<field_desc>& fields);
     bool GetFilterInfoFormatKeys(int &no_flt_keys, int &no_info_keys, int &no_fmt_keys, vector<key_desc> &keys);
     void ProcessFixedVariants(bcf1_t *vcf_record, variant_desc_t &desc);
-	bool SetVariantOtherFields(bcf1_t *vcf_rec, vector<field_desc> &fields);
+	bool SetVariantOtherFields(vector<field_desc> &fields);
     vector<int> topoSort(unordered_map<int, unordered_set<int>>& graph);
     vector<int> topo_sort(unordered_map<int, unordered_set<int>> &graph,unordered_map<int, int> inDegree);
 
@@ -147,7 +127,7 @@ class CompressionReader {
     
 public:
 
-	    CompressionReader() {
+    CompressionReader() {
         in_open = false;
         vcf_hdr_read = false;
         no_samples = 0;
@@ -158,12 +138,11 @@ public:
         no_vec = 0;
         start_flag = true;
         field_order_flag = false;
-	        parallel_reader_ = nullptr;
-	        num_parse_threads_ = 1;
-	        use_parallel_reading_ = false;
-            max_memory_mb_ = 0;
-	    }
-	    CompressionReader(const GSC_Params & params) {
+        parallel_reader_ = nullptr;
+        num_parse_threads_ = 1;
+        use_parallel_reading_ = false;
+    }
+    CompressionReader(const GSC_Params & params) {
         in_open = false;
         vcf_hdr_read = false;
         no_samples = 0;
@@ -174,7 +153,6 @@ public:
         in_file_name = params.in_file_name;
         in_type = params.in_type;
         compress_mode = params.compress_mode;
-        backend_ = params.backend;
         merge_flag = params.merge_file_flag;
         merge_failure_flag = false;
         v_vcf_data_compress.reserve(no_variants_in_buf);
@@ -182,17 +160,10 @@ public:
         no_vec = 0;
         start_flag = true;
         field_order_flag = false;
-	        parallel_reader_ = nullptr;
-	        num_parse_threads_ = (params.no_parse_threads == 0) ? 1 : static_cast<int>(params.no_parse_threads);
-	        use_parallel_reading_ = (num_parse_threads_ > 1);
-            max_memory_mb_ = params.max_memory_mb;
-
-		        // Adaptive FORMAT compression (known-field codec; see adaptive_format_known_fields.*)
-		        use_adaptive_format_ = (params.compress_mode == compress_mode_t::lossless_mode) &&
-		                              (params.adaptive_format_mode != adaptive_format_mode_t::off);
-	        adaptive_format_primary_ = (params.adaptive_format_mode == adaptive_format_mode_t::primary);
-	        adaptive_format_part_backend_ = params.adaptive_format_part_backend;
-	    }
+        parallel_reader_ = nullptr;
+        num_parse_threads_ = params.no_threads;
+        use_parallel_reading_ = (num_parse_threads_ > 1);
+    }
     
   
     

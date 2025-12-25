@@ -1,172 +1,8 @@
 #include "compression_reader.h"
 #include "logger.h"
-#include "bsc.h"
-#include "vint_code.h"
-#include "zstd_compress.h"
-#include "compression_strategy.h"
 #include <iostream>
 #include <fstream>
 #include <sstream>
-#include <mutex>
-#include <limits>
-#include <cstdint>
-#include <cstdlib>
-#include <cstring>
-#include <htslib/vcf.h>
-#include <htslib/hts.h>
-#include <brotli/encode.h>
-
-namespace
-{
-    constexpr uint8_t kAdaptiveMagic[4] = {'A', 'F', 'D', '1'}; // Adaptive Format Data v1
-    constexpr uint8_t kAdaptiveMethodRaw = 0;
-    constexpr uint8_t kAdaptiveMethodZstd = 1;
-    constexpr uint8_t kAdaptiveMethodBsc = 2;
-    constexpr uint8_t kAdaptiveMethodBrotli = 3;
-
-    static void writeU32LE(uint32_t v, std::vector<uint8_t> &out)
-    {
-        out.push_back(static_cast<uint8_t>(v & 0xffu));
-        out.push_back(static_cast<uint8_t>((v >> 8) & 0xffu));
-        out.push_back(static_cast<uint8_t>((v >> 16) & 0xffu));
-        out.push_back(static_cast<uint8_t>((v >> 24) & 0xffu));
-    }
-
-    static bool bscCompress(const std::vector<uint8_t> &raw, std::vector<uint8_t> &compressed)
-    {
-        static std::once_flag init_flag;
-        std::call_once(init_flag, []()
-                       { CBSCWrapper::InitLibrary(p_bsc_features); });
-
-        CBSCWrapper wrapper;
-        if (!wrapper.InitCompress(p_bsc_text))
-        {
-            return false;
-        }
-
-        return wrapper.Compress(raw, compressed);
-    }
-
-    static bool brotliCompress(const std::vector<uint8_t> &raw, std::vector<uint8_t> &compressed)
-    {
-        size_t max_out = BrotliEncoderMaxCompressedSize(raw.size());
-        if (max_out == 0)
-            return false;
-        compressed.resize(max_out);
-        size_t encoded = max_out;
-        const bool ok = BrotliEncoderCompress(
-            BROTLI_DEFAULT_QUALITY,
-            BROTLI_DEFAULT_WINDOW,
-            BROTLI_MODE_GENERIC,
-            raw.size(),
-            raw.data(),
-            &encoded,
-            compressed.data());
-        if (!ok)
-            return false;
-        compressed.resize(encoded);
-        return true;
-    }
-
-    static std::vector<uint8_t> encodeAdaptiveFormatPart(const std::vector<uint8_t> &raw,
-                                                         adaptive_format_part_backend_t config,
-                                                         compression_backend_t follow_backend)
-    {
-        // Resolve config -> concrete method.
-        if (config == adaptive_format_part_backend_t::follow)
-        {
-            switch (follow_backend)
-            {
-            case compression_backend_t::bsc:
-                config = adaptive_format_part_backend_t::bsc;
-                break;
-            case compression_backend_t::zstd:
-                config = adaptive_format_part_backend_t::zstd;
-                break;
-            case compression_backend_t::brotli:
-                config = adaptive_format_part_backend_t::brotli;
-                break;
-            default:
-                config = adaptive_format_part_backend_t::bsc;
-                break;
-            }
-        }
-
-        uint8_t method = kAdaptiveMethodRaw;
-        const std::vector<uint8_t> *payload = &raw;
-        std::vector<uint8_t> compressed_zstd;
-        std::vector<uint8_t> compressed_bsc;
-        std::vector<uint8_t> compressed_brotli;
-
-        auto consider = [&](uint8_t m, bool ok, const std::vector<uint8_t> &c, size_t &best_size)
-        {
-            if (!ok || c.empty())
-                return;
-            if (c.size() + 12 >= raw.size())
-                return; // Not worth framing overhead.
-            if (c.size() < best_size)
-            {
-                best_size = c.size();
-                method = m;
-                payload = &c;
-            }
-        };
-
-        size_t best_size = raw.size();
-        switch (config)
-        {
-        case adaptive_format_part_backend_t::raw:
-            method = kAdaptiveMethodRaw;
-            payload = &raw;
-            break;
-        case adaptive_format_part_backend_t::zstd:
-        {
-            bool ok = zstd::zstd_compress(raw, compressed_zstd);
-            consider(kAdaptiveMethodZstd, ok, compressed_zstd, best_size);
-            break;
-        }
-        case adaptive_format_part_backend_t::bsc:
-        {
-            bool ok = bscCompress(raw, compressed_bsc);
-            consider(kAdaptiveMethodBsc, ok, compressed_bsc, best_size);
-            break;
-        }
-        case adaptive_format_part_backend_t::brotli:
-        {
-            bool ok = brotliCompress(raw, compressed_brotli);
-            consider(kAdaptiveMethodBrotli, ok, compressed_brotli, best_size);
-            break;
-        }
-        case adaptive_format_part_backend_t::auto_select:
-        default:
-        {
-            bool ok_zstd = zstd::zstd_compress(raw, compressed_zstd);
-            bool ok_bsc = bscCompress(raw, compressed_bsc);
-            bool ok_brotli = brotliCompress(raw, compressed_brotli);
-            consider(kAdaptiveMethodZstd, ok_zstd, compressed_zstd, best_size);
-            consider(kAdaptiveMethodBsc, ok_bsc, compressed_bsc, best_size);
-            consider(kAdaptiveMethodBrotli, ok_brotli, compressed_brotli, best_size);
-            break;
-        }
-        }
-
-        std::vector<uint8_t> framed;
-        framed.reserve(12 + payload->size());
-        framed.push_back(kAdaptiveMagic[0]);
-        framed.push_back(kAdaptiveMagic[1]);
-        framed.push_back(kAdaptiveMagic[2]);
-        framed.push_back(kAdaptiveMagic[3]);
-        framed.push_back(method);
-        framed.push_back(0);
-        framed.push_back(0);
-        framed.push_back(0);
-        writeU32LE(static_cast<uint32_t>(raw.size()), framed);
-        framed.insert(framed.end(), payload->begin(), payload->end());
-        return framed;
-    }
-
-} // namespace
-
 // ***************************************************************************************************************************************
 // ***************************************************************************************************************************************
 bool CompressionReader::OpenForReading(string &file_name)
@@ -379,7 +215,7 @@ void CompressionReader::initializeColumnBlocks()
     col_vec_read_in_block.resize(n_col_blocks, 0);
 
     logger->debug("Column tiling: TILED mode (n_col_blocks={}, total_haplotypes={}, max_block_cols={}, no_vec_in_block={})",
-                  n_col_blocks, total_haplotypes, max_block_cols, no_vec_in_block);
+                 n_col_blocks, total_haplotypes, max_block_cols, no_vec_in_block);
 
     for (uint32_t cb = 0; cb < n_col_blocks; ++cb)
     {
@@ -395,7 +231,7 @@ void CompressionReader::initializeColumnBlocks()
         // Initialize buffer for this column block
         uint64_t col_block_max_size = block_vec_len * no_vec_in_block + 1;
         logger->debug("  Column block {}: haplotypes={}, vec_len={}, buffer_size={}",
-                      cb, block_size, block_vec_len, col_block_max_size);
+                     cb, block_size, block_vec_len, col_block_max_size);
         col_bv_buffers[cb].Create(col_block_max_size);
     }
 }
@@ -461,16 +297,6 @@ void CompressionReader::InitVarinats(File_Handle_2 *_file_handle2)
     v_buf_ids_size.resize(no_keys, -1);
     v_buf_ids_data.resize(no_keys, -1);
     // std::cerr << "no_keys:" << no_keys << endl;
-
-    // Clear adaptive FORMAT compression state (known-field codec).
-    adaptive_known_indices_ = gsc::AdaptiveKnownFieldsIndices();
-    adaptive_known_dicts_ = gsc::AdaptiveKnownFieldsDicts();
-    adaptive_format_stream_id_ = -1;
-    adaptive_format_ad_dict_stream_id_ = -1;
-    adaptive_format_pl_dict_stream_id_ = -1;
-    adaptive_format_pid_dict_stream_id_ = -1;
-    adaptive_format_buffer_.clear();
-
     for (uint32_t i = 0; i < no_keys; i++)
     {
         switch (keys[i].keys_type)
@@ -491,21 +317,6 @@ void CompressionReader::InitVarinats(File_Handle_2 *_file_handle2)
                 FormatIdToFieldId.resize(keys[i].key_id + 1, -1);
             FormatIdToFieldId[keys[i].key_id] = i;
             // std::cerr<<"InfoIdToFieldId:"<<FormatIdToFieldId[keys[i].key_id]<<endl;
-
-            // Collect known FORMAT fields for adaptive compression (skip GT).
-            if (use_adaptive_format_ && static_cast<int>(i) != key_gt_id)
-            {
-                const char *field_name = vcf_hdr->id[BCF_DT_ID][keys[i].key_id].key;
-                if (field_name)
-                {
-                    if (strcmp(field_name, "AD") == 0) adaptive_known_indices_.ad = static_cast<int>(i);
-                    else if (strcmp(field_name, "DP") == 0) adaptive_known_indices_.dp = static_cast<int>(i);
-                    else if (strcmp(field_name, "PL") == 0) adaptive_known_indices_.pl = static_cast<int>(i);
-                    else if (strcmp(field_name, "GQ") == 0) adaptive_known_indices_.gq = static_cast<int>(i);
-                    else if (strcmp(field_name, "PGT") == 0) adaptive_known_indices_.pgt = static_cast<int>(i);
-                    else if (strcmp(field_name, "PID") == 0) adaptive_known_indices_.pid = static_cast<int>(i);
-                }
-            }
             break;
         }
     }
@@ -520,25 +331,6 @@ void CompressionReader::InitVarinats(File_Handle_2 *_file_handle2)
     {
         v_buf_ids_data[i] = file_handle2->RegisterStream("key_" + to_string(i) + "_data");
         // std::cerr<<v_buf_ids_data[i]<<endl;
-    }
-
-    // Register streams for adaptive known-field FORMAT compression.
-    if (use_adaptive_format_)
-    {
-        auto logger = LogManager::Instance().Logger();
-        if (!adaptive_known_indices_.Any())
-        {
-            logger->warn("Adaptive FORMAT enabled, but no known fields (AD/DP/PL/GQ/PGT/PID) found in header; disabling adaptive FORMAT.");
-            use_adaptive_format_ = false;
-        }
-        else
-        {
-            adaptive_format_stream_id_ = file_handle2->RegisterStream("adaptive_format_data");
-            adaptive_format_ad_dict_stream_id_ = file_handle2->RegisterStream("adaptive_format_ad_dict");
-            adaptive_format_pl_dict_stream_id_ = file_handle2->RegisterStream("adaptive_format_pl_dict");
-            adaptive_format_pid_dict_stream_id_ = file_handle2->RegisterStream("adaptive_format_pid_dict");
-            logger->info("Adaptive FORMAT (known-field) compression enabled");
-        }
     }
 }
 // ***************************************************************************************************************************************
@@ -813,49 +605,17 @@ bool CompressionReader::GetVariantFromRec(bcf1_t *rec, vector<field_desc> &field
     return true;
 }
 
-bool CompressionReader::SetVariantOtherFields(bcf1_t *vcf_rec, vector<field_desc> &fields)
+// *******************************************************************************************************************************
+bool CompressionReader::SetVariantOtherFields(vector<field_desc> &fields)
 {
-    // Known-field adaptive FORMAT compression: encode only AD/DP/PL/GQ/PGT/PID into adaptive_format_data.
-    const bool do_adaptive = use_adaptive_format_ && adaptive_format_stream_id_ >= 0;
-    if (do_adaptive)
-    {
-        std::vector<uint8_t> row;
-        gsc::EncodeAdaptiveKnownFieldsRowV1(vcf_rec, no_samples, fields, adaptive_known_indices_, adaptive_known_dicts_, row);
-
-        // Format: [row_size:4bytes][row_data]
-        uint32_t row_size = static_cast<uint32_t>(row.size());
-        adaptive_format_buffer_.insert(adaptive_format_buffer_.end(),
-                                       reinterpret_cast<uint8_t *>(&row_size),
-                                       reinterpret_cast<uint8_t *>(&row_size) + sizeof(row_size));
-        adaptive_format_buffer_.insert(adaptive_format_buffer_.end(), row.begin(), row.end());
-
-        if (adaptive_format_buffer_.size() >= max_buffer_size)
-        {
-            std::vector<uint8_t> framed = encodeAdaptiveFormatPart(adaptive_format_buffer_,
-                                                                   adaptive_format_part_backend_,
-                                                                   backend_);
-            int part_id = file_handle2->AddPartPrepare(adaptive_format_stream_id_);
-            file_handle2->AddPartComplete(adaptive_format_stream_id_, part_id, framed);
-            adaptive_format_buffer_.clear();
-        }
-    }
-
-    // Process all fields (including FORMAT for backwards compatibility)
     for (uint32_t i = 0; i < no_keys; i++)
     {
-        // In primary mode, omit legacy known FORMAT fields, and reconstruct them from adaptive_format_data.
-        const bool suppress_legacy_fmt = adaptive_format_primary_ &&
-                                         keys[i].keys_type == key_type_t::fmt &&
-                                         static_cast<int>(i) != key_gt_id &&
-                                         adaptive_known_indices_.IsKnownFieldIndex(static_cast<int>(i)) &&
-                                         fields[i].present;
 
         switch (keys[i].type)
         {
         case BCF_HT_INT:
 
-            v_o_buf[i].WriteInt(fields[i].data,
-                                (!suppress_legacy_fmt && fields[i].present) ? fields[i].data_size : 0);
+            v_o_buf[i].WriteInt(fields[i].data, fields[i].present ? fields[i].data_size : 0);
 
 #ifdef LOG_INFO
             {
@@ -867,8 +627,7 @@ bool CompressionReader::SetVariantOtherFields(bcf1_t *vcf_rec, vector<field_desc
 
             break;
         case BCF_HT_REAL:
-            v_o_buf[i].WriteReal(fields[i].data,
-                                 (!suppress_legacy_fmt && fields[i].present) ? fields[i].data_size : 0);
+            v_o_buf[i].WriteReal(fields[i].data, fields[i].present ? fields[i].data_size : 0);
 
 #ifdef LOG_INFO
             {
@@ -881,12 +640,11 @@ bool CompressionReader::SetVariantOtherFields(bcf1_t *vcf_rec, vector<field_desc
 
             break;
         case BCF_HT_STR:
-            v_o_buf[i].WriteText(fields[i].data,
-                                 (!suppress_legacy_fmt && fields[i].present) ? fields[i].data_size : 0);
+            v_o_buf[i].WriteText(fields[i].data, fields[i].present ? fields[i].data_size : 0);
             break;
         case BCF_HT_FLAG:
 
-            v_o_buf[i].WriteFlag(!suppress_legacy_fmt && fields[i].present);
+            v_o_buf[i].WriteFlag(fields[i].present);
             break;
         }
 
@@ -973,7 +731,7 @@ bool CompressionReader::ProcessInVCF()
                         logger->error("Repair VCF file OR set correct ploidy using -p option.");
                         exit(9);
                     }
-                    if (tmpi % 100 == 0)
+                    if (tmpi % 100000 == 0)
                     {
                         logger->info("Processed {} variants...", tmpi);
                     }
@@ -981,7 +739,7 @@ bool CompressionReader::ProcessInVCF()
                     {
                         std::vector<field_desc> curr_field(keys.size());
                         GetVariantFromRec(vcf_record, curr_field);
-                        SetVariantOtherFields(vcf_record, curr_field);
+                        SetVariantOtherFields(curr_field);
                         for (size_t j = 0; j < keys.size(); ++j)
                         {
                             if (curr_field[j].data_size > 0)
@@ -1027,7 +785,7 @@ bool CompressionReader::ProcessInVCF()
                     logger->error("Repair VCF file OR set correct ploidy using -p option.");
                     exit(9);
                 }
-                if (tmpi % 100 == 0)
+                if (tmpi % 100000 == 0)
                 {
                     logger->info("Processed {} variants...", tmpi);
                 }
@@ -1038,7 +796,7 @@ bool CompressionReader::ProcessInVCF()
 
                     GetVariantFromRec(vcf_record, curr_field);
 
-                    SetVariantOtherFields(vcf_record, curr_field);
+                    SetVariantOtherFields(curr_field);
 
                     for (size_t j = 0; j < keys.size(); ++j)
                     {
@@ -1064,14 +822,11 @@ bool CompressionReader::ProcessInVCF()
         order = topo_sort(field_order_graph, inDegree);
     if (cur_g_data)
     {
-        std::free(cur_g_data);
-        cur_g_data = nullptr;
-        ncur_g_data = 0;
+        delete[] cur_g_data;
     }
     if (gt_data)
     {
         delete[] gt_data;
-        gt_data = nullptr;
     }
 
     logger->info("Read all the variants and genotypes.");
@@ -1380,7 +1135,7 @@ void CompressionReader::addVariant(int *gt_data, int ngt_data, variant_desc_t &d
             {
                 auto logger = LogManager::Instance().Logger();
                 logger->debug("Pushing row block {}: {} variants across {} column blocks",
-                              block_id, v_vcf_data_compress.size(), n_col_blocks);
+                             block_id, v_vcf_data_compress.size(), n_col_blocks);
 
                 for (uint32_t col_block_id = 0; col_block_id < n_col_blocks; ++col_block_id)
                 {
@@ -1388,7 +1143,7 @@ void CompressionReader::addVariant(int *gt_data, int ngt_data, variant_desc_t &d
                     col_bv.TakeOwnership();
 
                     logger->debug("  Pushing col_block {}: block_id={}, num_rows={}, buffer_size={}",
-                                  col_block_id, block_id, no_vec_in_block, col_bv.mem_buffer_pos);
+                                 col_block_id, block_id, no_vec_in_block, col_bv.mem_buffer_pos);
 
                     // Only the last column block carries the variant descriptors
                     // Other column blocks get empty vectors to avoid duplicate storage
@@ -1562,13 +1317,20 @@ void CompressionReader::addVariant(int *gt_data, int ngt_data, variant_desc_t &d
 // ***************************************************************************************************************************************
 uint32_t CompressionReader::setNoVecBlock(GSC_Params &params)
 {
-    auto logger = LogManager::Instance().Logger();
     params.var_in_block = params.max_block_rows ? params.max_block_rows : (no_samples * params.ploidy);
 
-    // Note: Thread auto-configuration is now handled by ResourceManager in compressor.cpp
-    // This function only sets block-related parameters
+    int numThreads = std::thread::hardware_concurrency() / 2;
 
-    logger->debug("Block size: {} variants", params.var_in_block);
+    int numChunks = 1 + (params.var_in_block / 1024);
+
+    if (numChunks < numThreads)
+    {
+
+        numThreads = numChunks;
+    }
+
+    params.no_gt_threads = numThreads;
+    // params.no_gt_threads = 1;
 
     if (params.var_in_block < 1024)
     {
@@ -1700,41 +1462,6 @@ void CompressionReader::CloseFiles()
             SPackage pck(i, v_buf_ids_size[i], v_buf_ids_data[i], part_id, v_size, v_data);
 
             part_queue->Push(pck);
-        }
-
-        // Flush remaining adaptive FORMAT data and write dictionaries (known-field codec).
-        if (use_adaptive_format_ && adaptive_format_stream_id_ >= 0)
-        {
-            if (!adaptive_format_buffer_.empty())
-            {
-                std::vector<uint8_t> framed = encodeAdaptiveFormatPart(adaptive_format_buffer_,
-                                                                       adaptive_format_part_backend_,
-                                                                       backend_);
-                int part_id = file_handle2->AddPartPrepare(adaptive_format_stream_id_);
-                file_handle2->AddPartComplete(adaptive_format_stream_id_, part_id, framed);
-                adaptive_format_buffer_.clear();
-            }
-
-            std::vector<uint8_t> ad_dict_bytes;
-            std::vector<uint8_t> pl_dict_bytes;
-            std::vector<uint8_t> pid_dict_bytes;
-            adaptive_known_dicts_.Serialize(ad_dict_bytes, pl_dict_bytes, pid_dict_bytes);
-
-            if (adaptive_format_ad_dict_stream_id_ >= 0)
-            {
-                int part_id = file_handle2->AddPartPrepare(adaptive_format_ad_dict_stream_id_);
-                file_handle2->AddPartComplete(adaptive_format_ad_dict_stream_id_, part_id, ad_dict_bytes);
-            }
-            if (adaptive_format_pl_dict_stream_id_ >= 0)
-            {
-                int part_id = file_handle2->AddPartPrepare(adaptive_format_pl_dict_stream_id_);
-                file_handle2->AddPartComplete(adaptive_format_pl_dict_stream_id_, part_id, pl_dict_bytes);
-            }
-            if (adaptive_format_pid_dict_stream_id_ >= 0)
-            {
-                int part_id = file_handle2->AddPartPrepare(adaptive_format_pid_dict_stream_id_);
-                file_handle2->AddPartComplete(adaptive_format_pid_dict_stream_id_, part_id, pid_dict_bytes);
-            }
         }
 
         part_queue->Complete();

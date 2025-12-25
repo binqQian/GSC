@@ -22,29 +22,6 @@ enum class compression_backend_t
     zstd,
     brotli
 };
-
-enum class adaptive_format_mode_t
-{
-    off,     // Disable adaptive FORMAT stream
-    shadow,  // Write adaptive stream in addition to legacy FORMAT fields
-    primary  // Write adaptive stream and omit legacy non-GT FORMAT fields
-};
-
-enum class adaptive_format_part_backend_t
-{
-    auto_select, // Try multiple codecs and pick smallest
-    follow,      // Follow --compressor backend
-    raw,         // Store raw bytes (no compression)
-    bsc,
-    zstd,
-    brotli
-};
-
-enum class integrity_check_mode_t
-{
-    none,       // No integrity check (default)
-    xxhash64    // Use XXHash64 (fast, recommended)
-};
 enum class file_type
 {
     VCF_File,
@@ -83,9 +60,6 @@ struct GSC_Params
 
     uint32_t no_threads;
     uint32_t no_gt_threads;
-    uint32_t no_parse_threads;       // Threads for VCF parsing
-    uint32_t queue_capacity;         // Max blocks in GT queue (0 = auto)
-    uint64_t max_memory_mb;          // Memory limit in MB (0 = no limit)
     uint32_t var_in_block;
     uint32_t ploidy;
     uint64_t vec_len;
@@ -111,18 +85,6 @@ struct GSC_Params
     float min_qual, max_qual; 
     std::string out_id;
 
-    // Adaptive FORMAT compression / decompression
-    adaptive_format_mode_t adaptive_format_mode;
-    adaptive_format_part_backend_t adaptive_format_part_backend;
-    bool use_adaptive_format;  // Prefer adaptive FORMAT stream on decompression (VCF output recommended)
-
-    // Integrity verification settings
-    integrity_check_mode_t integrity_mode;
-    bool verify_on_decompress;  // Auto-verify on decompression if hash is present
-
-    // Resource management
-    bool show_resource_plan;     // Show detailed resource configuration at startup
-
     GSC_Params()
     {
         task_mode = task_mode_t::none;
@@ -134,12 +96,8 @@ struct GSC_Params
         max_block_rows = 10000;
         max_block_cols = 10000;
         ploidy = 2;
-        // Resource auto-configuration: 0 = automatic based on system resources
-        no_threads = 0;              // 0 = auto (based on CPU cores)
-        no_gt_threads = 0;           // 0 = auto (based on cores and memory)
-        no_parse_threads = 0;        // 0 = auto (usually 1-2)
-        queue_capacity = 0;          // 0 = auto (based on memory budget)
-        max_memory_mb = 0;           // 0 = no hard limit (ResourceManager still plans using available memory)
+        no_threads = 5;
+        no_gt_threads = 1;
         var_in_block = 0;
         vec_len = 0;
         n_samples = 0;
@@ -169,17 +127,5 @@ struct GSC_Params
         maxAC = INT32_MAX;
         minAF = 0;
         maxAF = 1;
-
-        // Keep legacy behavior by default unless explicitly enabled via CLI.
-        adaptive_format_mode = adaptive_format_mode_t::off;
-        adaptive_format_part_backend = adaptive_format_part_backend_t::auto_select;
-        use_adaptive_format = false;
-
-        // Integrity verification defaults
-        integrity_mode = integrity_check_mode_t::none;  // Disabled by default
-        verify_on_decompress = true;  // Auto-verify if hash is present
-
-        // Resource management
-        show_resource_plan = false;  // Show resource plan at startup (--show-resource-plan)
     }
 };

@@ -20,8 +20,8 @@
 namespace gsc {
 
 // Constants for parallel parsing
-const size_t VCF_PARSE_DEFAULT_BATCH_SIZE = 1024;  // Variants per batch (cap peak memory)
-const size_t VCF_PARSE_QUEUE_SIZE = 12;            // Line queue capacity
+const size_t VCF_PARSE_BATCH_SIZE = 50000;  // Variants per batch
+const size_t VCF_PARSE_QUEUE_SIZE = 12;     // Line queue capacity
 
 /**
  * @brief Parallel VCF/BCF reader with multi-threaded parsing
@@ -140,7 +140,6 @@ private:
     uint64_t next_seq_to_process_;
     std::atomic<uint64_t> total_parsed_;
     bool parsing_finished_;
-    size_t batch_size_;
 
     // Parser worker thread function
     void ParserThread();
@@ -150,7 +149,7 @@ public:
      * @brief Construct parallel VCF reader
      * @param threads Number of parsing threads (ignored for BCF)
      */
-    explicit ParallelVCFReader(int threads = 1, size_t batch_size = VCF_PARSE_DEFAULT_BATCH_SIZE);
+    explicit ParallelVCFReader(int threads = 1);
 
     ~ParallelVCFReader();
 

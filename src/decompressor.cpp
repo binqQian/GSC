@@ -1,13 +1,7 @@
 #include "decompressor.h"
 #include "logger.h"
-#include "codecs/bit_tip_array_codec.h"
-#include "codecs/predicted_scalar_codec.h"
-#include "adaptive_format_known_fields.h"
-#include "resource_manager.h"
 #include <bitset>
 #include <chrono>
-#include <cstdlib>
-#include <cstring>
 #include <limits>
 
 using namespace std::chrono;
@@ -292,20 +286,8 @@ bool Decompressor::initDecompression(DecompressionReader &decompression_reader){
 // Official Decompress Program Entry
 bool Decompressor::decompressProcess()
 {
-    auto logger = LogManager::Instance().Logger();
     MyBarrier  my_barrier(3);
-
-    // ========== Resource Auto-Configuration for Decompression ==========
-    if (params.no_threads == 0) {
-        gsc::SystemInfo sys_info = gsc::SystemInfo::Detect();
-        // For decompression, use half of available cores (simpler workload)
-        int available_cores = std::max(1, (int)sys_info.cpu_cores - 1);
-        uint32_t auto_threads = static_cast<uint32_t>(available_cores / 2);
-        auto_threads = std::max(1u, std::min(auto_threads, 8u));
-        params.no_threads = auto_threads;
-        logger->debug("Auto-configured decompression threads: {}", params.no_threads);
-    }
-
+    
     decompression_reader.SetNoThreads(params.no_threads);
     // unique_ptr<CompressedFileLoading> cfile(new CompressedFileLoading());
 
@@ -318,40 +300,12 @@ bool Decompressor::decompressProcess()
     if(decompression_mode_type) {
         if(!decompression_reader.OpenReadingPart2(in_file_name))
             return false;
-
-    }
-
-    // Try to read integrity hash footer
-    decompression_reader.ReadIntegrityFooter(in_file_name);
-
-    // Initialize integrity verification if hash is present and verification is enabled
-    if (params.verify_on_decompress && decompression_reader.HasIntegrityHash()) {
-        auto logger = LogManager::Instance().Logger();
-        integrity_manager_ = std::make_unique<gsc::IntegrityManager>();
-        integrity_manager_->EnableDecompression(decompression_reader.GetStoredHash());
-        logger->info("Integrity verification enabled, expected hash: {}",
-            decompression_reader.GetStoredHash().ToHexString());
-    }
-
+        
+    }    
     decompression_reader.decompress_meta(v_samples, header);
-
-    // Update hash with header and samples if verification is enabled
-    if (integrity_manager_ && integrity_manager_->IsEnabled()) {
-        integrity_manager_->UpdateDecompressedData(header);
-        for (const auto& sample : v_samples) {
-            integrity_manager_->UpdateDecompressedData(sample);
-        }
-    }
     
     if(analyzeInputSamples(v_samples)) // Retrieving sample name.
         return false;
-
-    // Adaptive FORMAT decoding is opt-in on decompression.
-    // Recommended with VCF output; for BCF output, legacy typed FORMAT is preferred.
-    use_adaptive_format_ = params.use_adaptive_format && decompression_reader.HasAdaptiveFormat();
-    if (use_adaptive_format_) {
-        format_field_manager_ = std::make_unique<gsc::FormatFieldManager>();
-    }
 
 
     if(params.split_flag){
@@ -410,7 +364,6 @@ bool Decompressor::decompressProcess()
 
                         }
                     all_fields_io.clear();
-                    all_adaptive_format_rows_io.clear();
 
                 }
                 else{
@@ -443,12 +396,6 @@ bool Decompressor::decompressProcess()
                 {
                     all_fields.emplace_back(vector<field_desc>(decompression_reader.keys.size()));
                     decompression_reader.GetVariants(all_fields.back());
-                    if (use_adaptive_format_) {
-                        all_adaptive_format_rows.emplace_back();
-                        if (!decompression_reader.GetNextAdaptiveFormatRow(all_adaptive_format_rows.back())) {
-                            all_adaptive_format_rows.back().clear();
-                        }
-                    }
 
                 }
             }
@@ -478,9 +425,6 @@ bool Decompressor::decompressProcess()
         swap(chunk_variant_offset, chunk_variant_offset_io);
         if(params.compress_mode == compress_mode_t::lossless_mode){
             swap(all_fields, all_fields_io);
-            if (use_adaptive_format_) {
-                swap(all_adaptive_format_rows, all_adaptive_format_rows_io);
-            }
         }
         start_chunk_actual_pos = decompression_reader.getActualPos(cur_chunk_id);
         end_chunk_actual_pos = decompression_reader.getActualPos(cur_chunk_id+1);
@@ -539,19 +483,6 @@ bool Decompressor::Close(){
         if(tmp_arr)
             delete[] tmp_arr;
     }
-
-    // Perform integrity verification if enabled
-    if (integrity_manager_ && integrity_manager_->IsEnabled()) {
-        auto logger = LogManager::Instance().Logger();
-        bool verified = integrity_manager_->VerifyDecompression();
-        if (!verified) {
-            logger->error("DATA INTEGRITY VERIFICATION FAILED!");
-            logger->error("The decompressed data does not match the original data.");
-            // Note: We still return true to allow the output file to be written,
-            // but the user is warned about the integrity failure.
-        }
-    }
-
     return true;
 }
 // *****************************************************************************************************************
@@ -818,10 +749,9 @@ void Decompressor::appendVCF(variant_desc_t &_desc, vector<uint8_t> &_my_str, si
 
             }
             bcf_update_genotypes(out_hdr, rec, gt_arr.data(), _no_haplotypes);
-	        }
-	    }
-
-	    if(params.split_flag){
+        }
+    }
+    if(params.split_flag){
 
         if(_desc.chrom != cur_chrom){
             if(cur_file != -1 ){
@@ -851,143 +781,6 @@ void Decompressor::appendVCF(variant_desc_t &_desc, vector<uint8_t> &_my_str, si
 
 }
 // // *****************************************************************************************************************
-
-void Decompressor::applyAdaptiveFormatRowToRec(const std::vector<uint8_t>& row,
-                                               const std::vector<std::string>& adaptive_format_keys,
-                                               const std::vector<key_desc>& all_keys,
-                                               size_t standard_block_size)
-{
-    if (!format_field_manager_ || adaptive_format_keys.empty() || row.empty()) {
-        return;
-    }
-
-    uint32_t actual_samples = static_cast<uint32_t>(standard_block_size / decompression_reader.ploidy);
-    bool is_sample_subset = (actual_samples != decompression_reader.n_samples);
-
-    std::vector<std::vector<std::string>> per_field_values(
-        adaptive_format_keys.size(), std::vector<std::string>(actual_samples));
-
-    for (uint32_t out_sample_idx = 0; out_sample_idx < actual_samples; ++out_sample_idx) {
-        uint32_t orig_sample_idx = is_sample_subset ? sampleIDs[out_sample_idx] : out_sample_idx;
-
-        std::string decoded = format_field_manager_->decodeSample(
-            row.data(), row.size(), orig_sample_idx, adaptive_format_keys);
-
-        size_t start = 0;
-        for (size_t k = 0; k < adaptive_format_keys.size(); ++k) {
-            size_t sep = decoded.find(':', start);
-            std::string v = (sep == std::string::npos)
-                                ? decoded.substr(start)
-                                : decoded.substr(start, sep - start);
-            if (v.empty()) v = ".";
-            per_field_values[k][out_sample_idx] = std::move(v);
-            if (sep == std::string::npos) {
-                start = decoded.size();
-            } else {
-                start = sep + 1;
-            }
-        }
-    }
-
-    auto findFmtKey = [&](const std::string& tag) -> const key_desc* {
-        int tag_id = bcf_hdr_id2int(out_hdr, BCF_DT_ID, tag.c_str());
-        if (tag_id < 0) return nullptr;
-        for (const auto& kd : all_keys) {
-            if (kd.keys_type == key_type_t::fmt && kd.key_id == static_cast<uint32_t>(tag_id)) {
-                return &kd;
-            }
-        }
-        return nullptr;
-    };
-
-    auto countElems = [](const std::string& v) -> uint32_t {
-        if (v.empty() || v == ".") return 1;
-        uint32_t n = 1;
-        for (char c : v) if (c == ',') ++n;
-        return n;
-    };
-
-    for (size_t k = 0; k < adaptive_format_keys.size(); ++k) {
-        const std::string& tag = adaptive_format_keys[k];
-        const key_desc* kd = findFmtKey(tag);
-        if (!kd) continue;
-
-        uint32_t max_elems = 1;
-        for (uint32_t s = 0; s < actual_samples; ++s) {
-            max_elems = std::max(max_elems, countElems(per_field_values[k][s]));
-        }
-
-        if (kd->type == BCF_HT_STR) {
-            std::vector<const char*> cvals(actual_samples);
-            for (uint32_t s = 0; s < actual_samples; ++s) cvals[s] = per_field_values[k][s].c_str();
-            bcf_update_format_string(out_hdr, rec, tag.c_str(), cvals.data(), static_cast<int>(actual_samples));
-            continue;
-        }
-
-        if (kd->type == BCF_HT_INT) {
-            std::vector<int32_t> out(static_cast<size_t>(actual_samples) * max_elems, bcf_int32_vector_end);
-            for (uint32_t s = 0; s < actual_samples; ++s) {
-                const std::string& v = per_field_values[k][s];
-                size_t off = static_cast<size_t>(s) * max_elems;
-
-                if (v.empty() || v == ".") {
-                    // Fully missing: encode as a single missing value (not empty), so VCF prints ".".
-                    out[off] = bcf_int32_missing;
-                    continue;
-                }
-
-                uint32_t e = 0;
-                size_t start = 0;
-                while (e < max_elems) {
-                    size_t sep = v.find(',', start);
-                    std::string tok = (sep == std::string::npos) ? v.substr(start) : v.substr(start, sep - start);
-                    if (tok.empty() || tok == ".") {
-                        out[off + e] = bcf_int32_missing;
-                    } else {
-                        char* endp = nullptr;
-                        long val = std::strtol(tok.c_str(), &endp, 10);
-                        out[off + e] = (endp != nullptr && *endp == '\0') ? static_cast<int32_t>(val) : bcf_int32_missing;
-                    }
-                    ++e;
-                    if (sep == std::string::npos) break;
-                    start = sep + 1;
-                }
-            }
-            bcf_update_format_int32(out_hdr, rec, tag.c_str(), out.data(), static_cast<int>(out.size()));
-        } else if (kd->type == BCF_HT_REAL) {
-            std::vector<float> out(static_cast<size_t>(actual_samples) * max_elems);
-            for (auto& x : out) bcf_float_set_vector_end(x);
-            for (uint32_t s = 0; s < actual_samples; ++s) {
-                const std::string& v = per_field_values[k][s];
-                size_t off = static_cast<size_t>(s) * max_elems;
-
-                if (v.empty() || v == ".") {
-                    bcf_float_set_missing(out[off]);
-                    continue;
-                }
-
-                uint32_t e = 0;
-                size_t start = 0;
-                while (e < max_elems) {
-                    size_t sep = v.find(',', start);
-                    std::string tok = (sep == std::string::npos) ? v.substr(start) : v.substr(start, sep - start);
-                    if (tok.empty() || tok == ".") {
-                        bcf_float_set_missing(out[off + e]);
-                    } else {
-                        char* endp = nullptr;
-                        double val = std::strtod(tok.c_str(), &endp);
-                        if (endp != nullptr && *endp == '\0') out[off + e] = static_cast<float>(val);
-                        else bcf_float_set_missing(out[off + e]);
-                    }
-                    ++e;
-                    if (sep == std::string::npos) break;
-                    start = sep + 1;
-                }
-            }
-            bcf_update_format_float(out_hdr, rec, tag.c_str(), out.data(), static_cast<int>(out.size()));
-        }
-    }
-}
 
 void Decompressor::appendVCFToRec(variant_desc_t &_desc, vector<uint8_t> &_genotype, size_t _standard_block_size, vector<field_desc> &_fields, vector<key_desc> &_keys)
 {
@@ -1062,120 +855,13 @@ void Decompressor::appendVCFToRec(variant_desc_t &_desc, vector<uint8_t> &_genot
 
                 
         }
-	    }
+    }
 
-		    // Adaptive FORMAT (non-GT) override: reconstruct from adaptive_format_data stream.
-		    // This path updates FORMAT tags via typed APIs (recommended for VCF output).
-		    bool can_use_adaptive_format = use_adaptive_format_ &&
-		                                  current_adaptive_format_row_ != nullptr &&
-		                                  !current_adaptive_format_row_->empty() &&
-		                                  out_type != file_type::BCF_File;
-	
-	        const uint32_t actual_samples = static_cast<uint32_t>(_standard_block_size / decompression_reader.ploidy);
-	        const bool is_sample_subset = (actual_samples != decompression_reader.n_samples);
-	
-	        // New (known-field) adaptive row: "FMD1" payload (AD/DP/PL/GQ/PGT/PID only).
-	        gsc::AdaptiveKnownFieldsRowV1 known_row;
-	        bool has_known_row = false;
-	        if (can_use_adaptive_format &&
-	            current_adaptive_format_row_->size() >= 4 &&
-	            std::memcmp(current_adaptive_format_row_->data(),
-	                        gsc::AdaptiveKnownFieldsRowV1::kMagic, 4) == 0)
-	        {
-	            has_known_row = known_row.Parse(current_adaptive_format_row_->data(),
-	                                            current_adaptive_format_row_->size());
-	        }
-	
-		    // Legacy adaptive row (FormatFieldManager) fallback.
-		    std::vector<std::string> adaptive_format_keys;
-	        gsc::FormatFieldManager::RowDecoder adaptive_row_decoder;
-	        std::unordered_map<uint32_t, size_t> adaptive_field_idx_by_key_id;
-	        if (can_use_adaptive_format && !has_known_row) {
-	            if (format_field_manager_ == nullptr ||
-	                !format_field_manager_->prepareRowDecoder(
-	                    current_adaptive_format_row_->data(),
-	                    current_adaptive_format_row_->size(),
-	                    adaptive_row_decoder)) {
-	                can_use_adaptive_format = false;
-	            } else {
-	                adaptive_format_keys = adaptive_row_decoder.keys;
-	                if (adaptive_format_keys.empty()) can_use_adaptive_format = false;
-	            }
-	
-	            if (can_use_adaptive_format) {
-	                adaptive_field_idx_by_key_id.reserve(adaptive_format_keys.size());
-	                for (size_t k = 0; k < adaptive_format_keys.size(); ++k) {
-	                    int tag_id = bcf_hdr_id2int(out_hdr, BCF_DT_ID, adaptive_format_keys[k].c_str());
-	                    if (tag_id >= 0) adaptive_field_idx_by_key_id[static_cast<uint32_t>(tag_id)] = k;
-	                }
-	            }
-		        }
+    // // FORMAT
 
-	        const int tag_id_AD = bcf_hdr_id2int(out_hdr, BCF_DT_ID, "AD");
-	        const int tag_id_DP = bcf_hdr_id2int(out_hdr, BCF_DT_ID, "DP");
-	        const int tag_id_PL = bcf_hdr_id2int(out_hdr, BCF_DT_ID, "PL");
-	        const int tag_id_GQ = bcf_hdr_id2int(out_hdr, BCF_DT_ID, "GQ");
-	        const int tag_id_PGT = bcf_hdr_id2int(out_hdr, BCF_DT_ID, "PGT");
-	        const int tag_id_PID = bcf_hdr_id2int(out_hdr, BCF_DT_ID, "PID");
-
-	        bool known_ad_decoded = false;
-	        bool known_dp_decoded = false;
-	        bool known_pl_decoded = false;
-	        bool known_gq_decoded = false;
-	        bool known_pgt_decoded = false;
-	        bool known_pid_decoded = false;
-
-	        std::vector<int32_t> known_ad_all;
-	        std::vector<int32_t> known_dp_all;
-	        std::vector<int32_t> known_pl_all;
-	        std::vector<int32_t> known_gq_all;
-	        std::vector<std::string> known_pgt_all;
-	        std::vector<std::string> known_pid_all;
-
-	        std::vector<uint32_t> known_ad_sum;
-	        std::vector<uint8_t> known_ad_has_sum;
-	        std::vector<int32_t> known_pl_pred_gq;
-	        std::vector<uint8_t> known_pl_has_pred;
-
-	        auto build_subset_int32 = [&](const std::vector<int32_t>& all_vals,
-	                                      uint32_t elems_per_sample,
-	                                      std::vector<int32_t>& out_vals)
-	        {
-	            const int32_t fill = (elems_per_sample == 1) ? bcf_int32_missing : bcf_int32_vector_end;
-	            out_vals.assign(static_cast<size_t>(actual_samples) * elems_per_sample, fill);
-	            for (uint32_t s = 0; s < actual_samples; ++s)
-	            {
-	                uint32_t orig = sampleIDs ? sampleIDs[s] : s;
-	                const size_t src_off = static_cast<size_t>(orig) * elems_per_sample;
-	                const size_t dst_off = static_cast<size_t>(s) * elems_per_sample;
-	                if (src_off + elems_per_sample <= all_vals.size() &&
-	                    dst_off + elems_per_sample <= out_vals.size())
-	                {
-	                    std::copy_n(all_vals.data() + src_off, elems_per_sample, out_vals.data() + dst_off);
-	                }
-	                else
-	                {
-	                    out_vals[dst_off] = bcf_int32_missing;
-	                }
-	            }
-	        };
-
-	        auto build_subset_strings = [&](const std::vector<std::string>& all_vals,
-	                                       std::vector<std::string>& out_vals)
-	        {
-	            out_vals.assign(actual_samples, ".");
-	            for (uint32_t s = 0; s < actual_samples; ++s)
-	            {
-	                uint32_t orig = sampleIDs ? sampleIDs[s] : s;
-	                if (orig < all_vals.size()) out_vals[s] = all_vals[orig];
-	            }
-	        };
-	
-		    // // FORMAT
-
-	    // field_desc gt_phased;
-	    for (size_t i = 0; i < _keys.size(); i++)
-	    {
+    // field_desc gt_phased;
+    for (size_t i = 0; i < _keys.size(); i++)
+    {
         int id = _keys[i].actual_field_id;
         if (id < 0 || static_cast<size_t>(id) >= _fields.size()) {
             logger->error("appendVCFToRec: FORMAT loop id={} out of bounds (fields.size()={})", id, _fields.size());
@@ -1285,284 +971,15 @@ void Decompressor::appendVCFToRec(variant_desc_t &_desc, vector<uint8_t> &_genot
         if (_keys[id].keys_type == key_type_t::fmt)
         {
             // In sample subset mode, skip non-GT FORMAT fields as they contain data for all samples
-            // In sample subset mode: legacy non-GT FORMAT fields cannot be subsetted.
-	            if (is_sample_subset) {
-	                if (!can_use_adaptive_format) continue;
-	                if (has_known_row) {
-	                    const uint32_t kid = _keys[id].key_id;
-	                    bool ok = false;
-	                    if (tag_id_AD >= 0 && kid == static_cast<uint32_t>(tag_id_AD) && known_row.Has(gsc::AdaptiveKnownFieldsRowV1::kMaskAD)) ok = true;
-	                    else if (tag_id_DP >= 0 && kid == static_cast<uint32_t>(tag_id_DP) && known_row.Has(gsc::AdaptiveKnownFieldsRowV1::kMaskDP)) ok = true;
-	                    else if (tag_id_PL >= 0 && kid == static_cast<uint32_t>(tag_id_PL) && known_row.Has(gsc::AdaptiveKnownFieldsRowV1::kMaskPL)) ok = true;
-	                    else if (tag_id_GQ >= 0 && kid == static_cast<uint32_t>(tag_id_GQ) && known_row.Has(gsc::AdaptiveKnownFieldsRowV1::kMaskGQ)) ok = true;
-	                    else if (tag_id_PGT >= 0 && kid == static_cast<uint32_t>(tag_id_PGT) && known_row.Has(gsc::AdaptiveKnownFieldsRowV1::kMaskPGT)) ok = true;
-	                    else if (tag_id_PID >= 0 && kid == static_cast<uint32_t>(tag_id_PID) && known_row.Has(gsc::AdaptiveKnownFieldsRowV1::kMaskPID)) ok = true;
-	                    if (!ok) continue;
-	                } else {
-	                    auto it_ad = adaptive_field_idx_by_key_id.find(_keys[id].key_id);
-	                    if (it_ad == adaptive_field_idx_by_key_id.end()) {
-	                        continue;
-	                    }
-	                }
-	            }
-
-            auto update_from_strings = [&](const char* tag, const std::vector<std::string>& vals) {
-                auto countElems = [](const std::string& v) -> uint32_t {
-                    if (v.empty() || v == ".") return 1;
-                    uint32_t n = 1;
-                    for (char c : v) if (c == ',') ++n;
-                    return n;
-                };
-
-                uint32_t max_elems = 1;
-                for (uint32_t s = 0; s < actual_samples; ++s) {
-                    max_elems = std::max(max_elems, countElems(vals[s]));
-                }
-
-                if (_keys[id].type == BCF_HT_STR) {
-                    std::vector<const char*> cvals(actual_samples);
-                    for (uint32_t s = 0; s < actual_samples; ++s) cvals[s] = vals[s].c_str();
-                    bcf_update_format_string(out_hdr, rec, tag, cvals.data(), static_cast<int>(actual_samples));
-                    return;
-                }
-
-                if (_keys[id].type == BCF_HT_INT) {
-                    std::vector<int32_t> out(static_cast<size_t>(actual_samples) * max_elems, bcf_int32_vector_end);
-                    for (uint32_t s = 0; s < actual_samples; ++s) {
-                        const std::string& v = vals[s];
-                        size_t off = static_cast<size_t>(s) * max_elems;
-                        if (v.empty() || v == ".") {
-                            out[off] = bcf_int32_missing;
-                            continue;
-                        }
-                        uint32_t e = 0;
-                        size_t start = 0;
-                        while (e < max_elems) {
-                            size_t sep = v.find(',', start);
-                            std::string tok = (sep == std::string::npos) ? v.substr(start) : v.substr(start, sep - start);
-                            if (tok.empty() || tok == ".") {
-                                out[off + e] = bcf_int32_missing;
-                            } else {
-                                char* endp = nullptr;
-                                long val = std::strtol(tok.c_str(), &endp, 10);
-                                out[off + e] = (endp != nullptr && *endp == '\0') ? static_cast<int32_t>(val) : bcf_int32_missing;
-                            }
-                            ++e;
-                            if (sep == std::string::npos) break;
-                            start = sep + 1;
-                        }
-                    }
-                    bcf_update_format_int32(out_hdr, rec, tag, out.data(), static_cast<int>(out.size()));
-                    return;
-                }
-
-                if (_keys[id].type == BCF_HT_REAL) {
-                    std::vector<float> out(static_cast<size_t>(actual_samples) * max_elems);
-                    for (auto& x : out) bcf_float_set_vector_end(x);
-                    for (uint32_t s = 0; s < actual_samples; ++s) {
-                        const std::string& v = vals[s];
-                        size_t off = static_cast<size_t>(s) * max_elems;
-                        if (v.empty() || v == ".") {
-                            bcf_float_set_missing(out[off]);
-                            continue;
-                        }
-                        uint32_t e = 0;
-                        size_t start = 0;
-                        while (e < max_elems) {
-                            size_t sep = v.find(',', start);
-                            std::string tok = (sep == std::string::npos) ? v.substr(start) : v.substr(start, sep - start);
-                            if (tok.empty() || tok == ".") {
-                                bcf_float_set_missing(out[off + e]);
-                            } else {
-                                char* endp = nullptr;
-                                double val = std::strtod(tok.c_str(), &endp);
-                                if (endp != nullptr && *endp == '\0') out[off + e] = static_cast<float>(val);
-                                else bcf_float_set_missing(out[off + e]);
-                            }
-                            ++e;
-                            if (sep == std::string::npos) break;
-                            start = sep + 1;
-                        }
-                    }
-                    bcf_update_format_float(out_hdr, rec, tag, out.data(), static_cast<int>(out.size()));
-                    return;
-                }
-            };
-
-	            if (can_use_adaptive_format && has_known_row) {
-	                const uint32_t kid = _keys[id].key_id;
-	                const char* tag = bcf_hdr_int2id(out_hdr, BCF_DT_ID, _keys[id].key_id);
-
-	                if (tag_id_AD >= 0 && kid == static_cast<uint32_t>(tag_id_AD) &&
-	                    known_row.Has(gsc::AdaptiveKnownFieldsRowV1::kMaskAD) &&
-	                    _keys[id].type == BCF_HT_INT)
-	                {
-	                    if (!known_ad_decoded) {
-	                        known_ad_decoded = known_row.DecodeAD(decompression_reader.n_samples,
-	                                                             decompression_reader.GetAdaptiveFormatADDict(),
-	                                                             known_ad_all, &known_ad_sum, &known_ad_has_sum);
-	                    }
-	                    const uint32_t len = known_row.ADCnt();
-	                    std::vector<int32_t> out_vals;
-	                    if (is_sample_subset) build_subset_int32(known_ad_all, len, out_vals);
-	                    else out_vals = known_ad_all;
-	                    if (out_vals.empty()) out_vals.assign(static_cast<size_t>(actual_samples) * len, bcf_int32_missing);
-	                    bcf_update_format_int32(out_hdr, rec, tag, out_vals.data(), static_cast<int>(out_vals.size()));
-	                    continue;
-	                }
-
-	                if (tag_id_DP >= 0 && kid == static_cast<uint32_t>(tag_id_DP) &&
-	                    known_row.Has(gsc::AdaptiveKnownFieldsRowV1::kMaskDP) &&
-	                    _keys[id].type == BCF_HT_INT)
-	                {
-	                    if (!known_dp_decoded) {
-	                        if (known_row.Has(gsc::AdaptiveKnownFieldsRowV1::kMaskAD) && !known_ad_decoded) {
-	                            known_ad_decoded = known_row.DecodeAD(decompression_reader.n_samples,
-	                                                                 decompression_reader.GetAdaptiveFormatADDict(),
-	                                                                 known_ad_all, &known_ad_sum, &known_ad_has_sum);
-	                        }
-	                        known_dp_decoded = known_row.DecodeDP(decompression_reader.n_samples,
-	                                                             known_ad_sum, known_ad_has_sum,
-	                                                             known_dp_all);
-	                    }
-	                    std::vector<int32_t> out_vals;
-	                    if (is_sample_subset) build_subset_int32(known_dp_all, 1, out_vals);
-	                    else out_vals = known_dp_all;
-	                    if (out_vals.empty()) out_vals.assign(actual_samples, bcf_int32_missing);
-	                    bcf_update_format_int32(out_hdr, rec, tag, out_vals.data(), static_cast<int>(out_vals.size()));
-	                    continue;
-	                }
-
-	                if (tag_id_PL >= 0 && kid == static_cast<uint32_t>(tag_id_PL) &&
-	                    known_row.Has(gsc::AdaptiveKnownFieldsRowV1::kMaskPL) &&
-	                    _keys[id].type == BCF_HT_INT)
-	                {
-	                    if (!known_pl_decoded) {
-	                        known_pl_decoded = known_row.DecodePL(decompression_reader.n_samples,
-	                                                             decompression_reader.GetAdaptiveFormatPLDict(),
-	                                                             known_pl_all, &known_pl_pred_gq, &known_pl_has_pred);
-	                    }
-	                    const uint32_t len = known_row.PLCnt();
-	                    std::vector<int32_t> out_vals;
-	                    if (is_sample_subset) build_subset_int32(known_pl_all, len, out_vals);
-	                    else out_vals = known_pl_all;
-	                    if (out_vals.empty()) out_vals.assign(static_cast<size_t>(actual_samples) * len, bcf_int32_missing);
-	                    bcf_update_format_int32(out_hdr, rec, tag, out_vals.data(), static_cast<int>(out_vals.size()));
-	                    continue;
-	                }
-
-	                if (tag_id_GQ >= 0 && kid == static_cast<uint32_t>(tag_id_GQ) &&
-	                    known_row.Has(gsc::AdaptiveKnownFieldsRowV1::kMaskGQ) &&
-	                    _keys[id].type == BCF_HT_INT)
-	                {
-	                    if (!known_gq_decoded) {
-	                        if (known_row.Has(gsc::AdaptiveKnownFieldsRowV1::kMaskPL) && !known_pl_decoded) {
-	                            known_pl_decoded = known_row.DecodePL(decompression_reader.n_samples,
-	                                                                 decompression_reader.GetAdaptiveFormatPLDict(),
-	                                                                 known_pl_all, &known_pl_pred_gq, &known_pl_has_pred);
-	                        }
-	                        known_gq_decoded = known_row.DecodeGQ(decompression_reader.n_samples,
-	                                                             known_pl_pred_gq, known_pl_has_pred,
-	                                                             known_gq_all);
-	                    }
-	                    std::vector<int32_t> out_vals;
-	                    if (is_sample_subset) build_subset_int32(known_gq_all, 1, out_vals);
-	                    else out_vals = known_gq_all;
-	                    if (out_vals.empty()) out_vals.assign(actual_samples, bcf_int32_missing);
-	                    bcf_update_format_int32(out_hdr, rec, tag, out_vals.data(), static_cast<int>(out_vals.size()));
-	                    continue;
-	                }
-
-	                if (tag_id_PGT >= 0 && kid == static_cast<uint32_t>(tag_id_PGT) &&
-	                    known_row.Has(gsc::AdaptiveKnownFieldsRowV1::kMaskPGT) &&
-	                    _keys[id].type == BCF_HT_STR)
-	                {
-	                    if (!known_pgt_decoded) {
-	                        known_pgt_decoded = known_row.DecodePGT(decompression_reader.n_samples, known_pgt_all);
-	                    }
-	                    std::vector<std::string> vals;
-	                    if (is_sample_subset) build_subset_strings(known_pgt_all, vals);
-	                    else vals = known_pgt_all;
-	                    update_from_strings(tag, vals);
-	                    continue;
-	                }
-
-	                if (tag_id_PID >= 0 && kid == static_cast<uint32_t>(tag_id_PID) &&
-	                    known_row.Has(gsc::AdaptiveKnownFieldsRowV1::kMaskPID) &&
-	                    _keys[id].type == BCF_HT_STR)
-	                {
-	                    if (!known_pid_decoded) {
-	                        known_pid_decoded = known_row.DecodePID(decompression_reader.n_samples,
-	                                                               decompression_reader.GetAdaptiveFormatPIDDict(),
-	                                                               known_pid_all);
-	                    }
-	                    std::vector<std::string> vals;
-	                    if (is_sample_subset) build_subset_strings(known_pid_all, vals);
-	                    else vals = known_pid_all;
-	                    update_from_strings(tag, vals);
-	                    continue;
-	                }
-	            }
-
-	            if (can_use_adaptive_format && !has_known_row) {
-	                auto it_ad = adaptive_field_idx_by_key_id.find(_keys[id].key_id);
-	                if (it_ad != adaptive_field_idx_by_key_id.end()) {
-	                    const char* tag = bcf_hdr_int2id(out_hdr, BCF_DT_ID, _keys[id].key_id);
-	                    const size_t codec_idx = it_ad->second;
-                    const auto* codec = (codec_idx < adaptive_row_decoder.codecs.size())
-                                            ? adaptive_row_decoder.codecs[codec_idx].get()
-                                            : nullptr;
-
-                    if (_keys[id].type == BCF_HT_INT && codec != nullptr) {
-                        if (codec->type() == gsc::CodecType::PredictedScalar) {
-                            const auto* ps = dynamic_cast<const gsc::PredictedScalarCodec*>(codec);
-                            std::vector<int32_t> out(actual_samples, bcf_int32_missing);
-                            if (ps) {
-                                for (uint32_t s = 0; s < actual_samples; ++s) {
-                                    uint32_t orig = is_sample_subset ? sampleIDs[s] : s;
-                                    int32_t v = 0;
-                                    if (ps->decodeToInt32(orig, v)) out[s] = v;
-                                }
-                            }
-                            bcf_update_format_int32(out_hdr, rec, tag, out.data(), static_cast<int>(out.size()));
-                            continue;
-                        }
-
-                        if (codec->type() == gsc::CodecType::BitTipArray) {
-                            const auto* ba = dynamic_cast<const gsc::BitTipArrayCodec*>(codec);
-                            const uint32_t len = ba ? ba->expectedLen() : 0;
-                            if (len > 0) {
-                                std::vector<int32_t> out(static_cast<size_t>(actual_samples) * len, bcf_int32_vector_end);
-                                for (uint32_t s = 0; s < actual_samples; ++s) {
-                                    uint32_t orig = is_sample_subset ? sampleIDs[s] : s;
-                                    const size_t off = static_cast<size_t>(s) * len;
-                                    if (!ba || !ba->decodeToInt32Array(orig, out.data() + off, len)) {
-                                        out[off] = bcf_int32_missing;
-                                    }
-                                }
-                                bcf_update_format_int32(out_hdr, rec, tag, out.data(), static_cast<int>(out.size()));
-                                continue;
-                            }
-                        }
-                    }
-
-                    // Fallback: decode to strings for this tag only.
-                    std::vector<std::string> vals(actual_samples);
-                    for (uint32_t s = 0; s < actual_samples; ++s) {
-                        uint32_t orig = is_sample_subset ? sampleIDs[s] : s;
-                        std::string v = codec ? codec->decode(orig) : ".";
-                        if (v.empty()) v = ".";
-                        vals[s] = std::move(v);
-                    }
-                    update_from_strings(tag, vals);
-                    continue;
-                }
-            }
+            uint32_t actual_samples = _standard_block_size / decompression_reader.ploidy;
+            bool is_sample_subset = (actual_samples != decompression_reader.n_samples);
+            if (is_sample_subset)
+                continue;
 
             if (_fields[id].present)
             {
                 switch (_keys[id].type)
-			        {
+		        {
 		        case BCF_HT_INT:
                     curr_size = _fields[id].data_size >> 2;
                     bcf_update_format(out_hdr, rec, bcf_hdr_int2id(out_hdr, BCF_DT_ID, _keys[id].key_id), _fields[id].data, curr_size, BCF_HT_INT);
@@ -1582,9 +999,9 @@ void Decompressor::appendVCFToRec(variant_desc_t &_desc, vector<uint8_t> &_genot
 
 
             }
-	        }
-	    }
-	    if(params.split_flag){
+        }
+    }
+    if(params.split_flag){
 
         if(_desc.chrom != cur_chrom){
             if(cur_file != -1 ){
@@ -1614,28 +1031,22 @@ void Decompressor::appendVCFToRec(variant_desc_t &_desc, vector<uint8_t> &_genot
 // 
 bool Decompressor::SetVariantToRec(variant_desc_t &desc, vector<field_desc> &fields, vector<key_desc> &keys, vector<uint8_t> &_my_str, size_t _standard_block_size)
 {
-    const std::vector<uint8_t>* row_for_this_variant = current_adaptive_format_row_;
     
     if(desc.alt.find("<M>") == string::npos){
 
         if(desc.alt.find("<N>") == string::npos){
             if(count){
-                // Flush buffered record using its own adaptive FORMAT row.
-                current_adaptive_format_row_ = use_adaptive_format_ ? &temp_adaptive_format_row_ : nullptr;
+                
                 appendVCFToRec(temp_desc, genotype, _standard_block_size, temp_fields, keys);  
-                current_adaptive_format_row_ = row_for_this_variant;
             }
             
-            current_adaptive_format_row_ = row_for_this_variant;
             appendVCFToRec(desc, _my_str, _standard_block_size, fields, keys);
             count = 0;
         
         }
         else{
             if(count){
-                current_adaptive_format_row_ = use_adaptive_format_ ? &temp_adaptive_format_row_ : nullptr;
                 appendVCFToRec(temp_desc, genotype, _standard_block_size, temp_fields, keys);  
-                current_adaptive_format_row_ = row_for_this_variant;
             }
             
             genotype = _my_str;
@@ -1649,18 +1060,12 @@ bool Decompressor::SetVariantToRec(variant_desc_t &desc, vector<field_desc> &fie
             temp_desc = desc;
             temp_desc.alt = desc.alt.substr(0, desc.alt.find_first_of(','));
             count = 1;
-            if (use_adaptive_format_ && row_for_this_variant) {
-                temp_adaptive_format_row_ = *row_for_this_variant;
-            } else {
-                temp_adaptive_format_row_.clear();
-            }
 
         }
         fields_pos++;
     }
     else{
         if(count == 0){
-            current_adaptive_format_row_ = row_for_this_variant;
             appendVCFToRec(desc, _my_str, _standard_block_size, fields, keys);
             count = 0;
             fields_pos++;
@@ -2207,12 +1612,6 @@ int Decompressor::decompressAllTiled()
                         subset_str[ctx.out_hap[i]] = gt_lookup_table[b0][b1][ctx.perm_bit[i]];
                     }
                 }
-                if (use_adaptive_format_ && field_index >= 0 &&
-                    static_cast<size_t>(field_index) < all_adaptive_format_rows_io.size()) {
-                    current_adaptive_format_row_ = &all_adaptive_format_rows_io[field_index];
-                } else {
-                    current_adaptive_format_row_ = nullptr;
-                }
                 SetVariantToRec(desc, all_fields_io[field_index], decompression_reader.keys, subset_str, output_haplotypes);
             }
             else
@@ -2248,12 +1647,6 @@ int Decompressor::decompressAllTiled()
                 if (trailing_bits)
                     memcpy(my_str.data() + (full_byte_count << 3), gt_lookup_table[decomp_data[vec1_start]][decomp_data[vec2_start]], trailing_bits);
 
-                if (use_adaptive_format_ && field_index >= 0 &&
-                    static_cast<size_t>(field_index) < all_adaptive_format_rows_io.size()) {
-                    current_adaptive_format_row_ = &all_adaptive_format_rows_io[field_index];
-                } else {
-                    current_adaptive_format_row_ = nullptr;
-                }
                 SetVariantToRec(desc, all_fields_io[field_index], decompression_reader.keys, my_str, haplotype_count);
             }
         }
@@ -2730,12 +2123,6 @@ int Decompressor::decompressAll(){
             }   
             variant_desc_t desc = fixed_variants_chunk_io[cur_block_id].data_compress[i];
 
-            if (use_adaptive_format_ && fields_pos >= 0 &&
-                static_cast<size_t>(fields_pos) < all_adaptive_format_rows_io.size()) {
-                current_adaptive_format_row_ = &all_adaptive_format_rows_io[fields_pos];
-            } else {
-                current_adaptive_format_row_ = nullptr;
-            }
             SetVariantToRec(desc, all_fields_io[fields_pos], decompression_reader.keys, my_str,standard_block_size);
             
         
@@ -2776,12 +2163,6 @@ int Decompressor::decompressAll(){
 
             variant_desc_t desc = fixed_variants_chunk_io[cur_block_id].data_compress[c_out_line];
             
-            if (use_adaptive_format_ && fields_pos >= 0 &&
-                static_cast<size_t>(fields_pos) < all_adaptive_format_rows_io.size()) {
-                current_adaptive_format_row_ = &all_adaptive_format_rows_io[fields_pos];
-            } else {
-                current_adaptive_format_row_ = nullptr;
-            }
             SetVariantToRec(desc, all_fields_io[fields_pos], decompression_reader.keys, my_str, standard_block_size);
         }
     }

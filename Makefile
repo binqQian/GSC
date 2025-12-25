@@ -39,16 +39,6 @@ ifeq ($(HAVE_SSE4),)
     CFLAGS+=-msse2
 endif
 -include src/*.d
--include src/codecs/*.d
-
-# Generic rule for src/*.cpp
-src/%.o: src/%.cpp
-	$(CC) $(CFLAGS) -c $< -MMD -o $@
-
-# Generic rule for src/codecs/*.cpp
-src/codecs/%.o: src/codecs/%.cpp
-	$(CC) $(CFLAGS) -c $< -MMD -o $@
-
 .cpp.o:
 	$(CC) $(CFLAGS) -c $< -MMD -o $@
 
@@ -69,14 +59,6 @@ gsc:	src/bit_memory.o \
 	src/zstd_compress.o \
 	src/compression_strategy.o \
 	src/logger.o \
-	src/adaptive_format_known_fields.o \
-	src/format_field_codec.o \
-	src/format_field_detector.o \
-	src/codecs/predicted_scalar_codec.o \
-	src/codecs/bit_tip_array_codec.o \
-	src/codecs/sparse_dict_codec.o \
-	src/integrity_checker.o \
-	src/resource_manager.o \
 	include/cpp-mmf/memory_mapped_file.o
 	$(CC) -o gsc \
 	src/bit_memory.o \
@@ -96,14 +78,6 @@ gsc:	src/bit_memory.o \
 	src/zstd_compress.o \
 	src/compression_strategy.o \
 	src/logger.o \
-	src/adaptive_format_known_fields.o \
-	src/format_field_codec.o \
-	src/format_field_detector.o \
-	src/codecs/predicted_scalar_codec.o \
-	src/codecs/bit_tip_array_codec.o \
-	src/codecs/sparse_dict_codec.o \
-	src/integrity_checker.o \
-	src/resource_manager.o \
 	include/cpp-mmf/memory_mapped_file.o \
 	$(LIBS_DIR)/libhts.a \
 	$(LIBS_DIR)/libsdsl.a \
@@ -116,8 +90,6 @@ clean:
 	-rm include/cpp-mmf/*.o
 	-rm src/*.o
 	-rm src/*.d
-	-rm src/codecs/*.o
-	-rm src/codecs/*.d
 	-rm gsc
 	
 install:

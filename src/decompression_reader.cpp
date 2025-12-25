@@ -1,14 +1,7 @@
 #include "decompression_reader.h"
 #include "logger.h"
-#include "bsc.h"
-#include "zstd_compress.h"
-#include "adaptive_format_known_fields.h"
 #include <algorithm>
 #include <chrono>
-#include <cstring>
-#include <mutex>
-#include <fstream>
-#include <brotli/decode.h>
 #include <limits>
 
 using namespace std::chrono;
@@ -471,64 +464,6 @@ bool DecompressionReader::OpenReadingPart2(const string &in_file_name)
 	}
 
 	InitDecompressParams();
-
-		// Check if adaptive FORMAT compression data exists
-		adaptive_format_stream_id_ = file_handle2->GetStreamId("adaptive_format_data");
-		has_adaptive_format_ = (adaptive_format_stream_id_ >= 0);
-		if (has_adaptive_format_) {
-			logger->info("Detected adaptive FORMAT compression data");
-	        file_handle2->ResetStreamPartIterator(adaptive_format_stream_id_);
-	        adaptive_format_buffer_.clear();
-	        adaptive_format_eof_ = false;
-
-	        // Optional dictionaries for known-field adaptive FORMAT codec.
-	        adaptive_format_ad_dict_stream_id_ = file_handle2->GetStreamId("adaptive_format_ad_dict");
-	        adaptive_format_pl_dict_stream_id_ = file_handle2->GetStreamId("adaptive_format_pl_dict");
-	        adaptive_format_pid_dict_stream_id_ = file_handle2->GetStreamId("adaptive_format_pid_dict");
-	        has_adaptive_format_dicts_ = false;
-
-	        auto readAllParts = [&](int stream_id, std::vector<uint8_t>& out) -> bool {
-	            out.clear();
-	            if (stream_id < 0) return false;
-	            file_handle2->ResetStreamPartIterator(stream_id);
-	            std::vector<uint8_t> part;
-	            while (file_handle2->GetPart(stream_id, part)) {
-	                out.insert(out.end(), part.begin(), part.end());
-	            }
-	            return !out.empty();
-	        };
-
-	        if (adaptive_format_ad_dict_stream_id_ >= 0 &&
-	            adaptive_format_pl_dict_stream_id_ >= 0 &&
-	            adaptive_format_pid_dict_stream_id_ >= 0)
-	        {
-	            std::vector<uint8_t> ad_bytes, pl_bytes, pid_bytes;
-	            bool ok_ad = readAllParts(adaptive_format_ad_dict_stream_id_, ad_bytes) &&
-	                         gsc::AdaptiveKnownFieldsDicts::Deserialize(ad_bytes, adaptive_format_ad_dict_items_);
-	            bool ok_pl = readAllParts(adaptive_format_pl_dict_stream_id_, pl_bytes) &&
-	                         gsc::AdaptiveKnownFieldsDicts::Deserialize(pl_bytes, adaptive_format_pl_dict_items_);
-	            bool ok_pid = readAllParts(adaptive_format_pid_dict_stream_id_, pid_bytes) &&
-	                          gsc::AdaptiveKnownFieldsDicts::Deserialize(pid_bytes, adaptive_format_pid_dict_items_);
-
-	            if (ok_ad && ok_pl && ok_pid)
-	            {
-	                has_adaptive_format_dicts_ = true;
-	                logger->info("Loaded adaptive FORMAT dictionaries: AD={}, PL={}, PID={}",
-	                             adaptive_format_ad_dict_items_.size(),
-	                             adaptive_format_pl_dict_items_.size(),
-	                             adaptive_format_pid_dict_items_.size());
-	            }
-	            else
-	            {
-	                adaptive_format_ad_dict_items_.clear();
-	                adaptive_format_pl_dict_items_.clear();
-	                adaptive_format_pid_dict_items_.clear();
-	                has_adaptive_format_dicts_ = false;
-	                logger->warn("Failed to load adaptive FORMAT dictionaries; falling back to legacy/adaptive v0 decoding when possible");
-	            }
-	        }
-		}
-
 	for (uint32_t i = 0; i < no_keys; ++i)
 	{
 		decomp_part_queue->PushQueue(i);
@@ -575,126 +510,6 @@ bool DecompressionReader::OpenReadingPart2(const string &in_file_name)
 
 	return true;
 }
-
-bool DecompressionReader::refillAdaptiveFormatBuffer(size_t min_bytes)
-{
-    if (!has_adaptive_format_ || adaptive_format_eof_) {
-        return adaptive_format_buffer_.size() >= min_bytes;
-    }
-
-    auto readU32LE = [](const uint8_t* p) -> uint32_t {
-        return (static_cast<uint32_t>(p[0]) |
-                (static_cast<uint32_t>(p[1]) << 8) |
-                (static_cast<uint32_t>(p[2]) << 16) |
-                (static_cast<uint32_t>(p[3]) << 24));
-    };
-
-    while (adaptive_format_buffer_.size() < min_bytes) {
-        std::vector<uint8_t> part;
-        if (!file_handle2->GetPart(adaptive_format_stream_id_, part)) {
-            adaptive_format_eof_ = true;
-            break;
-        }
-
-        // Decode adaptive FORMAT part framing:
-        // - Legacy: raw bytes (row stream)
-        // - New: "AFD1" + method + raw_size + payload (possibly zstd-compressed)
-        std::vector<uint8_t> decoded;
-        if (part.size() >= 12 &&
-            part[0] == 'A' && part[1] == 'F' && part[2] == 'D' && part[3] == '1')
-        {
-            const uint8_t method = part[4];
-            const uint32_t raw_size = readU32LE(part.data() + 8);
-            const uint8_t* payload = part.data() + 12;
-            const size_t payload_size = part.size() - 12;
-            if (method == 0) {
-                decoded.assign(payload, payload + payload_size);
-            } else if (method == 1) {
-                if (!zstd::zstd_decompress_ptr(payload, payload_size, decoded)) {
-                    // Fallback: treat as raw if decompression fails.
-                    decoded = part;
-                }
-            } else if (method == 2) {
-                static std::once_flag init_flag;
-                std::call_once(init_flag, []() { CBSCWrapper::InitLibrary(p_bsc_features); });
-
-                std::vector<uint8_t> payload_vec(payload, payload + payload_size);
-                if (!CBSCWrapper::Decompress(payload_vec, decoded)) {
-                    decoded = part;
-                }
-            } else if (method == 3) {
-                BrotliDecoderState* state = BrotliDecoderCreateInstance(nullptr, nullptr, nullptr);
-                if (!state) {
-                    decoded = part;
-                } else {
-                    size_t available_in = payload_size;
-                    const uint8_t* next_in = payload;
-                    std::vector<uint8_t> buffer(1024);
-                    decoded.clear();
-
-                    BrotliDecoderResult result = BROTLI_DECODER_RESULT_NEEDS_MORE_OUTPUT;
-                    while (result == BROTLI_DECODER_RESULT_NEEDS_MORE_OUTPUT ||
-                           result == BROTLI_DECODER_RESULT_NEEDS_MORE_INPUT) {
-                        size_t available_out = buffer.size();
-                        uint8_t* next_out = buffer.data();
-                        result = BrotliDecoderDecompressStream(state, &available_in, &next_in,
-                                                              &available_out, &next_out, nullptr);
-                        const size_t produced = buffer.size() - available_out;
-                        decoded.insert(decoded.end(), buffer.data(), buffer.data() + produced);
-                        if (result == BROTLI_DECODER_RESULT_NEEDS_MORE_OUTPUT) {
-                            buffer.resize(buffer.size() * 2);
-                        }
-                    }
-                    BrotliDecoderDestroyInstance(state);
-                    if (result != BROTLI_DECODER_RESULT_SUCCESS) {
-                        decoded = part;
-                    }
-                }
-            } else {
-                decoded = part;
-            }
-
-            if (decoded != part && raw_size != 0 && decoded.size() != raw_size) {
-                // Corrupted part framing or codec mismatch: fallback to raw bytes.
-                decoded = part;
-            }
-        } else {
-            decoded = std::move(part);
-        }
-
-        adaptive_format_buffer_.insert(adaptive_format_buffer_.end(), decoded.begin(), decoded.end());
-    }
-
-    return adaptive_format_buffer_.size() >= min_bytes;
-}
-
-bool DecompressionReader::GetNextAdaptiveFormatRow(std::vector<uint8_t>& row_data)
-{
-    row_data.clear();
-    if (!has_adaptive_format_) {
-        return false;
-    }
-
-    // Row format: [row_size:4 bytes LE][row_payload:row_size]
-    if (!refillAdaptiveFormatBuffer(sizeof(uint32_t))) {
-        return false;
-    }
-
-    uint32_t row_size = 0;
-    std::memcpy(&row_size, adaptive_format_buffer_.data(), sizeof(uint32_t));
-
-    if (!refillAdaptiveFormatBuffer(sizeof(uint32_t) + row_size)) {
-        return false;
-    }
-
-    row_data.assign(adaptive_format_buffer_.begin() + sizeof(uint32_t),
-                    adaptive_format_buffer_.begin() + sizeof(uint32_t) + row_size);
-
-    adaptive_format_buffer_.erase(adaptive_format_buffer_.begin(),
-                                  adaptive_format_buffer_.begin() + sizeof(uint32_t) + row_size);
-
-    return true;
-}
 //**********************************************************************************************************************
 void DecompressionReader::close()
 {
@@ -710,59 +525,6 @@ void DecompressionReader::close()
 
 	// file_handle2->Close();
 }
-
-//**********************************************************************************************************************
-// Read integrity hash footer from the end of the compressed file
-bool DecompressionReader::ReadIntegrityFooter(const std::string& file_path)
-{
-	auto logger = LogManager::Instance().Logger();
-
-	// Open file for reading at the end
-	std::ifstream file(file_path, std::ios::binary | std::ios::ate);
-	if (!file) {
-		return false;
-	}
-
-	// Get file size
-	std::streamsize file_size = file.tellg();
-
-	// Integrity footer size: 4 (magic) + 10 (HashResult) = 14 bytes
-	const size_t footer_size = 4 + gsc::HashResult::SerializedSize();
-
-	if (static_cast<size_t>(file_size) < footer_size) {
-		return false;
-	}
-
-	// Seek to potential footer location
-	file.seekg(-static_cast<std::streamoff>(footer_size), std::ios::end);
-
-	// Read magic marker
-	uint32_t magic = 0;
-	file.read(reinterpret_cast<char*>(&magic), sizeof(magic));
-
-	// Check magic marker "GSCI" = 0x47534349
-	if (magic != 0x47534349) {
-		// No integrity footer found
-		has_integrity_hash_ = false;
-		return false;
-	}
-
-	// Read hash data
-	uint8_t hash_data[gsc::HashResult::SerializedSize()];
-	file.read(reinterpret_cast<char*>(hash_data), sizeof(hash_data));
-
-	if (!stored_hash_.Deserialize(hash_data, sizeof(hash_data))) {
-		logger->warn("Failed to deserialize integrity hash");
-		has_integrity_hash_ = false;
-		return false;
-	}
-
-	has_integrity_hash_ = true;
-	logger->info("Found integrity hash in file: {}", stored_hash_.ToHexString());
-
-	return true;
-}
-
 //**********************************************************************************************************************
 bool DecompressionReader::decompress_other_fileds(SPackage *pck)
 {

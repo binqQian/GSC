@@ -2,10 +2,6 @@
 *.d
 gsc
 *.md
-!README.md
-!ADAPTIVE_FORMAT_COMPRESSION_PLAN.md
-!ADAPTIVE_FORMAT_IMPLEMENTATION_NOTES.md
-!ADAPTIVE_FORMAT_HANDOFF.md
 /toy/
 /logs/
 /.vscode/
@@ -15,4 +11,3 @@ gsc
 /build/
 /tmp/
 
-/ref_code/fmt_comp/

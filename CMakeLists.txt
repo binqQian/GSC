@@ -74,14 +74,6 @@ set(SOURCES
     src/zstd_compress.cpp
     src/logger.cpp
     src/compression_strategy.cpp
-    src/adaptive_format_known_fields.cpp
-    src/format_field_codec.cpp
-    src/format_field_detector.cpp
-    src/codecs/predicted_scalar_codec.cpp
-    src/codecs/bit_tip_array_codec.cpp
-    src/codecs/sparse_dict_codec.cpp
-    src/integrity_checker.cpp
-    src/resource_manager.cpp
     include/cpp-mmf/memory_mapped_file.cpp
 )
 
