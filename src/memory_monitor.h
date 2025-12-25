@@ -5,6 +5,7 @@
 #include <cstring>
 #include <string>
 #include <fstream>
+#include <algorithm>
 
 #ifdef __linux__
 #include <unistd.h>
@@ -63,17 +64,32 @@ public:
      */
     static uint64_t GetAvailableMemoryKB() {
 #ifdef __linux__
-        std::ifstream meminfo("/proc/meminfo");
-        if (!meminfo.is_open()) return 0;
-
-        std::string line;
         uint64_t available = 0;
-        while (std::getline(meminfo, line)) {
-            if (line.compare(0, 13, "MemAvailable:") == 0) {
-                sscanf(line.c_str(), "MemAvailable: %lu", &available);
-                break;
+        {
+            std::ifstream meminfo("/proc/meminfo");
+            if (meminfo.is_open()) {
+                std::string line;
+                while (std::getline(meminfo, line)) {
+                    if (line.compare(0, 13, "MemAvailable:") == 0) {
+                        sscanf(line.c_str(), "MemAvailable: %lu", &available);
+                        break;
+                    }
+                }
             }
         }
+
+        // If running under cgroups (containers), /proc/meminfo may reflect host memory.
+        // Clamp to the cgroup memory limit when present.
+        uint64_t cgroup_limit_bytes = 0;
+        uint64_t cgroup_usage_bytes = 0;
+        if (GetCgroupMemoryStatsBytes(cgroup_limit_bytes, cgroup_usage_bytes)) {
+            uint64_t remaining_bytes = (cgroup_limit_bytes > cgroup_usage_bytes) ?
+                (cgroup_limit_bytes - cgroup_usage_bytes) : 0;
+            uint64_t remaining_kb = remaining_bytes / 1024;
+            if (available == 0) return remaining_kb;
+            return std::min(available, remaining_kb);
+        }
+
         return available;
 #else
         return 0;
@@ -85,17 +101,29 @@ public:
      */
     static uint64_t GetTotalMemoryKB() {
 #ifdef __linux__
-        std::ifstream meminfo("/proc/meminfo");
-        if (!meminfo.is_open()) return 0;
-
-        std::string line;
         uint64_t total = 0;
-        while (std::getline(meminfo, line)) {
-            if (line.compare(0, 9, "MemTotal:") == 0) {
-                sscanf(line.c_str(), "MemTotal: %lu", &total);
-                break;
+        {
+            std::ifstream meminfo("/proc/meminfo");
+            if (meminfo.is_open()) {
+                std::string line;
+                while (std::getline(meminfo, line)) {
+                    if (line.compare(0, 9, "MemTotal:") == 0) {
+                        sscanf(line.c_str(), "MemTotal: %lu", &total);
+                        break;
+                    }
+                }
             }
         }
+
+        uint64_t cgroup_limit_bytes = 0;
+        uint64_t cgroup_usage_bytes = 0;
+        if (GetCgroupMemoryStatsBytes(cgroup_limit_bytes, cgroup_usage_bytes)) {
+            (void)cgroup_usage_bytes;
+            uint64_t limit_kb = cgroup_limit_bytes / 1024;
+            if (total == 0) return limit_kb;
+            return std::min(total, limit_kb);
+        }
+
         return total;
 #else
         return 0;
@@ -180,6 +208,137 @@ public:
         size_t capacity = queue_memory_kb / block_size_kb;
         return std::max((size_t)4, std::min(capacity, (size_t)64));
     }
+
+private:
+#ifdef __linux__
+    static bool ReadFirstLine(const std::string& path, std::string& out) {
+        std::ifstream f(path);
+        if (!f.is_open()) return false;
+        std::getline(f, out);
+        return !out.empty() || f.good();
+    }
+
+    static bool ParseUint64(const std::string& s, uint64_t& out) {
+        unsigned long long tmp = 0;
+        if (sscanf(s.c_str(), " %llu", &tmp) != 1) return false;
+        out = static_cast<uint64_t>(tmp);
+        return true;
+    }
+
+    static std::string GetSelfCgroupPathV2() {
+        std::ifstream f("/proc/self/cgroup");
+        if (!f.is_open()) return "";
+        std::string line;
+        while (std::getline(f, line)) {
+            // cgroup v2 format: 0::/some/path
+            if (line.compare(0, 3, "0::") != 0) continue;
+            std::string path = line.substr(3);
+            if (path.empty()) return "/";
+            return path;
+        }
+        return "";
+    }
+
+    static std::string GetSelfCgroupPathV1Memory() {
+        std::ifstream f("/proc/self/cgroup");
+        if (!f.is_open()) return "";
+        std::string line;
+        while (std::getline(f, line)) {
+            // cgroup v1 format: hierarchy:controllers:path
+            // We want the entry that contains "memory" controller.
+            // Example: 5:cpu,memory:/docker/xxx
+            const size_t first_colon = line.find(':');
+            if (first_colon == std::string::npos) continue;
+            const size_t second_colon = line.find(':', first_colon + 1);
+            if (second_colon == std::string::npos) continue;
+
+            const std::string controllers = line.substr(first_colon + 1, second_colon - first_colon - 1);
+            if (controllers.find("memory") == std::string::npos) continue;
+
+            std::string path = line.substr(second_colon + 1);
+            if (path.empty()) return "/";
+            return path;
+        }
+        return "";
+    }
+
+    static std::string JoinCgroupFile(const std::string& mount, const std::string& cgroup_path, const char* filename) {
+        if (cgroup_path.empty() || cgroup_path == "/") {
+            return mount + "/" + filename;
+        }
+        if (!cgroup_path.empty() && cgroup_path[0] == '/') {
+            return mount + cgroup_path + "/" + filename;
+        }
+        return mount + "/" + cgroup_path + "/" + filename;
+    }
+
+    static bool GetCgroupMemoryStatsBytes(uint64_t& limit_bytes, uint64_t& usage_bytes) {
+        limit_bytes = 0;
+        usage_bytes = 0;
+
+        // Prefer cgroup v2 if present.
+        const std::string v2_path = GetSelfCgroupPathV2();
+        if (!v2_path.empty()) {
+            const std::string mount = "/sys/fs/cgroup";
+            std::string limit_s;
+            std::string usage_s;
+
+            std::string limit_file = JoinCgroupFile(mount, v2_path, "memory.max");
+            std::string usage_file = JoinCgroupFile(mount, v2_path, "memory.current");
+            if (!ReadFirstLine(limit_file, limit_s) || !ReadFirstLine(usage_file, usage_s)) {
+                // Some environments mount the current cgroup as the root of /sys/fs/cgroup.
+                limit_file = mount + "/memory.max";
+                usage_file = mount + "/memory.current";
+                if (!ReadFirstLine(limit_file, limit_s) || !ReadFirstLine(usage_file, usage_s)) {
+                    limit_s.clear();
+                    usage_s.clear();
+                }
+            }
+
+            if (!limit_s.empty()) {
+                if (limit_s.find("max") != std::string::npos) return false;
+                uint64_t limit = 0;
+                uint64_t usage = 0;
+                if (ParseUint64(limit_s, limit) && ParseUint64(usage_s, usage) && limit > 0) {
+                    // Treat extremely large limits as "no limit".
+                    if (limit > (1ull << 60)) return false;
+                    limit_bytes = limit;
+                    usage_bytes = usage;
+                    return true;
+                }
+            }
+        }
+
+        // cgroup v1 memory controller.
+        const std::string v1_path = GetSelfCgroupPathV1Memory();
+        if (!v1_path.empty()) {
+            const std::string mount = "/sys/fs/cgroup/memory";
+            std::string limit_s;
+            std::string usage_s;
+
+            std::string limit_file = JoinCgroupFile(mount, v1_path, "memory.limit_in_bytes");
+            std::string usage_file = JoinCgroupFile(mount, v1_path, "memory.usage_in_bytes");
+            if (!ReadFirstLine(limit_file, limit_s) || !ReadFirstLine(usage_file, usage_s)) {
+                limit_file = mount + "/memory.limit_in_bytes";
+                usage_file = mount + "/memory.usage_in_bytes";
+                if (!ReadFirstLine(limit_file, limit_s) || !ReadFirstLine(usage_file, usage_s)) {
+                    return false;
+                }
+            }
+
+            uint64_t limit = 0;
+            uint64_t usage = 0;
+            if (ParseUint64(limit_s, limit) && ParseUint64(usage_s, usage) && limit > 0) {
+                if (limit > (1ull << 60)) return false;
+                limit_bytes = limit;
+                usage_bytes = usage;
+                return true;
+            }
+        }
+
+        return false;
+    }
+#endif
 };
 
 } // namespace gsc

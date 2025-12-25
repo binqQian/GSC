@@ -10,6 +10,7 @@
 #include <mutex>
 #include <limits>
 #include <cstdint>
+#include <cstdlib>
 #include <htslib/vcf.h>
 #include <htslib/hts.h>
 #include <brotli/encode.h>
@@ -1008,7 +1009,7 @@ static std::string buildSampleFormatString(
     return result;
 }
 
-bool CompressionReader::SetVariantOtherFields(vector<field_desc> &fields)
+bool CompressionReader::SetVariantOtherFields(bcf1_t *vcf_rec, vector<field_desc> &fields)
 {
     // Phase 4: Full adaptive FORMAT compression integration
     //
@@ -1032,10 +1033,10 @@ bool CompressionReader::SetVariantOtherFields(vector<field_desc> &fields)
         row_format_keys.reserve(format_field_indices_.size());
 
         // Preserve per-record FORMAT tag set and order (excluding GT).
-        if (vcf_record != nullptr && vcf_record->n_fmt && vcf_record->d.fmt != nullptr)
+        if (vcf_rec != nullptr && vcf_rec->n_fmt && vcf_rec->d.fmt != nullptr)
         {
-            bcf_fmt_t *fmt = vcf_record->d.fmt;
-            for (int fi = 0; fi < (int)vcf_record->n_fmt; ++fi)
+            bcf_fmt_t *fmt = vcf_rec->d.fmt;
+            for (int fi = 0; fi < (int)vcf_rec->n_fmt; ++fi)
             {
                 int tag_id = fmt[fi].id;
                 if (tag_id < 0 || tag_id >= (int)FormatIdToFieldId.size())
@@ -1068,7 +1069,7 @@ bool CompressionReader::SetVariantOtherFields(vector<field_desc> &fields)
         }
 
         // Initialize FormatFieldManager for this row
-        uint32_t allele_count = (vcf_record != nullptr) ? vcf_record->n_allele : 2;
+        uint32_t allele_count = (vcf_rec != nullptr) ? vcf_rec->n_allele : 2;
         format_field_manager_->initRow(row_format_keys, allele_count);
 
         // Process each sample
@@ -1256,7 +1257,7 @@ bool CompressionReader::ProcessInVCF()
                     {
                         std::vector<field_desc> curr_field(keys.size());
                         GetVariantFromRec(vcf_record, curr_field);
-                        SetVariantOtherFields(curr_field);
+                        SetVariantOtherFields(vcf_record, curr_field);
                         for (size_t j = 0; j < keys.size(); ++j)
                         {
                             if (curr_field[j].data_size > 0)
@@ -1313,7 +1314,7 @@ bool CompressionReader::ProcessInVCF()
 
                     GetVariantFromRec(vcf_record, curr_field);
 
-                    SetVariantOtherFields(curr_field);
+                    SetVariantOtherFields(vcf_record, curr_field);
 
                     for (size_t j = 0; j < keys.size(); ++j)
                     {
@@ -1339,11 +1340,14 @@ bool CompressionReader::ProcessInVCF()
         order = topo_sort(field_order_graph, inDegree);
     if (cur_g_data)
     {
-        delete[] cur_g_data;
+        std::free(cur_g_data);
+        cur_g_data = nullptr;
+        ncur_g_data = 0;
     }
     if (gt_data)
     {
         delete[] gt_data;
+        gt_data = nullptr;
     }
 
     logger->info("Read all the variants and genotypes.");
@@ -1837,18 +1841,10 @@ uint32_t CompressionReader::setNoVecBlock(GSC_Params &params)
     auto logger = LogManager::Instance().Logger();
     params.var_in_block = params.max_block_rows ? params.max_block_rows : (no_samples * params.ploidy);
 
-    // Auto-tune GT threads only if requested (0 = auto). Otherwise, respect user's setting.
-    if (params.no_gt_threads == 0)
-    {
-        unsigned hw = std::thread::hardware_concurrency();
-        int hw_half = hw ? static_cast<int>(hw / 2) : 1;
-        int numChunks = 1 + static_cast<int>(params.var_in_block / 1024);
-        int maxAutoThreads = std::min(numChunks, hw_half);
-        maxAutoThreads = std::max(1, maxAutoThreads);
-        params.no_gt_threads = static_cast<uint32_t>(std::min(maxAutoThreads, 4));
-    }
+    // Note: Thread auto-configuration is now handled by ResourceManager in compressor.cpp
+    // This function only sets block-related parameters
 
-    logger->debug("Block size: {} variants, GT threads: {}", params.var_in_block, params.no_gt_threads);
+    logger->debug("Block size: {} variants", params.var_in_block);
 
     if (params.var_in_block < 1024)
     {

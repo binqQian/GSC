@@ -17,6 +17,7 @@
 #include <unordered_map>
 #include <stack>
 #include <memory>
+#include <cstdint>
 #include "parallel_vcf_reader.h"
 #include "format_field_detector.h"
 
@@ -55,8 +56,8 @@ class CompressionReader {
 
     vector<string> samples_list;
     vector<variant_desc_t> v_vcf_data_compress;
-    int *cur_g_data = nullptr;
-    int ncur_g_data;
+    int32_t *cur_g_data = nullptr;
+    int ncur_g_data = 0;
     int *gt_data = nullptr;
     int temp;
     int64_t cur_pos;
@@ -141,7 +142,7 @@ class CompressionReader {
     bool GetVariantFromRec(bcf1_t* rec, vector<field_desc>& fields);
     bool GetFilterInfoFormatKeys(int &no_flt_keys, int &no_info_keys, int &no_fmt_keys, vector<key_desc> &keys);
     void ProcessFixedVariants(bcf1_t *vcf_record, variant_desc_t &desc);
-	bool SetVariantOtherFields(vector<field_desc> &fields);
+	bool SetVariantOtherFields(bcf1_t *vcf_rec, vector<field_desc> &fields);
     vector<int> topoSort(unordered_map<int, unordered_set<int>>& graph);
     vector<int> topo_sort(unordered_map<int, unordered_set<int>> &graph,unordered_map<int, int> inDegree);
 

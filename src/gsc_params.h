@@ -120,6 +120,9 @@ struct GSC_Params
     integrity_check_mode_t integrity_mode;
     bool verify_on_decompress;  // Auto-verify on decompression if hash is present
 
+    // Resource management
+    bool show_resource_plan;     // Show detailed resource configuration at startup
+
     GSC_Params()
     {
         task_mode = task_mode_t::none;
@@ -131,12 +134,12 @@ struct GSC_Params
         max_block_rows = 10000;
         max_block_cols = 10000;
         ploidy = 2;
-        no_threads = 4;
-        // Conservative defaults for large cohorts; users can override explicitly.
-        no_gt_threads = 1;
-        no_parse_threads = 1;
-        queue_capacity = 0;          // 0 = auto (will be calculated based on memory)
-        max_memory_mb = 0;           // 0 = no limit (use system memory)
+        // Resource auto-configuration: 0 = automatic based on system resources
+        no_threads = 0;              // 0 = auto (based on CPU cores)
+        no_gt_threads = 0;           // 0 = auto (based on cores and memory)
+        no_parse_threads = 0;        // 0 = auto (usually 1-2)
+        queue_capacity = 0;          // 0 = auto (based on memory budget)
+        max_memory_mb = 0;           // 0 = no hard limit (ResourceManager still plans using available memory)
         var_in_block = 0;
         vec_len = 0;
         n_samples = 0;
@@ -175,5 +178,8 @@ struct GSC_Params
         // Integrity verification defaults
         integrity_mode = integrity_check_mode_t::none;  // Disabled by default
         verify_on_decompress = true;  // Auto-verify if hash is present
+
+        // Resource management
+        show_resource_plan = false;  // Show resource plan at startup (--show-resource-plan)
     }
 };

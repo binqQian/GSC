@@ -99,7 +99,7 @@ Options:
         -p,  --ploidy [X]      Set ploidy of samples in input VCF to [X] (default: 2).
         --max-block-rows [X]   Max variants per GT block (default: 10000).
         --max-block-cols [X]   Max haplotypes (samples * ploidy) per GT column block (default: 10000).
-        -t,  --threads [X]     Set number of threads to [X] (default: 5).
+        -t,  --threads [X]     Set number of threads to [X] (default: auto).
         -d,  --depth [X]       Set maximum replication depth to [X] (default: 100, 0 means no matches).
         -m,  --merge [X]       Specify files to merge, separated by commas (e.g., -m chr1.vcf,chr2.vcf), or '@' followed by a file containing a list of VCF files (e.g., -m @file_with_IDs.txt). By default, all VCF files are compressed.
         -I,  --integrity [mode]  Enable integrity hash: none (default), xxhash64/xxhash/fast.
@@ -123,7 +123,7 @@ Options:
 
         -M,  --mode_lossly      Choose lossy compression mode (default: lossless).
         -b,  --bcf              Output a BCF file (default: VCF).
-        -t,  --threads [X]      Set number of threads to [X] (default: 5).
+        -t,  --threads [X]      Set number of threads to [X] (default: auto).
         -l,  --level [0-9]      When writing to `.vcf.gz`, set bgzip level (0 = uncompressed).
         --make-bed              Output PLINK BED/BIM/FAM instead of VCF/BCF.
 

@@ -25,6 +25,7 @@
 
 #include "logger.h"
 #include "memory_monitor.h"
+#include "resource_manager.h"
 
 // #include <algorithm>
 
@@ -116,18 +117,19 @@ Options:
 
     -M,  --mode_lossly     Choose lossy compression mode (lossless by default).
     -b,  --bcf             Input is a BCF file (default: VCF or VCF.GZ).
-    -p,  --ploidy [X]      Set ploidy of samples in input VCF to [X] (default: 2).
-        --max-block-rows [X]  Max variants per GT block (default: 10000).
-        --max-block-cols [X]  Max haplotypes (samples * ploidy) per GT column block (default: 10000).
-	    -t,  --threads [X]     Set number of compression threads to [X] (default: 4).
-        --gt-threads [X]   Set number of genotype processing threads (default: 1; 0 = auto).
-        --parse-threads [X] Set number of VCF parsing threads (default: 1; <=1 disables parallel parsing).
-        --queue-capacity [X] Set max blocks in queue (0 = auto; default: auto based on memory).
-        --max-memory [X]   Limit memory usage to [X] MB (default: no limit).
-	    -d,  --depth [X]       Set maximum replication depth to [X] (default: 100, 0 means no matches).
-	    -m,  --merge [X]       Specify files to merge, separated by commas (e.g., -m chr1.vcf,chr2.vcf), or '@' followed by a file containing a list of VCF files (e.g., -m @file_with_IDs.txt). By default, all VCF files are compressed.
-	        --adaptive-format [off|shadow|primary]  FORMAT adaptive mode: off disables; shadow writes extra stream; primary omits legacy non-GT FORMAT.
-    -I,  --integrity [mode] Enable integrity hash: none (default), xxhash64/xxhash/fast.
+	    -p,  --ploidy [X]      Set ploidy of samples in input VCF to [X] (default: 2).
+	        --max-block-rows [X]  Max variants per GT block (default: 10000).
+	        --max-block-cols [X]  Max haplotypes (samples * ploidy) per GT column block (default: 10000).
+		    -t,  --threads [X]     Set number of compression threads to [X] (default: auto).
+	        --gt-threads [X]   Set number of genotype processing threads (default: auto; 0 = auto).
+	        --parse-threads [X] Set number of VCF parsing threads (default: auto; 0 = auto).
+	        --queue-capacity [X] Set max blocks in GT queue (0 = auto; default: auto).
+	        --max-memory [X]   Hard memory limit in MB via RLIMIT_AS (default: no limit).
+	        --show-resource-plan  Print auto-configured resource plan (threads/memory/queue).
+		    -d,  --depth [X]       Set maximum replication depth to [X] (default: 100, 0 means no matches).
+		    -m,  --merge [X]       Specify files to merge, separated by commas (e.g., -m chr1.vcf,chr2.vcf), or '@' followed by a file containing a list of VCF files (e.g., -m @file_with_IDs.txt). By default, all VCF files are compressed.
+		        --adaptive-format [off|shadow|primary]  FORMAT adaptive mode: off disables; shadow writes extra stream; primary omits legacy non-GT FORMAT.
+	    -I,  --integrity [mode] Enable integrity hash: none (default), xxhash64/xxhash/fast.
 )");
 
     exit(0);
@@ -500,6 +502,9 @@ int params_options(int argc, const char *argv[]){
                     logger->error("Unsupported --integrity mode: {}. Use 'none', 'xxhash64', or 'fast'.", mode);
                     return usage_compress();
                 }
+            }
+            else if (strcmp(argv[i], "--show-resource-plan") == 0){
+                params.show_resource_plan = true;
             }
         }
         if(isatty(STDIN_FILENO) && params.in_file_name == "-"){
