@@ -13,6 +13,7 @@
 #include "queues.h"
 #include <tuple>
 #include "compression_strategy.h"
+#include "fmt_field_processor.h"
 // #include <filesystem>
 using namespace std;
 
@@ -126,9 +127,10 @@ class Compressor
     vector<key_desc> keys;
     int key_gt_id;
 
-    
-
-    
+    // FMT field compression
+    std::unique_ptr<fmt_compress::FmtDictionaries> fmt_dictionaries_;
+    std::unique_ptr<fmt_compress::FmtFieldProcessor> fmt_processor_;
+    bool isFmtSpecialField(const std::string& name) const;
 
     bool OpenForWriting(const string &out_file_name);
     char bits_used(unsigned int n);

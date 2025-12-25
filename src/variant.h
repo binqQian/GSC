@@ -99,6 +99,7 @@ typedef struct key_desc_tag {
     uint32_t actual_field_id;
     key_type_t keys_type;
     int8_t type; //one of: BCF_HT_FLAG 0 / BCF_HT_INT  1 / BCF_HT_REAL 2 / BCF_HT_STR 3
+    std::string name;  // Field name (e.g., "AD", "DP", "PL", "GQ", "PGT", "PID")
 } key_desc;
 
 

@@ -451,6 +451,7 @@ bool DecompressionReader::OpenReadingPart2(const string &in_file_name)
 		read(v_desc, pos_part2_params, temp);
 		keys[i].keys_type = (key_type_t)temp;
 		read(v_desc, pos_part2_params, keys[i].type);
+		read_str(v_desc, pos_part2_params, keys[i].name);  // Read field name for FMT decompression
 		// std::cerr<<keys[i].key_id<<" "<<keys[i].actual_field_id<<endl;
 	}
 	if (pos_part2_params < v_desc.size())
@@ -528,6 +529,7 @@ void DecompressionReader::close()
 //**********************************************************************************************************************
 bool DecompressionReader::decompress_other_fileds(SPackage *pck)
 {
+	auto logger = LogManager::Instance().Logger();
 	vector<uint8_t> v_compressed;
 	vector<uint8_t> v_tmp;
 	CompressionStrategy *cbsc_size = field_size_codecs[pck->key_id].get();
@@ -548,10 +550,553 @@ bool DecompressionReader::decompress_other_fileds(SPackage *pck)
 
 	file_handle2->GetPart(pck->stream_id_data, v_compressed);
 
+	// Check for special FMT fields
+	const std::string& field_name = keys[pck->key_id].name;
+	bool is_sparse_field = (field_name == "PGT" || field_name == "PID");
+	bool is_ad_field = (field_name == "AD");
+	bool is_pl_field = (field_name == "PL");
+	bool is_fmt_field = (keys[pck->key_id].keys_type == key_type_t::fmt);
+	uint32_t n_samples_u32 = n_samples;
+
+
+	// New lossless codecs for selected FORMAT fields (AD/PL/PGT/PID).
+	// After decompression, the first byte is a codec marker:
+	//  - 0: legacy payload (INT=transposed bytes, STR=raw bytes)
+	//  - 1: special payload (record-wise stream)
+	if (v_compressed.size() && is_fmt_field && n_samples_u32 > 0)
+	{
+		if (is_sparse_field && keys[pck->key_id].type == BCF_HT_STR)
+		{
+			cbsc->Decompress(v_compressed, v_tmp);
+			if (v_tmp.empty())
+			{
+				pck->v_data.clear();
+				return true;
+			}
+
+			const uint8_t codec_id = v_tmp[0];
+			if (codec_id == 0)
+			{
+				pck->v_data.assign(v_tmp.begin() + 1, v_tmp.end());
+				return true;
+			}
+			if (codec_id != 1)
+			{
+				logger->error("Unsupported codec_id={} for FMT {} (STR)", (int)codec_id, field_name);
+				return false;
+			}
+
+			auto decode_vint = [&](size_t &off, uint64_t &val) -> bool {
+				if (off >= v_tmp.size())
+					return false;
+				uint8_t len = fmt_compress::VintCodec::decode(v_tmp.data() + off, val);
+				if (len == 0 || off + len > v_tmp.size())
+					return false;
+				off += len;
+				return true;
+			};
+
+			size_t total_bytes = 0;
+			for (size_t i = 0; i < pck->v_size.size(); ++i)
+				total_bytes += pck->v_size[i];
+			pck->v_data.assign(total_bytes, 0);
+
+			size_t in_off = 1;
+			size_t out_off = 0;
+			for (size_t rec_idx = 0; rec_idx < pck->v_size.size(); ++rec_idx)
+			{
+				const uint32_t rec_bytes = pck->v_size[rec_idx];
+				if (rec_bytes == 0)
+					continue;
+				if (rec_bytes % n_samples_u32 != 0)
+				{
+					logger->error("FMT {} STR record_bytes={} not divisible by n_samples={}", field_name, rec_bytes, n_samples_u32);
+					return false;
+				}
+				const uint32_t stride = rec_bytes / n_samples_u32;
+
+				uint8_t *rec_out = pck->v_data.data() + out_off;
+				memset(rec_out, 0, rec_bytes);
+				if (stride > 0)
+				{
+					for (uint32_t s = 0; s < n_samples_u32; ++s)
+						rec_out[(size_t)s * stride] = bcf_str_missing;
+				}
+
+				uint64_t count = 0;
+				if (!decode_vint(in_off, count))
+					return false;
+				for (uint64_t i = 0; i < count; ++i)
+				{
+					uint64_t pos = 0;
+					if (!decode_vint(in_off, pos))
+						return false;
+					if (pos >= n_samples_u32)
+					{
+						logger->error("FMT {} STR decoded pos={} out of range n_samples={}", field_name, pos, n_samples_u32);
+						return false;
+					}
+					if (in_off + stride > v_tmp.size())
+					{
+						logger->error("FMT {} STR payload truncated (need {}, have {})", field_name, stride, v_tmp.size() - in_off);
+						return false;
+					}
+					memcpy(rec_out + (size_t)pos * stride, v_tmp.data() + in_off, stride);
+					in_off += stride;
+				}
+
+				out_off += rec_bytes;
+			}
+
+			if (out_off != total_bytes || in_off != v_tmp.size())
+			{
+				logger->error("FMT {} STR decode mismatch (out_off={}, total_bytes={}, in_off={}, tmp_size={})",
+					field_name, out_off, total_bytes, in_off, v_tmp.size());
+				return false;
+			}
+			return true;
+		}
+
+		if ((is_ad_field || is_pl_field) && keys[pck->key_id].type == BCF_HT_INT)
+		{
+			cbsc->Decompress(v_compressed, v_tmp);
+			if (v_tmp.empty())
+			{
+				pck->v_data.clear();
+				return true;
+			}
+
+			const uint8_t codec_id = v_tmp[0];
+			if (codec_id == 0)
+			{
+				vector<uint8_t> transposed(v_tmp.begin() + 1, v_tmp.end());
+				pck->v_data.resize(transposed.size());
+				Decoder(transposed, pck->v_data);
+				return true;
+			}
+			if (codec_id != 1)
+			{
+				logger->error("Unsupported codec_id={} for FMT {} (INT)", (int)codec_id, field_name);
+				return false;
+			}
+
+			auto decode_vint = [&](size_t &off, uint64_t &val) -> bool {
+				if (off >= v_tmp.size())
+					return false;
+				uint8_t len = fmt_compress::VintCodec::decode(v_tmp.data() + off, val);
+				if (len == 0 || off + len > v_tmp.size())
+					return false;
+				off += len;
+				return true;
+			};
+
+			auto get_bit = [](const uint8_t *buf, size_t bit) -> uint8_t {
+				return (buf[bit / 8] >> (bit % 8)) & 1u;
+			};
+
+			size_t total_elems = 0;
+			for (size_t i = 0; i < pck->v_size.size(); ++i)
+				total_elems += pck->v_size[i];
+			pck->v_data.assign(total_elems * 4, 0);
+
+			const size_t tip_bytes = ((size_t)n_samples_u32 * 2 + 7) / 8;
+			size_t in_off = 1;
+			size_t out_off = 0;
+
+			for (size_t rec_idx = 0; rec_idx < pck->v_size.size(); ++rec_idx)
+			{
+				const uint32_t total = pck->v_size[rec_idx];
+				if (total == 0)
+					continue;
+				if (total % n_samples_u32 != 0)
+				{
+					logger->error("FMT {} INT total_elems={} not divisible by n_samples={}", field_name, total, n_samples_u32);
+					return false;
+				}
+				const uint32_t per_sample = total / n_samples_u32;
+				if (in_off + tip_bytes > v_tmp.size())
+				{
+					logger->error("FMT {} INT payload truncated in tips", field_name);
+					return false;
+				}
+				const uint8_t *tips = v_tmp.data() + in_off;
+				in_off += tip_bytes;
+
+				int32_t *out = reinterpret_cast<int32_t *>(pck->v_data.data() + out_off);
+				for (uint32_t s = 0; s < n_samples_u32; ++s)
+				{
+					const uint8_t tip0 = get_bit(tips, (size_t)s * 2);
+					const uint8_t tip1 = get_bit(tips, (size_t)s * 2 + 1);
+					int32_t *sv = out + (size_t)s * per_sample;
+
+					if (is_ad_field)
+					{
+						if (tip0 == 0 && tip1 == 0)
+						{
+							for (uint32_t j = 0; j < per_sample; ++j) sv[j] = 0;
+						}
+						else if (tip0 == 0 && tip1 == 1)
+						{
+							if (per_sample > 0) sv[0] = 2;
+							for (uint32_t j = 1; j < per_sample; ++j) sv[j] = 0;
+						}
+						else if (tip0 == 1 && tip1 == 0)
+						{
+							uint64_t v = 0;
+							if (!decode_vint(in_off, v)) return false;
+							if (per_sample > 0) sv[0] = (int32_t)(uint32_t)v;
+							for (uint32_t j = 1; j < per_sample; ++j) sv[j] = 0;
+						}
+						else
+						{
+							for (uint32_t j = 0; j < per_sample; ++j)
+							{
+								uint64_t v = 0;
+								if (!decode_vint(in_off, v)) return false;
+								sv[j] = (int32_t)(uint32_t)v;
+							}
+						}
+					}
+					else
+					{
+						if (tip0 == 0 && tip1 == 0)
+						{
+							for (uint32_t j = 0; j < per_sample; ++j) sv[j] = 0;
+						}
+						else if (tip0 == 0 && tip1 == 1)
+						{
+							uint64_t a = 0, b = 0;
+							if (!decode_vint(in_off, a) || !decode_vint(in_off, b)) return false;
+							const int32_t ai = (int32_t)(uint32_t)a;
+							const int32_t bi = (int32_t)(uint32_t)b;
+							if (per_sample > 0) sv[0] = 0;
+							if (per_sample > 1) sv[1] = ai;
+							if (per_sample > 2) sv[2] = bi;
+							uint32_t pos = 3;
+							uint32_t b_count = 2;
+							while (pos < per_sample)
+							{
+								sv[pos++] = ai;
+								for (uint32_t k = 0; k < b_count && pos < per_sample; ++k) sv[pos++] = bi;
+								++b_count;
+							}
+						}
+						else if (tip0 == 1 && tip1 == 0)
+						{
+							uint64_t a = 0;
+							if (!decode_vint(in_off, a)) return false;
+							const int32_t ai = (int32_t)(uint32_t)a;
+							const int32_t bi = (int32_t)(uint32_t)(a * 15);
+							if (per_sample > 0) sv[0] = 0;
+							if (per_sample > 1) sv[1] = ai;
+							if (per_sample > 2) sv[2] = bi;
+							uint32_t pos = 3;
+							uint32_t b_count = 2;
+							while (pos < per_sample)
+							{
+								sv[pos++] = ai;
+								for (uint32_t k = 0; k < b_count && pos < per_sample; ++k) sv[pos++] = bi;
+								++b_count;
+							}
+						}
+						else
+						{
+							for (uint32_t j = 0; j < per_sample; ++j)
+							{
+								uint64_t v = 0;
+								if (!decode_vint(in_off, v)) return false;
+								sv[j] = (int32_t)(uint32_t)v;
+							}
+						}
+					}
+				}
+
+				out_off += (size_t)total * 4;
+			}
+
+			if (out_off != total_elems * 4 || in_off != v_tmp.size())
+			{
+				logger->error("FMT {} INT decode mismatch (out_off={}, exp={}, in_off={}, tmp_size={})",
+					field_name, out_off, total_elems * 4, in_off, v_tmp.size());
+				return false;
+			}
+			return true;
+		}
+	}
+
 	if (v_compressed.size())
 	{
+		if (false && is_sparse_field && keys[pck->key_id].type == BCF_HT_STR)  // DISABLED for testing
+		{
+			// Decompress sparse PGT/PID
+			cbsc->Decompress(v_compressed, v_tmp);
 
-		if (keys[pck->key_id].type == BCF_HT_INT)
+			// Parse sparse format: [count][pos1][len1][data1]...
+			size_t offset = 0;
+			uint64_t count;
+			offset += fmt_compress::VintCodec::decode(v_tmp.data() + offset, count);
+
+			// Build position map
+			std::unordered_map<uint32_t, std::pair<uint32_t, const uint8_t*>> entries;
+			for (uint64_t i = 0; i < count; i++)
+			{
+				uint64_t pos, len;
+				offset += fmt_compress::VintCodec::decode(v_tmp.data() + offset, pos);
+				offset += fmt_compress::VintCodec::decode(v_tmp.data() + offset, len);
+				entries[static_cast<uint32_t>(pos)] = {static_cast<uint32_t>(len), v_tmp.data() + offset};
+				offset += len;
+			}
+
+			// Reconstruct full data
+			size_t num_samples = pck->v_size.size();
+			pck->v_data.clear();
+			for (size_t i = 0; i < num_samples; i++)
+			{
+				auto it = entries.find(static_cast<uint32_t>(i));
+				if (it != entries.end())
+				{
+					pck->v_data.insert(pck->v_data.end(), it->second.second, it->second.second + it->second.first);
+					pck->v_size[i] = it->second.first;
+				}
+				else
+				{
+					pck->v_data.push_back('.');
+					pck->v_size[i] = 1;
+				}
+			}
+		}
+		else if (false && is_ad_field && keys[pck->key_id].type == BCF_HT_INT)  // DISABLED for testing
+		{
+			// Decompress AD with 2-bit tip encoding
+			cbsc->Decompress(v_compressed, v_tmp);
+
+			size_t offset = 0;
+			uint64_t num_samples;
+			offset += fmt_compress::VintCodec::decode(v_tmp.data() + offset, num_samples);
+
+			// Read tips
+			size_t tip_bytes = (num_samples * 2 + 7) / 8;
+			std::vector<uint8_t> tips;
+			tips.reserve(num_samples * 2);
+			for (size_t i = 0; i < num_samples * 2; i++)
+			{
+				size_t byte_idx = i / 8;
+				size_t bit_idx = i % 8;
+				tips.push_back((v_tmp[offset + byte_idx] >> bit_idx) & 1);
+			}
+			offset += tip_bytes;
+
+			// Read values
+			uint64_t value_count;
+			offset += fmt_compress::VintCodec::decode(v_tmp.data() + offset, value_count);
+			std::vector<uint32_t> values(value_count);
+			for (uint64_t i = 0; i < value_count; i++)
+			{
+				uint64_t val;
+				offset += fmt_compress::VintCodec::decode(v_tmp.data() + offset, val);
+				values[i] = static_cast<uint32_t>(val);
+			}
+
+			// Reconstruct AD data
+			pck->v_data.clear();
+			size_t val_idx = 0;
+			for (size_t i = 0; i < num_samples; i++)
+			{
+				uint8_t tip0 = tips[i * 2];
+				uint8_t tip1 = tips[i * 2 + 1];
+				// v_size stores element count, not byte count (see WriteInt in bit_memory.h)
+				uint32_t elem_count = pck->v_size[i];
+
+				if (tip0 == 0 && tip1 == 0)
+				{
+					// All zeros
+					for (uint32_t j = 0; j < elem_count; j++)
+					{
+						int32_t val = 0;
+						pck->v_data.insert(pck->v_data.end(), reinterpret_cast<uint8_t*>(&val), reinterpret_cast<uint8_t*>(&val) + 4);
+					}
+				}
+				else if (tip0 == 0 && tip1 == 1)
+				{
+					// First = 2, rest = 0
+					int32_t val = 2;
+					pck->v_data.insert(pck->v_data.end(), reinterpret_cast<uint8_t*>(&val), reinterpret_cast<uint8_t*>(&val) + 4);
+					val = 0;
+					for (uint32_t j = 1; j < elem_count; j++)
+					{
+						pck->v_data.insert(pck->v_data.end(), reinterpret_cast<uint8_t*>(&val), reinterpret_cast<uint8_t*>(&val) + 4);
+					}
+				}
+				else if (tip0 == 1 && tip1 == 0)
+				{
+					// First = stored value, rest = 0
+					int32_t val = static_cast<int32_t>(values[val_idx++]);
+					pck->v_data.insert(pck->v_data.end(), reinterpret_cast<uint8_t*>(&val), reinterpret_cast<uint8_t*>(&val) + 4);
+					val = 0;
+					for (uint32_t j = 1; j < elem_count; j++)
+					{
+						pck->v_data.insert(pck->v_data.end(), reinterpret_cast<uint8_t*>(&val), reinterpret_cast<uint8_t*>(&val) + 4);
+					}
+				}
+				else
+				{
+					// Full array stored
+					for (uint32_t j = 0; j < elem_count; j++)
+					{
+						int32_t val = static_cast<int32_t>(values[val_idx++]);
+						pck->v_data.insert(pck->v_data.end(), reinterpret_cast<uint8_t*>(&val), reinterpret_cast<uint8_t*>(&val) + 4);
+					}
+				}
+			}
+
+			// Debug: verify AD data size (v_size stores element count, multiply by 4 for bytes)
+			size_t expected_size = 0;
+			for (size_t k = 0; k < pck->v_size.size(); k++) expected_size += pck->v_size[k] * 4;
+			logger->info("AD decompress: num_samples={}, v_size.size()={}, expected_size={}, v_data.size()={}, val_idx={}, values.size()={}",
+				num_samples, pck->v_size.size(), expected_size, pck->v_data.size(), val_idx, values.size());
+			if (pck->v_data.size() != expected_size) {
+				logger->error("AD data size mismatch! expected={}, got={}", expected_size, pck->v_data.size());
+			}
+		}
+		else if (false && is_pl_field && keys[pck->key_id].type == BCF_HT_INT)  // DISABLED for testing
+		{
+			// Decompress PL with pattern recognition
+			cbsc->Decompress(v_compressed, v_tmp);
+
+			size_t offset = 0;
+			uint64_t num_samples;
+			offset += fmt_compress::VintCodec::decode(v_tmp.data() + offset, num_samples);
+
+			// Read tips
+			size_t tip_bytes = (num_samples * 2 + 7) / 8;
+			std::vector<uint8_t> tips;
+			tips.reserve(num_samples * 2);
+			for (size_t i = 0; i < num_samples * 2; i++)
+			{
+				size_t byte_idx = i / 8;
+				size_t bit_idx = i % 8;
+				tips.push_back((v_tmp[offset + byte_idx] >> bit_idx) & 1);
+			}
+			offset += tip_bytes;
+
+			// Read a_values
+			uint64_t a_count;
+			offset += fmt_compress::VintCodec::decode(v_tmp.data() + offset, a_count);
+			std::vector<uint32_t> a_values(a_count);
+			for (uint64_t i = 0; i < a_count; i++)
+			{
+				uint64_t val;
+				offset += fmt_compress::VintCodec::decode(v_tmp.data() + offset, val);
+				a_values[i] = static_cast<uint32_t>(val);
+			}
+
+			// Read b_values
+			uint64_t b_count;
+			offset += fmt_compress::VintCodec::decode(v_tmp.data() + offset, b_count);
+			std::vector<uint32_t> b_values(b_count);
+			for (uint64_t i = 0; i < b_count; i++)
+			{
+				uint64_t val;
+				offset += fmt_compress::VintCodec::decode(v_tmp.data() + offset, val);
+				b_values[i] = static_cast<uint32_t>(val);
+			}
+
+			// Read all_values
+			uint64_t all_count;
+			offset += fmt_compress::VintCodec::decode(v_tmp.data() + offset, all_count);
+			std::vector<uint32_t> all_values(all_count);
+			for (uint64_t i = 0; i < all_count; i++)
+			{
+				uint64_t val;
+				offset += fmt_compress::VintCodec::decode(v_tmp.data() + offset, val);
+				all_values[i] = static_cast<uint32_t>(val);
+			}
+
+			// Reconstruct PL data
+			pck->v_data.clear();
+			size_t a_idx = 0, b_idx = 0, all_idx = 0;
+			for (size_t i = 0; i < num_samples; i++)
+			{
+				uint8_t tip0 = tips[i * 2];
+				uint8_t tip1 = tips[i * 2 + 1];
+				// v_size stores element count, not byte count (see WriteInt in bit_memory.h)
+				uint32_t elem_count = pck->v_size[i];
+
+				if (tip0 == 0 && tip1 == 0)
+				{
+					// All zeros
+					for (uint32_t j = 0; j < elem_count; j++)
+					{
+						int32_t val = 0;
+						pck->v_data.insert(pck->v_data.end(), reinterpret_cast<uint8_t*>(&val), reinterpret_cast<uint8_t*>(&val) + 4);
+					}
+				}
+				else if (tip0 == 0 && tip1 == 1)
+				{
+					// Pattern [0, a, b, a, b, b, ...]
+					uint32_t a = a_values[a_idx++];
+					uint32_t b = b_values[b_idx++];
+					// Generate pattern based on elem_count
+					std::vector<int32_t> pattern;
+					pattern.push_back(0);
+					uint32_t b_repeat = 1;
+					while (pattern.size() < elem_count)
+					{
+						pattern.push_back(static_cast<int32_t>(a));
+						for (uint32_t k = 0; k < b_repeat && pattern.size() < elem_count; k++)
+						{
+							pattern.push_back(static_cast<int32_t>(b));
+						}
+						b_repeat++;
+					}
+					for (size_t j = 0; j < pattern.size(); j++)
+					{
+						pck->v_data.insert(pck->v_data.end(), reinterpret_cast<uint8_t*>(&pattern[j]), reinterpret_cast<uint8_t*>(&pattern[j]) + 4);
+					}
+				}
+				else if (tip0 == 1 && tip1 == 0)
+				{
+					// Pattern with b = 15*a
+					uint32_t a = a_values[a_idx++];
+					uint32_t b = a * 15;
+					std::vector<int32_t> pattern;
+					pattern.push_back(0);
+					uint32_t b_repeat = 1;
+					while (pattern.size() < elem_count)
+					{
+						pattern.push_back(static_cast<int32_t>(a));
+						for (uint32_t k = 0; k < b_repeat && pattern.size() < elem_count; k++)
+						{
+							pattern.push_back(static_cast<int32_t>(b));
+						}
+						b_repeat++;
+					}
+					for (size_t j = 0; j < pattern.size(); j++)
+					{
+						pck->v_data.insert(pck->v_data.end(), reinterpret_cast<uint8_t*>(&pattern[j]), reinterpret_cast<uint8_t*>(&pattern[j]) + 4);
+					}
+				}
+				else
+				{
+					// Full array stored
+					for (uint32_t j = 0; j < elem_count; j++)
+					{
+						int32_t val = static_cast<int32_t>(all_values[all_idx++]);
+						pck->v_data.insert(pck->v_data.end(), reinterpret_cast<uint8_t*>(&val), reinterpret_cast<uint8_t*>(&val) + 4);
+					}
+				}
+			}
+
+			// Debug: verify PL data size (v_size stores element count, multiply by 4 for bytes)
+			size_t expected_size = 0;
+			for (size_t k = 0; k < pck->v_size.size(); k++) expected_size += pck->v_size[k] * 4;
+			logger->info("PL decompress: num_samples={}, v_size.size()={}, expected_size={}, v_data.size()={}, a_idx={}, b_idx={}, all_idx={}",
+				num_samples, pck->v_size.size(), expected_size, pck->v_data.size(), a_idx, b_idx, all_idx);
+			if (pck->v_data.size() != expected_size) {
+				logger->error("PL data size mismatch! expected={}, got={}", expected_size, pck->v_data.size());
+			}
+		}
+		else if (keys[pck->key_id].type == BCF_HT_INT)
 		{
 
 			cbsc->Decompress(v_compressed, v_tmp);

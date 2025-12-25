@@ -83,6 +83,7 @@ target_include_directories(gsc
     PRIVATE
         ${CMAKE_SOURCE_DIR}/include
         ${CMAKE_SOURCE_DIR}/include/cpp-mmf
+        ${CMAKE_SOURCE_DIR}/src/fmt_compress
 )
 
 target_compile_options(gsc PRIVATE ${COMMON_COMPILE_FLAGS})

@@ -807,6 +807,7 @@ bool Compressor::CompressProcess()
             append(v_desc, keys[i].actual_field_id);
             append(v_desc, static_cast<uint64_t>(keys[i].keys_type));
             append(v_desc, keys[i].type);
+            append_str(v_desc, keys[i].name);  // Save field name for FMT compression
         }
         append(v_desc, static_cast<uint32_t>(params.backend));
         vector<uint8_t> v_desc_compressed;
@@ -968,6 +969,16 @@ void Compressor::compress_other_fileds(SPackage &pck, vector<uint8_t> &v_compres
 
     lock_coder_compressor(pck);
     CompressionStrategy *cbsc_size = field_size_codecs[pck.key_id].get();
+
+    // Special lossless compression for selected FORMAT fields (AD/PL/PGT/PID).
+    // Note: SPackage stores per-variant payloads concatenated in v_data; v_size stores per-variant lengths.
+    const std::string &field_name = keys[pck.key_id].name;
+    const bool is_fmt_field = (keys[pck.key_id].keys_type == key_type_t::fmt);
+    const bool is_sparse_field = (field_name == "PGT" || field_name == "PID");
+    const bool is_ad_field = (field_name == "AD");
+    const bool is_pl_field = (field_name == "PL");
+    const uint32_t n_samples = params.n_samples;
+
     if (pck.v_data.size())
     {
 
@@ -975,7 +986,320 @@ void Compressor::compress_other_fileds(SPackage &pck, vector<uint8_t> &v_compres
         // lzma2::lzma2_compress(pck.v_data, v_compressed, 10, 3);
 
         CompressionStrategy *cbsc = field_data_codecs[pck.key_id].get();
-        if (keys[pck.key_id].type != BCF_HT_INT)
+
+        if (is_fmt_field && is_sparse_field && keys[pck.key_id].type == BCF_HT_STR && n_samples > 0)
+        {
+            // Sparse storage per variant: for each record, only store non-missing samples.
+            // Each record encoding: [count][pos1][stride-bytes][pos2][stride-bytes]...
+            // Where stride = record_bytes / n_samples. Missing is detected via bcf_str_missing (0x07) or '.'.
+            bool ok = true;
+            vector<uint8_t> sparse_data;
+            sparse_data.reserve(pck.v_data.size() / 2);
+
+            uint8_t vint_buf[16];
+            size_t in_off = 0;
+            for (size_t rec_idx = 0; rec_idx < pck.v_size.size(); ++rec_idx)
+            {
+                const uint32_t rec_bytes = pck.v_size[rec_idx];
+                if (rec_bytes == 0)
+                    continue;
+                if (rec_bytes % n_samples != 0)
+                {
+                    ok = false;
+                    break;
+                }
+                const uint32_t stride = rec_bytes / n_samples;
+                const uint8_t *rec_ptr = pck.v_data.data() + in_off;
+
+                uint32_t non_missing_count = 0;
+                vector<uint32_t> positions;
+                positions.reserve(n_samples / 4);
+
+                for (uint32_t s = 0; s < n_samples; ++s)
+                {
+                    const uint8_t *cell = rec_ptr + (size_t)s * stride;
+                    const bool is_missing =
+                        (stride > 0 && (cell[0] == bcf_str_missing ||
+                                        (cell[0] == '.' && (stride == 1 || cell[1] == bcf_str_vector_end))));
+                    if (!is_missing)
+                    {
+                        positions.push_back(s);
+                        ++non_missing_count;
+                    }
+                }
+
+                uint8_t vlen = fmt_compress::VintCodec::encode(non_missing_count, vint_buf);
+                sparse_data.insert(sparse_data.end(), vint_buf, vint_buf + vlen);
+
+                for (uint32_t pos : positions)
+                {
+                    vlen = fmt_compress::VintCodec::encode(pos, vint_buf);
+                    sparse_data.insert(sparse_data.end(), vint_buf, vint_buf + vlen);
+                    const uint8_t *cell = rec_ptr + (size_t)pos * stride;
+                    sparse_data.insert(sparse_data.end(), cell, cell + stride);
+                }
+
+                in_off += rec_bytes;
+            }
+
+            vector<uint8_t> to_compress;
+            if (ok && in_off == pck.v_data.size())
+            {
+                to_compress.reserve(1 + sparse_data.size());
+                to_compress.push_back(1); // codec_id: special
+                to_compress.insert(to_compress.end(), sparse_data.begin(), sparse_data.end());
+            }
+            else
+            {
+                // Fallback to legacy payload (raw bytes) with an explicit codec marker.
+                to_compress.reserve(1 + pck.v_data.size());
+                to_compress.push_back(0); // codec_id: legacy
+                to_compress.insert(to_compress.end(), pck.v_data.begin(), pck.v_data.end());
+            }
+            cbsc->Compress(to_compress, v_compressed);
+        }
+        else if (is_fmt_field && is_ad_field && keys[pck.key_id].type == BCF_HT_INT && n_samples > 0)
+        {
+            // AD compression per variant: 2-bit tip encoding per sample.
+            // Record encoding: [tip-bytes][values...]
+            // Tip: 00=all zeros, 01=first==2&&others==0, 10=only first non-zero (store first), 11=store full vector.
+            vector<uint8_t> ad_compressed;
+            uint8_t vint_buf[16];
+
+            bool ok = true;
+            ad_compressed.reserve(pck.v_data.size() / 2);
+
+            size_t in_off = 0;
+            for (size_t rec_idx = 0; rec_idx < pck.v_size.size(); ++rec_idx)
+            {
+                const uint32_t total_elems = pck.v_size[rec_idx];
+                if (total_elems == 0)
+                    continue;
+                if (total_elems % n_samples != 0)
+                {
+                    ok = false;
+                    break;
+                }
+                const uint32_t per_sample = total_elems / n_samples;
+                const int32_t *vals = reinterpret_cast<const int32_t *>(pck.v_data.data() + in_off);
+
+                vector<uint8_t> tips;
+                tips.reserve((size_t)n_samples * 2);
+                vector<uint32_t> values;
+                values.reserve((size_t)total_elems / 4);
+
+                for (uint32_t s = 0; s < n_samples; ++s)
+                {
+                    const int32_t *sv = vals + (size_t)s * per_sample;
+                    bool has_special = false;
+                    int64_t sum = 0;
+                    for (uint32_t j = 0; j < per_sample; ++j)
+                    {
+                        const int32_t v = sv[j];
+                        if (v == bcf_int32_missing || v == bcf_int32_vector_end || v < 0)
+                        {
+                            has_special = true;
+                            break;
+                        }
+                        sum += v;
+                    }
+
+                    if (has_special || per_sample == 0)
+                    {
+                        tips.push_back(1);
+                        tips.push_back(1);
+                        for (uint32_t j = 0; j < per_sample; ++j)
+                            values.push_back(static_cast<uint32_t>(sv[j]));
+                    }
+                    else if (sum == 0)
+                    {
+                        tips.push_back(0);
+                        tips.push_back(0);
+                    }
+                    else if (sum == sv[0])
+                    {
+                        if (sum == 2)
+                        {
+                            tips.push_back(0);
+                            tips.push_back(1);
+                        }
+                        else
+                        {
+                            tips.push_back(1);
+                            tips.push_back(0);
+                            values.push_back(static_cast<uint32_t>(sv[0]));
+                        }
+                    }
+                    else
+                    {
+                        tips.push_back(1);
+                        tips.push_back(1);
+                        for (uint32_t j = 0; j < per_sample; ++j)
+                            values.push_back(static_cast<uint32_t>(sv[j]));
+                    }
+                }
+
+                const size_t tip_bytes = ((size_t)n_samples * 2 + 7) / 8;
+                const size_t tip_start = ad_compressed.size();
+                ad_compressed.resize(tip_start + tip_bytes, 0);
+                for (size_t i = 0; i < tips.size(); ++i)
+                {
+                    if (!tips[i])
+                        continue;
+                    ad_compressed[tip_start + (i / 8)] |= (uint8_t)(1u << (i % 8));
+                }
+
+                for (uint32_t v : values)
+                {
+                    uint8_t vlen = fmt_compress::VintCodec::encode(v, vint_buf);
+                    ad_compressed.insert(ad_compressed.end(), vint_buf, vint_buf + vlen);
+                }
+
+                in_off += (size_t)total_elems * 4;
+            }
+
+            vector<uint8_t> to_compress;
+            if (ok && in_off == pck.v_data.size())
+            {
+                to_compress.reserve(1 + ad_compressed.size());
+                to_compress.push_back(1); // codec_id: special
+                to_compress.insert(to_compress.end(), ad_compressed.begin(), ad_compressed.end());
+            }
+            else
+            {
+                // Fallback to legacy payload (transposed bytes) with an explicit codec marker.
+                Encoder(pck.v_data, v_tmp);
+                to_compress.reserve(1 + v_tmp.size());
+                to_compress.push_back(0); // codec_id: legacy
+                to_compress.insert(to_compress.end(), v_tmp.begin(), v_tmp.end());
+            }
+            cbsc->Compress(to_compress, v_compressed);
+        }
+        else if (is_fmt_field && is_pl_field && keys[pck.key_id].type == BCF_HT_INT && n_samples > 0)
+        {
+            // PL compression per variant: 2-bit tip encoding + per-sample payload.
+            // Record encoding: [tip-bytes][payload...]
+            // Type 00: all zeros
+            // Type 01: pattern 1 (store a,b)
+            // Type 10: pattern 2 (store a; b=15*a)
+            // Type 11: store full vector
+            vector<uint8_t> pl_compressed;
+            uint8_t vint_buf[16];
+
+            bool ok = true;
+            pl_compressed.reserve(pck.v_data.size() / 2);
+
+            size_t in_off = 0;
+            for (size_t rec_idx = 0; rec_idx < pck.v_size.size(); ++rec_idx)
+            {
+                const uint32_t total_elems = pck.v_size[rec_idx];
+                if (total_elems == 0)
+                    continue;
+                if (total_elems % n_samples != 0)
+                {
+                    ok = false;
+                    break;
+                }
+                const uint32_t per_sample = total_elems / n_samples;
+                const int32_t *vals = reinterpret_cast<const int32_t *>(pck.v_data.data() + in_off);
+
+                vector<uint8_t> tips;
+                tips.reserve((size_t)n_samples * 2);
+                vector<uint32_t> payload;
+                payload.reserve((size_t)total_elems / 2);
+
+                for (uint32_t s = 0; s < n_samples; ++s)
+                {
+                    const int32_t *sv = vals + (size_t)s * per_sample;
+                    bool has_special = false;
+                    vector<uint32_t> pl_vec;
+                    pl_vec.resize(per_sample);
+                    for (uint32_t j = 0; j < per_sample; ++j)
+                    {
+                        const int32_t v = sv[j];
+                        if (v == bcf_int32_missing || v == bcf_int32_vector_end || v < 0)
+                        {
+                            has_special = true;
+                            break;
+                        }
+                        pl_vec[j] = static_cast<uint32_t>(v);
+                    }
+
+                    if (has_special || per_sample == 0)
+                    {
+                        tips.push_back(1);
+                        tips.push_back(1);
+                        for (uint32_t j = 0; j < per_sample; ++j)
+                            payload.push_back(static_cast<uint32_t>(sv[j]));
+                        continue;
+                    }
+
+                    uint32_t a_val = 0, b_val = 0;
+                    const uint8_t type = fmt_compress::checkPlPattern(pl_vec.data(), per_sample, a_val, b_val);
+                    if (type == 0)
+                    {
+                        tips.push_back(0);
+                        tips.push_back(0);
+                    }
+                    else if (type == 1)
+                    {
+                        tips.push_back(0);
+                        tips.push_back(1);
+                        payload.push_back(a_val);
+                        payload.push_back(b_val);
+                    }
+                    else if (type == 2)
+                    {
+                        tips.push_back(1);
+                        tips.push_back(0);
+                        payload.push_back(a_val);
+                    }
+                    else
+                    {
+                        tips.push_back(1);
+                        tips.push_back(1);
+                        for (uint32_t j = 0; j < per_sample; ++j)
+                            payload.push_back(pl_vec[j]);
+                    }
+                }
+
+                const size_t tip_bytes = ((size_t)n_samples * 2 + 7) / 8;
+                const size_t tip_start = pl_compressed.size();
+                pl_compressed.resize(tip_start + tip_bytes, 0);
+                for (size_t i = 0; i < tips.size(); ++i)
+                {
+                    if (!tips[i])
+                        continue;
+                    pl_compressed[tip_start + (i / 8)] |= (uint8_t)(1u << (i % 8));
+                }
+
+                for (uint32_t v : payload)
+                {
+                    uint8_t vlen = fmt_compress::VintCodec::encode(v, vint_buf);
+                    pl_compressed.insert(pl_compressed.end(), vint_buf, vint_buf + vlen);
+                }
+
+                in_off += (size_t)total_elems * 4;
+            }
+
+            vector<uint8_t> to_compress;
+            if (ok && in_off == pck.v_data.size())
+            {
+                to_compress.reserve(1 + pl_compressed.size());
+                to_compress.push_back(1); // codec_id: special
+                to_compress.insert(to_compress.end(), pl_compressed.begin(), pl_compressed.end());
+            }
+            else
+            {
+                // Fallback to legacy payload (transposed bytes) with an explicit codec marker.
+                Encoder(pck.v_data, v_tmp);
+                to_compress.reserve(1 + v_tmp.size());
+                to_compress.push_back(0); // codec_id: legacy
+                to_compress.insert(to_compress.end(), v_tmp.begin(), v_tmp.end());
+            }
+            cbsc->Compress(to_compress, v_compressed);
+        }
+        else if (keys[pck.key_id].type != BCF_HT_INT)
         {
             cbsc->Compress(pck.v_data, v_compressed);
             // zstd::zstd_compress(pck.v_data, v_compressed);
@@ -1193,7 +1517,17 @@ void Compressor::InitCompressParams()
         }
         field_data_codecs[i] = MakeCompressionStrategy(params.backend, param);
     }
+
+    // Initialize FMT field compression
+    fmt_dictionaries_ = std::make_unique<fmt_compress::FmtDictionaries>();
+    fmt_processor_ = std::make_unique<fmt_compress::FmtFieldProcessor>(fmt_dictionaries_.get());
 }
+
+bool Compressor::isFmtSpecialField(const std::string& name) const {
+    return name == "AD" || name == "DP" || name == "GQ" ||
+           name == "PL" || name == "PGT" || name == "PID";
+}
+
 void Compressor::lock_gt_block_process(int &_block_id, uint32_t _col_block_id)
 {
     unique_lock<mutex> lck(mtx_gt_block);

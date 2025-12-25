@@ -17,6 +17,7 @@
 #include "utils.h"
 #include "compression_strategy.h"
 #include "vint_code.h"
+#include "fmt_field_processor.h"
 #define MMAP
 
 #ifdef MMAP

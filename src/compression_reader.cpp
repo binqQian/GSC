@@ -215,7 +215,7 @@ void CompressionReader::initializeColumnBlocks()
     col_vec_read_in_block.resize(n_col_blocks, 0);
 
     logger->debug("Column tiling: TILED mode (n_col_blocks={}, total_haplotypes={}, max_block_cols={}, no_vec_in_block={})",
-                 n_col_blocks, total_haplotypes, max_block_cols, no_vec_in_block);
+                  n_col_blocks, total_haplotypes, max_block_cols, no_vec_in_block);
 
     for (uint32_t cb = 0; cb < n_col_blocks; ++cb)
     {
@@ -231,7 +231,7 @@ void CompressionReader::initializeColumnBlocks()
         // Initialize buffer for this column block
         uint64_t col_block_max_size = block_vec_len * no_vec_in_block + 1;
         logger->debug("  Column block {}: haplotypes={}, vec_len={}, buffer_size={}",
-                     cb, block_size, block_vec_len, col_block_max_size);
+                      cb, block_size, block_vec_len, col_block_max_size);
         col_bv_buffers[cb].Create(col_block_max_size);
     }
 }
@@ -380,6 +380,7 @@ bool CompressionReader::GetFilterInfoFormatKeys(int &no_flt_keys, int &no_info_k
                 }
             }
             new_key.actual_field_id = (uint32_t)keys.size();
+            new_key.name = vcf_hdr->hrec[i]->vals[0]; // Save field name for FMT compression
             // std::cerr<<"new_key.actual_field_id:"<<new_key.key_id<<":"<<new_key.actual_field_id<<endl;
             keys.emplace_back(new_key);
         }
@@ -731,7 +732,7 @@ bool CompressionReader::ProcessInVCF()
                         logger->error("Repair VCF file OR set correct ploidy using -p option.");
                         exit(9);
                     }
-                    if (tmpi % 100000 == 0)
+                    if (tmpi % 1000 == 0)
                     {
                         logger->info("Processed {} variants...", tmpi);
                     }
@@ -785,7 +786,7 @@ bool CompressionReader::ProcessInVCF()
                     logger->error("Repair VCF file OR set correct ploidy using -p option.");
                     exit(9);
                 }
-                if (tmpi % 100000 == 0)
+                if (tmpi % 1000 == 0)
                 {
                     logger->info("Processed {} variants...", tmpi);
                 }
@@ -1135,7 +1136,7 @@ void CompressionReader::addVariant(int *gt_data, int ngt_data, variant_desc_t &d
             {
                 auto logger = LogManager::Instance().Logger();
                 logger->debug("Pushing row block {}: {} variants across {} column blocks",
-                             block_id, v_vcf_data_compress.size(), n_col_blocks);
+                              block_id, v_vcf_data_compress.size(), n_col_blocks);
 
                 for (uint32_t col_block_id = 0; col_block_id < n_col_blocks; ++col_block_id)
                 {
@@ -1143,7 +1144,7 @@ void CompressionReader::addVariant(int *gt_data, int ngt_data, variant_desc_t &d
                     col_bv.TakeOwnership();
 
                     logger->debug("  Pushing col_block {}: block_id={}, num_rows={}, buffer_size={}",
-                                 col_block_id, block_id, no_vec_in_block, col_bv.mem_buffer_pos);
+                                  col_block_id, block_id, no_vec_in_block, col_bv.mem_buffer_pos);
 
                     // Only the last column block carries the variant descriptors
                     // Other column blocks get empty vectors to avoid duplicate storage

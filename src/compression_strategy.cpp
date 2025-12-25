@@ -51,8 +51,8 @@ public:
         output.resize(max_out);
         size_t encoded = max_out;
         const bool ok = BrotliEncoderCompress(
-            BROTLI_DEFAULT_QUALITY,
-            BROTLI_DEFAULT_WINDOW,
+            BROTLI_MAX_QUALITY,
+            BROTLI_MAX_WINDOW_BITS,
             BROTLI_MODE_GENERIC,
             input.size(),
             input.data(),
