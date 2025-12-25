@@ -1,5 +1,7 @@
 #include "compression_reader.h"
 #include "logger.h"
+#include "fmt_utils.h"
+#include "vint_codec.h"
 #include <iostream>
 #include <fstream>
 #include <sstream>
@@ -596,6 +598,365 @@ bool CompressionReader::GetVariantFromRec(bcf1_t *rec, vector<field_desc> &field
         {
 
             inDegree[field_order[i]] = 0;
+        }
+    }
+
+    // FORMAT DP: predict from sum(AD), store only exceptions/raw as a byte stream.
+    // Each DP record starts with 1 byte record_codec:
+    //  - 0: raw DP int32 array (after this byte)
+    //  - 1: [raw_count][(delta_pos, dp_enc)...][exc_count][(delta_pos, dp_enc)...], all Vint-coded
+    // dp_enc: 0 => missing, else dp_value + 1.
+    int ad_field_id = -1;
+    int dp_field_id = -1;
+    int min_dp_field_id = -1;
+    int pl_field_id = -1;
+    int gq_field_id = -1;
+    for (uint32_t k = 0; k < no_keys; ++k)
+    {
+        if (keys[k].keys_type != key_type_t::fmt)
+            continue;
+        if (keys[k].name == "AD")
+            ad_field_id = (int)k;
+        else if (keys[k].name == "DP")
+            dp_field_id = (int)k;
+        else if (keys[k].name == "MIN_DP")
+            min_dp_field_id = (int)k;
+        else if (keys[k].name == "PL")
+            pl_field_id = (int)k;
+        else if (keys[k].name == "GQ")
+            gq_field_id = (int)k;
+    }
+    if (dp_field_id >= 0 && fields[dp_field_id].present && fields[dp_field_id].data && fields[dp_field_id].data_size)
+    {
+        const uint32_t n_samples_rec = rec->n_sample;
+        field_desc &dp_field = fields[dp_field_id];
+        if (n_samples_rec > 0 && dp_field.data_size == n_samples_rec * 4)
+        {
+            const int32_t *dp_vals = reinterpret_cast<const int32_t *>(dp_field.data);
+
+            // FORMAT/MIN_DP: predict from DP, store only exceptions as a byte stream.
+            // Each MIN_DP record starts with 1 byte record_codec:
+            //  - 0: raw MIN_DP int32 array (after this byte)
+            //  - 1: [exc_count][(delta_pos, val_enc)...] Vint-coded, where val_enc: 0=>missing else value+1.
+            if (min_dp_field_id >= 0 && fields[min_dp_field_id].present && fields[min_dp_field_id].data &&
+                fields[min_dp_field_id].data_size == n_samples_rec * 4)
+            {
+                field_desc &min_dp_field = fields[min_dp_field_id];
+                const int32_t *min_dp_vals = reinterpret_cast<const int32_t *>(min_dp_field.data);
+
+                vector<uint32_t> exc_pos;
+                vector<uint32_t> exc_val;
+                exc_pos.reserve(n_samples_rec / 16);
+                exc_val.reserve(n_samples_rec / 16);
+
+                for (uint32_t s = 0; s < n_samples_rec; ++s)
+                {
+                    const int32_t dp = dp_vals[s];
+                    const bool dp_missing = (dp == bcf_int32_missing || dp == bcf_int32_vector_end || dp < 0);
+                    const uint32_t dp_enc = dp_missing ? 0u : (uint32_t)dp + 1u;
+
+                    const int32_t mdp = min_dp_vals[s];
+                    const bool mdp_missing = (mdp == bcf_int32_missing || mdp == bcf_int32_vector_end || mdp < 0);
+                    const uint32_t mdp_enc = mdp_missing ? 0u : (uint32_t)mdp + 1u;
+
+                    if (mdp_enc == dp_enc)
+                        continue;
+
+                    exc_pos.push_back(s);
+                    exc_val.push_back(mdp_enc);
+                }
+
+                vector<uint8_t> enc_mdp;
+                enc_mdp.reserve(32);
+
+                if (exc_pos.size() > (size_t)n_samples_rec * 3 / 4)
+                {
+                    enc_mdp.push_back(0);
+                    const uint8_t *p = reinterpret_cast<const uint8_t *>(min_dp_field.data);
+                    enc_mdp.insert(enc_mdp.end(), p, p + min_dp_field.data_size);
+                }
+                else
+                {
+                    enc_mdp.push_back(1);
+                    uint8_t buf[16];
+                    uint8_t len = fmt_compress::VintCodec::encode((uint64_t)exc_pos.size(), buf);
+                    enc_mdp.insert(enc_mdp.end(), buf, buf + len);
+
+                    uint32_t prev = 0;
+                    for (size_t i = 0; i < exc_pos.size(); ++i)
+                    {
+                        const uint32_t delta = exc_pos[i] - prev;
+                        prev = exc_pos[i];
+                        len = fmt_compress::VintCodec::encode(delta, buf);
+                        enc_mdp.insert(enc_mdp.end(), buf, buf + len);
+                        len = fmt_compress::VintCodec::encode(exc_val[i], buf);
+                        enc_mdp.insert(enc_mdp.end(), buf, buf + len);
+                    }
+                }
+
+                while (enc_mdp.size() % 4 != 0)
+                    enc_mdp.push_back(0);
+
+                delete[] min_dp_field.data;
+                min_dp_field.data_size = (uint32_t)enc_mdp.size();
+                min_dp_field.data = new char[min_dp_field.data_size];
+                memcpy(min_dp_field.data, enc_mdp.data(), min_dp_field.data_size);
+            }
+
+            bool has_ad_layout = false;
+            uint32_t ad_stride = 0;
+            const int32_t *ad_vals = nullptr;
+            if (ad_field_id >= 0 && fields[ad_field_id].present && fields[ad_field_id].data &&
+                (fields[ad_field_id].data_size % 4 == 0))
+            {
+                const uint32_t total_ad = fields[ad_field_id].data_size / 4;
+                if (total_ad > 0 && total_ad % n_samples_rec == 0)
+                {
+                    ad_stride = total_ad / n_samples_rec;
+                    if (ad_stride > 0)
+                    {
+                        has_ad_layout = true;
+                        ad_vals = reinterpret_cast<const int32_t *>(fields[ad_field_id].data);
+                    }
+                }
+            }
+
+            vector<uint8_t> enc;
+            enc.reserve(32);
+
+            if (!has_ad_layout)
+            {
+                enc.push_back(0);
+                const uint8_t *p = reinterpret_cast<const uint8_t *>(dp_field.data);
+                enc.insert(enc.end(), p, p + dp_field.data_size);
+            }
+            else
+            {
+                vector<uint32_t> raw_pos;
+                vector<uint32_t> raw_val;
+                vector<uint32_t> exc_pos;
+                vector<uint32_t> exc_val;
+                raw_pos.reserve(n_samples_rec / 16);
+                raw_val.reserve(n_samples_rec / 16);
+                exc_pos.reserve(n_samples_rec / 16);
+                exc_val.reserve(n_samples_rec / 16);
+
+                for (uint32_t s = 0; s < n_samples_rec; ++s)
+                {
+                    const int32_t dp = dp_vals[s];
+                    const bool dp_missing = (dp == bcf_int32_missing || dp == bcf_int32_vector_end || dp < 0);
+                    const uint32_t dp_enc = dp_missing ? 0u : (uint32_t)dp + 1u;
+
+                    const int32_t *sv = ad_vals + (size_t)s * ad_stride;
+                    bool ad_valid = true;
+                    int64_t sum = 0;
+                    for (uint32_t j = 0; j < ad_stride; ++j)
+                    {
+                        const int32_t v = sv[j];
+                        if (v == bcf_int32_missing || v == bcf_int32_vector_end || v < 0)
+                        {
+                            ad_valid = false;
+                            break;
+                        }
+                        sum += v;
+                        if (sum > INT32_MAX)
+                        {
+                            ad_valid = false;
+                            break;
+                        }
+                    }
+
+                    if (!ad_valid)
+                    {
+                        raw_pos.push_back(s);
+                        raw_val.push_back(dp_enc);
+                        continue;
+                    }
+
+                    if (!dp_missing && dp == (int32_t)sum)
+                    {
+                        continue; // predicted
+                    }
+
+                    exc_pos.push_back(s);
+                    exc_val.push_back(dp_enc);
+                }
+
+                enc.push_back(1);
+                uint8_t buf[16];
+
+                uint8_t len = fmt_compress::VintCodec::encode((uint64_t)raw_pos.size(), buf);
+                enc.insert(enc.end(), buf, buf + len);
+                uint32_t prev = 0;
+                for (size_t i = 0; i < raw_pos.size(); ++i)
+                {
+                    const uint32_t delta = raw_pos[i] - prev;
+                    prev = raw_pos[i];
+                    len = fmt_compress::VintCodec::encode(delta, buf);
+                    enc.insert(enc.end(), buf, buf + len);
+                    len = fmt_compress::VintCodec::encode(raw_val[i], buf);
+                    enc.insert(enc.end(), buf, buf + len);
+                }
+
+                len = fmt_compress::VintCodec::encode((uint64_t)exc_pos.size(), buf);
+                enc.insert(enc.end(), buf, buf + len);
+                prev = 0;
+                for (size_t i = 0; i < exc_pos.size(); ++i)
+                {
+                    const uint32_t delta = exc_pos[i] - prev;
+                    prev = exc_pos[i];
+                    len = fmt_compress::VintCodec::encode(delta, buf);
+                    enc.insert(enc.end(), buf, buf + len);
+                    len = fmt_compress::VintCodec::encode(exc_val[i], buf);
+                    enc.insert(enc.end(), buf, buf + len);
+                }
+            }
+
+            while (enc.size() % 4 != 0)
+                enc.push_back(0);
+
+            delete[] dp_field.data;
+            dp_field.data_size = (uint32_t)enc.size();
+            dp_field.data = new char[dp_field.data_size];
+            memcpy(dp_field.data, enc.data(), dp_field.data_size);
+        }
+    }
+
+    // FORMAT/GQ: predict from PL (pattern or second-min), store only exceptions/raw as a byte stream.
+    // Each GQ record starts with 1 byte record_codec:
+    //  - 0: raw GQ int32 array (after this byte)
+    //  - 1: [raw_count][(delta_pos, val_enc)...][exc_count][(delta_pos, val_enc)...] Vint-coded,
+    //       where raw entries are samples without valid PL for prediction.
+    if (gq_field_id >= 0 && fields[gq_field_id].present && fields[gq_field_id].data && fields[gq_field_id].data_size)
+    {
+        const uint32_t n_samples_rec = rec->n_sample;
+        field_desc &gq_field = fields[gq_field_id];
+        if (n_samples_rec > 0 && gq_field.data_size == n_samples_rec * 4)
+        {
+            const int32_t *gq_vals = reinterpret_cast<const int32_t *>(gq_field.data);
+
+            bool has_pl_layout = false;
+            uint32_t pl_stride = 0;
+            const int32_t *pl_vals = nullptr;
+            if (pl_field_id >= 0 && fields[pl_field_id].present && fields[pl_field_id].data &&
+                (fields[pl_field_id].data_size % 4 == 0))
+            {
+                const uint32_t total_pl = fields[pl_field_id].data_size / 4;
+                if (total_pl > 0 && total_pl % n_samples_rec == 0)
+                {
+                    pl_stride = total_pl / n_samples_rec;
+                    if (pl_stride > 0)
+                    {
+                        has_pl_layout = true;
+                        pl_vals = reinterpret_cast<const int32_t *>(fields[pl_field_id].data);
+                    }
+                }
+            }
+
+            vector<uint8_t> enc_gq;
+            enc_gq.reserve(32);
+
+            if (!has_pl_layout)
+            {
+                enc_gq.push_back(0);
+                const uint8_t *p = reinterpret_cast<const uint8_t *>(gq_field.data);
+                enc_gq.insert(enc_gq.end(), p, p + gq_field.data_size);
+            }
+            else
+            {
+                vector<uint32_t> raw_pos;
+                vector<uint32_t> raw_val;
+                vector<uint32_t> exc_pos;
+                vector<uint32_t> exc_val;
+                raw_pos.reserve(n_samples_rec / 16);
+                raw_val.reserve(n_samples_rec / 16);
+                exc_pos.reserve(n_samples_rec / 16);
+                exc_val.reserve(n_samples_rec / 16);
+
+                vector<uint32_t> pl_vec;
+                pl_vec.resize(pl_stride);
+
+                for (uint32_t s = 0; s < n_samples_rec; ++s)
+                {
+                    const int32_t gq = gq_vals[s];
+                    const bool gq_missing = (gq == bcf_int32_missing || gq == bcf_int32_vector_end || gq < 0);
+                    const uint32_t gq_enc = gq_missing ? 0u : (uint32_t)gq + 1u;
+
+                    const int32_t *sv = pl_vals + (size_t)s * pl_stride;
+                    bool pl_valid = true;
+                    for (uint32_t j = 0; j < pl_stride; ++j)
+                    {
+                        const int32_t v = sv[j];
+                        if (v == bcf_int32_missing || v == bcf_int32_vector_end || v < 0)
+                        {
+                            pl_valid = false;
+                            break;
+                        }
+                        pl_vec[j] = (uint32_t)v;
+                    }
+                    if (!pl_valid)
+                    {
+                        raw_pos.push_back(s);
+                        raw_val.push_back(gq_enc);
+                        continue;
+                    }
+
+                    uint32_t a_val = 0, b_val = 0;
+                    const uint8_t type = fmt_compress::checkPlPattern(pl_vec.data(), pl_stride, a_val, b_val);
+                    uint32_t expected_enc = 0u; // default predict missing
+                    if (type == 1 || type == 2)
+                    {
+                        expected_enc = a_val + 1u;
+                    }
+                    else if (type == 3)
+                    {
+                        uint32_t second_min = (uint32_t)fmt_compress::getSecondMin(pl_vec.data(), pl_stride);
+                        expected_enc = second_min + 1u;
+                    }
+
+                    if (expected_enc == gq_enc)
+                        continue;
+
+                    exc_pos.push_back(s);
+                    exc_val.push_back(gq_enc);
+                }
+
+                enc_gq.push_back(1);
+                uint8_t buf[16];
+                uint8_t len = fmt_compress::VintCodec::encode((uint64_t)raw_pos.size(), buf);
+                enc_gq.insert(enc_gq.end(), buf, buf + len);
+                uint32_t prev = 0;
+                for (size_t i = 0; i < raw_pos.size(); ++i)
+                {
+                    const uint32_t delta = raw_pos[i] - prev;
+                    prev = raw_pos[i];
+                    len = fmt_compress::VintCodec::encode(delta, buf);
+                    enc_gq.insert(enc_gq.end(), buf, buf + len);
+                    len = fmt_compress::VintCodec::encode(raw_val[i], buf);
+                    enc_gq.insert(enc_gq.end(), buf, buf + len);
+                }
+
+                len = fmt_compress::VintCodec::encode((uint64_t)exc_pos.size(), buf);
+                enc_gq.insert(enc_gq.end(), buf, buf + len);
+                prev = 0;
+                for (size_t i = 0; i < exc_pos.size(); ++i)
+                {
+                    const uint32_t delta = exc_pos[i] - prev;
+                    prev = exc_pos[i];
+                    len = fmt_compress::VintCodec::encode(delta, buf);
+                    enc_gq.insert(enc_gq.end(), buf, buf + len);
+                    len = fmt_compress::VintCodec::encode(exc_val[i], buf);
+                    enc_gq.insert(enc_gq.end(), buf, buf + len);
+                }
+            }
+
+            while (enc_gq.size() % 4 != 0)
+                enc_gq.push_back(0);
+
+            delete[] gq_field.data;
+            gq_field.data_size = (uint32_t)enc_gq.size();
+            gq_field.data = new char[gq_field.data_size];
+            memcpy(gq_field.data, enc_gq.data(), gq_field.data_size);
         }
     }
     // std::cerr<<endl;

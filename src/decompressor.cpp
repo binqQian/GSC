@@ -976,14 +976,34 @@ void Decompressor::appendVCFToRec(variant_desc_t &_desc, vector<uint8_t> &_genot
             if (is_sample_subset)
                 continue;
 
-            if (_fields[id].present)
-            {
-                switch (_keys[id].type)
-		        {
-		        case BCF_HT_INT:
-                    curr_size = _fields[id].data_size >> 2;
-                    bcf_update_format(out_hdr, rec, bcf_hdr_int2id(out_hdr, BCF_DT_ID, _keys[id].key_id), _fields[id].data, curr_size, BCF_HT_INT);
-			        break;
+	            if (_fields[id].present)
+	            {
+	                switch (_keys[id].type)
+			        {
+			        case BCF_HT_INT:
+	                    curr_size = _fields[id].data_size >> 2;
+	                    if (_keys[id].name == "DP" || _keys[id].name == "GQ" || _keys[id].name == "MIN_DP" || _keys[id].name == "RGQ")
+	                    {
+	                        const int expected = (int)decompression_reader.n_samples;
+	                        if (curr_size != expected)
+	                        {
+	                            auto logger = LogManager::Instance().Logger();
+	                            logger->error("FMT {} size mismatch: have {} ints, expected {}", _keys[id].name, curr_size, expected);
+	                            abort();
+	                        }
+	                    }
+	                    else if (_keys[id].name == "SB")
+	                    {
+	                        const int expected = (int)(decompression_reader.n_samples * 4);
+	                        if (curr_size != expected)
+	                        {
+	                            auto logger = LogManager::Instance().Logger();
+	                            logger->error("FMT {} size mismatch: have {} ints, expected {}", _keys[id].name, curr_size, expected);
+	                            abort();
+	                        }
+	                    }
+	                    bcf_update_format(out_hdr, rec, bcf_hdr_int2id(out_hdr, BCF_DT_ID, _keys[id].key_id), _fields[id].data, curr_size, BCF_HT_INT);
+				        break;
 		        case BCF_HT_REAL:
                     curr_size = _fields[id].data_size >> 2;
                     bcf_update_format(out_hdr, rec, bcf_hdr_int2id(out_hdr, BCF_DT_ID, _keys[id].key_id), _fields[id].data, curr_size, BCF_HT_REAL);

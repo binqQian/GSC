@@ -1,5 +1,6 @@
 #include "decompression_reader.h"
 #include "logger.h"
+#include "fmt_utils.h"
 #include <algorithm>
 #include <chrono>
 #include <limits>
@@ -454,17 +455,43 @@ bool DecompressionReader::OpenReadingPart2(const string &in_file_name)
 		read_str(v_desc, pos_part2_params, keys[i].name);  // Read field name for FMT decompression
 		// std::cerr<<keys[i].key_id<<" "<<keys[i].actual_field_id<<endl;
 	}
-	if (pos_part2_params < v_desc.size())
-	{
-		uint32_t backend_id = 0;
-		read(v_desc, pos_part2_params, backend_id);
-		if (backend_id <= static_cast<uint32_t>(compression_backend_t::brotli))
+		if (pos_part2_params < v_desc.size())
 		{
-			backend = static_cast<compression_backend_t>(backend_id);
+			uint32_t backend_id = 0;
+			if (pos_part2_params + sizeof(uint32_t) <= v_desc.size())
+			{
+				read(v_desc, pos_part2_params, backend_id);
+				if (backend_id <= static_cast<uint32_t>(compression_backend_t::brotli))
+				{
+					backend = static_cast<compression_backend_t>(backend_id);
+				}
+			}
 		}
-	}
 
-	InitDecompressParams();
+		// FORMAT dictionaries tail (AD/PL/PID). Backward compatible.
+		fmt_dictionaries_ = std::make_unique<fmt_compress::FmtDictionaries>();
+		if (pos_part2_params + 2 * sizeof(uint32_t) <= v_desc.size())
+		{
+			uint32_t dict_ver = 0;
+			uint32_t dict_size = 0;
+			read(v_desc, pos_part2_params, dict_ver);
+			read(v_desc, pos_part2_params, dict_size);
+			if (dict_ver == 1 && dict_size > 0)
+			{
+				if (pos_part2_params + dict_size <= v_desc.size())
+				{
+					fmt_dictionaries_->unserialize(v_desc.data() + pos_part2_params, dict_size);
+					pos_part2_params += dict_size;
+				}
+				else
+				{
+					logger->error("Corrupted part2: fmt dict size out of bounds.");
+					return false;
+				}
+			}
+		}
+
+		InitDecompressParams();
 	for (uint32_t i = 0; i < no_keys; ++i)
 	{
 		decomp_part_queue->PushQueue(i);
@@ -552,39 +579,74 @@ bool DecompressionReader::decompress_other_fileds(SPackage *pck)
 
 	// Check for special FMT fields
 	const std::string& field_name = keys[pck->key_id].name;
-	bool is_sparse_field = (field_name == "PGT" || field_name == "PID");
-	bool is_ad_field = (field_name == "AD");
-	bool is_pl_field = (field_name == "PL");
-	bool is_fmt_field = (keys[pck->key_id].keys_type == key_type_t::fmt);
-	uint32_t n_samples_u32 = n_samples;
+		bool is_sparse_field = (field_name == "PGT" || field_name == "PID");
+		bool is_ad_field = (field_name == "AD");
+		bool is_dp_field = (field_name == "DP");
+		bool is_min_dp_field = (field_name == "MIN_DP");
+		bool is_gq_field = (field_name == "GQ");
+		bool is_pl_field = (field_name == "PL");
+		bool is_fmt_field = (keys[pck->key_id].keys_type == key_type_t::fmt);
+		uint32_t n_samples_u32 = n_samples;
 
 
 	// New lossless codecs for selected FORMAT fields (AD/PL/PGT/PID).
 	// After decompression, the first byte is a codec marker:
-	//  - 0: legacy payload (INT=transposed bytes, STR=raw bytes)
-	//  - 1: special payload (record-wise stream)
-	if (v_compressed.size() && is_fmt_field && n_samples_u32 > 0)
-	{
-		if (is_sparse_field && keys[pck->key_id].type == BCF_HT_STR)
+		//  - 0: legacy payload (INT=transposed bytes, STR=raw bytes)
+		//  - 1: special payload (record-wise stream)
+		if (v_compressed.size() && is_fmt_field && n_samples_u32 > 0)
 		{
-			cbsc->Decompress(v_compressed, v_tmp);
-			if (v_tmp.empty())
+				if ((is_dp_field || is_min_dp_field || is_gq_field) && keys[pck->key_id].type == BCF_HT_INT)
+				{
+					cbsc->Decompress(v_compressed, v_tmp);
+					if (v_tmp.empty())
+					{
+						pck->v_data.clear();
+					return true;
+				}
+
+				const uint8_t codec_id = v_tmp[0];
+				if (codec_id == 0)
+				{
+					vector<uint8_t> transposed(v_tmp.begin() + 1, v_tmp.end());
+					pck->v_data.resize(transposed.size());
+					Decoder(transposed, pck->v_data);
+					return true;
+				}
+					if (codec_id != 1)
+					{
+						logger->error("Unsupported codec_id={} for FMT {} (INT)", (int)codec_id, field_name);
+						return false;
+					}
+
+					pck->v_data.assign(v_tmp.begin() + 1, v_tmp.end());
+					return true;
+				}
+
+			if (is_sparse_field && keys[pck->key_id].type == BCF_HT_STR)
 			{
+				cbsc->Decompress(v_compressed, v_tmp);
+				if (v_tmp.empty())
+				{
 				pck->v_data.clear();
 				return true;
 			}
 
-			const uint8_t codec_id = v_tmp[0];
-			if (codec_id == 0)
-			{
-				pck->v_data.assign(v_tmp.begin() + 1, v_tmp.end());
-				return true;
-			}
-			if (codec_id != 1)
-			{
-				logger->error("Unsupported codec_id={} for FMT {} (STR)", (int)codec_id, field_name);
-				return false;
-			}
+				const uint8_t codec_id = v_tmp[0];
+				if (codec_id == 0)
+				{
+					pck->v_data.assign(v_tmp.begin() + 1, v_tmp.end());
+					return true;
+				}
+				if (codec_id != 1 && codec_id != 2)
+				{
+					logger->error("Unsupported codec_id={} for FMT {} (STR)", (int)codec_id, field_name);
+					return false;
+				}
+				if (codec_id == 2 && field_name != "PID")
+				{
+					logger->error("codec_id=2 is only supported for PID, got {}", field_name);
+					return false;
+				}
 
 			auto decode_vint = [&](size_t &off, uint64_t &val) -> bool {
 				if (off >= v_tmp.size())
@@ -623,27 +685,94 @@ bool DecompressionReader::decompress_other_fileds(SPackage *pck)
 						rec_out[(size_t)s * stride] = bcf_str_missing;
 				}
 
-				uint64_t count = 0;
-				if (!decode_vint(in_off, count))
-					return false;
-				for (uint64_t i = 0; i < count; ++i)
-				{
-					uint64_t pos = 0;
-					if (!decode_vint(in_off, pos))
+					uint64_t count = 0;
+					if (!decode_vint(in_off, count))
 						return false;
-					if (pos >= n_samples_u32)
+					uint32_t prev_pos = 0;
+					for (uint64_t i = 0; i < count; ++i)
 					{
-						logger->error("FMT {} STR decoded pos={} out of range n_samples={}", field_name, pos, n_samples_u32);
-						return false;
+						uint64_t pos = 0;
+						if (codec_id == 2)
+						{
+							uint64_t delta = 0;
+							if (!decode_vint(in_off, delta))
+								return false;
+							pos = (uint64_t)prev_pos + delta;
+							prev_pos = (uint32_t)pos;
+						}
+						else
+						{
+							if (!decode_vint(in_off, pos))
+								return false;
+						}
+						if (pos >= n_samples_u32)
+						{
+							logger->error("FMT {} STR decoded pos={} out of range n_samples={}", field_name, pos, n_samples_u32);
+							return false;
+						}
+
+						if (codec_id == 1)
+						{
+							if (in_off + stride > v_tmp.size())
+							{
+								logger->error("FMT {} STR payload truncated (need {}, have {})", field_name, stride, v_tmp.size() - in_off);
+								return false;
+							}
+							memcpy(rec_out + (size_t)pos * stride, v_tmp.data() + in_off, stride);
+							in_off += stride;
+						}
+						else
+						{
+							uint64_t tag = 0;
+							if (!decode_vint(in_off, tag))
+								return false;
+
+							uint8_t *cell = rec_out + (size_t)pos * stride;
+							if (tag == 0)
+							{
+								uint64_t raw_len = 0;
+								if (!decode_vint(in_off, raw_len))
+									return false;
+								if (raw_len > stride)
+								{
+									logger->error("FMT PID raw_len={} exceeds stride={}", raw_len, stride);
+									return false;
+								}
+								if (in_off + raw_len > v_tmp.size())
+								{
+									logger->error("FMT PID raw payload truncated (need {}, have {})", raw_len, v_tmp.size() - in_off);
+									return false;
+								}
+								memcpy(cell, v_tmp.data() + in_off, (size_t)raw_len);
+								in_off += (size_t)raw_len;
+							}
+							else
+							{
+								if (!fmt_dictionaries_)
+								{
+									logger->error("FMT PID codec_id=2 requires dictionaries");
+									return false;
+								}
+								const uint32_t id = (uint32_t)(tag - 1);
+								const uint8_t *ptr = fmt_dictionaries_->getPIDItemPtr(id);
+								if (!ptr)
+								{
+									logger->error("FMT PID dict id={} not found", id);
+									return false;
+								}
+								uint16_t len = 0;
+								memcpy(&len, ptr, 2);
+								if ((uint32_t)len + 1u > stride)
+								{
+									logger->error("FMT PID dict len={} exceeds stride={}", (uint32_t)len, stride);
+									return false;
+								}
+								if (len)
+									memcpy(cell, ptr + 2, len);
+								cell[len] = bcf_str_vector_end;
+							}
+						}
 					}
-					if (in_off + stride > v_tmp.size())
-					{
-						logger->error("FMT {} STR payload truncated (need {}, have {})", field_name, stride, v_tmp.size() - in_off);
-						return false;
-					}
-					memcpy(rec_out + (size_t)pos * stride, v_tmp.data() + in_off, stride);
-					in_off += stride;
-				}
 
 				out_off += rec_bytes;
 			}
@@ -666,19 +795,19 @@ bool DecompressionReader::decompress_other_fileds(SPackage *pck)
 				return true;
 			}
 
-			const uint8_t codec_id = v_tmp[0];
-			if (codec_id == 0)
-			{
-				vector<uint8_t> transposed(v_tmp.begin() + 1, v_tmp.end());
-				pck->v_data.resize(transposed.size());
-				Decoder(transposed, pck->v_data);
-				return true;
-			}
-			if (codec_id != 1)
-			{
-				logger->error("Unsupported codec_id={} for FMT {} (INT)", (int)codec_id, field_name);
-				return false;
-			}
+				const uint8_t codec_id = v_tmp[0];
+				if (codec_id == 0)
+				{
+					vector<uint8_t> transposed(v_tmp.begin() + 1, v_tmp.end());
+					pck->v_data.resize(transposed.size());
+					Decoder(transposed, pck->v_data);
+					return true;
+				}
+				if (codec_id != 1 && codec_id != 2)
+				{
+					logger->error("Unsupported codec_id={} for FMT {} (INT)", (int)codec_id, field_name);
+					return false;
+				}
 
 			auto decode_vint = [&](size_t &off, uint64_t &val) -> bool {
 				if (off >= v_tmp.size())
@@ -746,19 +875,71 @@ bool DecompressionReader::decompress_other_fileds(SPackage *pck)
 							if (!decode_vint(in_off, v)) return false;
 							if (per_sample > 0) sv[0] = (int32_t)(uint32_t)v;
 							for (uint32_t j = 1; j < per_sample; ++j) sv[j] = 0;
+							}
+							else
+							{
+								if (codec_id == 1)
+								{
+									for (uint32_t j = 0; j < per_sample; ++j)
+									{
+										uint64_t v = 0;
+										if (!decode_vint(in_off, v)) return false;
+										sv[j] = (int32_t)(uint32_t)v;
+									}
+								}
+								else
+								{
+									uint64_t tag = 0;
+									if (!decode_vint(in_off, tag)) return false;
+									if (tag == 0)
+									{
+										for (uint32_t j = 0; j < per_sample; ++j)
+										{
+											uint64_t v = 0;
+											if (!decode_vint(in_off, v)) return false;
+											sv[j] = (int32_t)(uint32_t)v;
+										}
+									}
+									else
+									{
+										if (!fmt_dictionaries_)
+										{
+											logger->error("FMT AD codec_id=2 requires dictionaries");
+											return false;
+										}
+										const uint32_t id = (uint32_t)(tag - 1);
+										const uint8_t *ptr = fmt_dictionaries_->getADItemPtr(id);
+										if (!ptr)
+										{
+											logger->error("FMT AD dict id={} not found", id);
+											return false;
+										}
+										const uint8_t item_total = (uint8_t)(ptr[0] + 1);
+										const uint8_t type = ptr[1];
+										const uint8_t *data = ptr + 2;
+										const uint32_t bytes_per = (type == 0) ? 1u : (type == 1) ? 2u : 4u;
+										if (2u + per_sample * bytes_per > item_total)
+										{
+											logger->error("FMT AD dict item too short (need {}, have {})", 2u + per_sample * bytes_per, (uint32_t)item_total);
+											return false;
+										}
+										for (uint32_t j = 0; j < per_sample; ++j)
+										{
+											uint32_t u = 0;
+											if (type == 0)
+												u = data[j];
+											else if (type == 1)
+												u = reinterpret_cast<const uint16_t *>(data)[j];
+											else
+												u = reinterpret_cast<const uint32_t *>(data)[j];
+											sv[j] = (int32_t)u;
+										}
+									}
+								}
+							}
 						}
 						else
 						{
-							for (uint32_t j = 0; j < per_sample; ++j)
-							{
-								uint64_t v = 0;
-								if (!decode_vint(in_off, v)) return false;
-								sv[j] = (int32_t)(uint32_t)v;
-							}
-						}
-					}
-					else
-					{
 						if (tip0 == 0 && tip1 == 0)
 						{
 							for (uint32_t j = 0; j < per_sample; ++j) sv[j] = 0;
@@ -798,18 +979,70 @@ bool DecompressionReader::decompress_other_fileds(SPackage *pck)
 								for (uint32_t k = 0; k < b_count && pos < per_sample; ++k) sv[pos++] = bi;
 								++b_count;
 							}
-						}
-						else
-						{
-							for (uint32_t j = 0; j < per_sample; ++j)
+							}
+							else
 							{
-								uint64_t v = 0;
-								if (!decode_vint(in_off, v)) return false;
-								sv[j] = (int32_t)(uint32_t)v;
+								if (codec_id == 1)
+								{
+									for (uint32_t j = 0; j < per_sample; ++j)
+									{
+										uint64_t v = 0;
+										if (!decode_vint(in_off, v)) return false;
+										sv[j] = (int32_t)(uint32_t)v;
+									}
+								}
+								else
+								{
+									uint64_t tag = 0;
+									if (!decode_vint(in_off, tag)) return false;
+									if (tag == 0)
+									{
+										for (uint32_t j = 0; j < per_sample; ++j)
+										{
+											uint64_t v = 0;
+											if (!decode_vint(in_off, v)) return false;
+											sv[j] = (int32_t)(uint32_t)v;
+										}
+									}
+									else
+									{
+										if (!fmt_dictionaries_)
+										{
+											logger->error("FMT PL codec_id=2 requires dictionaries");
+											return false;
+										}
+										const uint32_t id = (uint32_t)(tag - 1);
+										const uint8_t *ptr = fmt_dictionaries_->getPLItemPtr(id);
+										if (!ptr)
+										{
+											logger->error("FMT PL dict id={} not found", id);
+											return false;
+										}
+										const uint8_t item_total = (uint8_t)(ptr[0] + 1);
+										const uint8_t type = ptr[1];
+										const uint8_t *data = ptr + 2;
+										const uint32_t bytes_per = (type == 0) ? 1u : (type == 1) ? 2u : 4u;
+										if (2u + per_sample * bytes_per > item_total)
+										{
+											logger->error("FMT PL dict item too short (need {}, have {})", 2u + per_sample * bytes_per, (uint32_t)item_total);
+											return false;
+										}
+										for (uint32_t j = 0; j < per_sample; ++j)
+										{
+											uint32_t u = 0;
+											if (type == 0)
+												u = data[j];
+											else if (type == 1)
+												u = reinterpret_cast<const uint16_t *>(data)[j];
+											else
+												u = reinterpret_cast<const uint32_t *>(data)[j];
+											sv[j] = (int32_t)u;
+										}
+									}
+								}
 							}
 						}
 					}
-				}
 
 				out_off += (size_t)total * 4;
 			}
@@ -1165,12 +1398,12 @@ void DecompressionReader::InitDecompressParams()
 	}
 }
 //**********************************************************************************************************************
-void DecompressionReader::GetVariants(vector<field_desc> &fields)
-{
-
-	// Load and set fields
-	for (uint32_t i = 0; i < no_keys; i++)
+	void DecompressionReader::GetVariants(vector<field_desc> &fields)
 	{
+
+		// Load and set fields
+		for (uint32_t i = 0; i < no_keys; i++)
+		{
 		if (v_i_buf[i].IsEmpty())
 		{
 
@@ -1208,9 +1441,426 @@ void DecompressionReader::GetVariants(vector<field_desc> &fields)
 			fields[i].present = (bool)temp;
 			fields[i].data_size = 0;
 			break;
+			}
 		}
-	}
-}
+
+			// Postprocess record-wise FORMAT streams: DP (needs AD), MIN_DP (needs DP), GQ (needs PL).
+			int ad_idx = -1;
+			int dp_idx = -1;
+			int min_dp_idx = -1;
+			int pl_idx = -1;
+			int gq_idx = -1;
+			for (uint32_t i = 0; i < no_keys; ++i)
+			{
+				if (keys[i].keys_type != key_type_t::fmt)
+					continue;
+				if (keys[i].name == "AD")
+					ad_idx = (int)i;
+				else if (keys[i].name == "DP")
+					dp_idx = (int)i;
+				else if (keys[i].name == "MIN_DP")
+					min_dp_idx = (int)i;
+				else if (keys[i].name == "PL")
+					pl_idx = (int)i;
+				else if (keys[i].name == "GQ")
+					gq_idx = (int)i;
+			}
+
+			// DP
+			if (dp_idx >= 0 && fields[dp_idx].present && fields[dp_idx].data && fields[dp_idx].data_size >= 4 && n_samples > 0 &&
+				fields[dp_idx].data_size != (size_t)n_samples * 4)
+			{
+				auto logger = LogManager::Instance().Logger();
+				const uint8_t *src = reinterpret_cast<const uint8_t *>(fields[dp_idx].data);
+				const size_t src_size = fields[dp_idx].data_size;
+				const uint8_t rec_codec = src[0];
+
+				auto decode_vint = [&](size_t &off, uint64_t &val) -> bool {
+					if (off >= src_size)
+						return false;
+					uint8_t len = fmt_compress::VintCodec::decode(src + off, val);
+					if (len == 0 || off + len > src_size)
+						return false;
+					off += len;
+					return true;
+				};
+
+				if (rec_codec == 0)
+				{
+					const size_t need = 1 + (size_t)n_samples * 4;
+					if (src_size < need)
+					{
+						logger->error("DP record_codec=0 payload too short (need {}, have {})", need, src_size);
+						abort();
+					}
+					char *out = new char[(size_t)n_samples * 4];
+					memcpy(out, src + 1, (size_t)n_samples * 4);
+					delete[] fields[dp_idx].data;
+					fields[dp_idx].data = out;
+					fields[dp_idx].data_size = (uint32_t)((size_t)n_samples * 4);
+				}
+				else if (rec_codec == 1)
+				{
+					if (ad_idx < 0 || !fields[ad_idx].present || !fields[ad_idx].data || (fields[ad_idx].data_size % 4 != 0))
+					{
+						logger->error("DP record_codec=1 requires AD to reconstruct");
+						abort();
+					}
+					const uint32_t total_ad = fields[ad_idx].data_size / 4;
+					if (total_ad == 0 || total_ad % n_samples != 0)
+					{
+						logger->error("AD layout invalid for DP reconstruction (total_ad={}, n_samples={})", total_ad, n_samples);
+						abort();
+					}
+					const uint32_t ad_stride = total_ad / n_samples;
+					const int32_t *ad_vals = reinterpret_cast<const int32_t *>(fields[ad_idx].data);
+
+					vector<int32_t> dp_out(n_samples, bcf_int32_missing);
+					for (uint32_t s = 0; s < n_samples; ++s)
+					{
+						const int32_t *sv = ad_vals + (size_t)s * ad_stride;
+						bool ad_valid = true;
+						int64_t sum = 0;
+						for (uint32_t j = 0; j < ad_stride; ++j)
+						{
+							const int32_t v = sv[j];
+							if (v == bcf_int32_missing || v == bcf_int32_vector_end || v < 0)
+							{
+								ad_valid = false;
+								break;
+							}
+							sum += v;
+							if (sum > INT32_MAX)
+							{
+								ad_valid = false;
+								break;
+							}
+						}
+						if (ad_valid)
+							dp_out[s] = (int32_t)sum;
+					}
+
+					size_t off = 1;
+					uint64_t raw_cnt = 0;
+					if (!decode_vint(off, raw_cnt))
+					{
+						logger->error("DP decode: failed to read raw_cnt");
+						abort();
+					}
+					uint32_t pos = 0;
+					for (uint64_t i = 0; i < raw_cnt; ++i)
+					{
+						uint64_t delta = 0, val = 0;
+						if (!decode_vint(off, delta) || !decode_vint(off, val))
+						{
+							logger->error("DP decode: failed in raw entry {}", i);
+							abort();
+						}
+						pos += (uint32_t)delta;
+						if (pos >= n_samples)
+						{
+							logger->error("DP decode: raw pos out of range {}", pos);
+							abort();
+						}
+						dp_out[pos] = (val == 0) ? bcf_int32_missing : (int32_t)((uint32_t)val - 1);
+					}
+
+					uint64_t exc_cnt = 0;
+					if (!decode_vint(off, exc_cnt))
+					{
+						logger->error("DP decode: failed to read exc_cnt");
+						abort();
+					}
+					pos = 0;
+					for (uint64_t i = 0; i < exc_cnt; ++i)
+					{
+						uint64_t delta = 0, val = 0;
+						if (!decode_vint(off, delta) || !decode_vint(off, val))
+						{
+							logger->error("DP decode: failed in exc entry {}", i);
+							abort();
+						}
+						pos += (uint32_t)delta;
+						if (pos >= n_samples)
+						{
+							logger->error("DP decode: exc pos out of range {}", pos);
+							abort();
+						}
+						dp_out[pos] = (val == 0) ? bcf_int32_missing : (int32_t)((uint32_t)val - 1);
+					}
+
+					for (size_t i = off; i < src_size; ++i)
+					{
+						if (src[i] != 0)
+						{
+							logger->error("DP decode: unexpected trailing bytes (off={}, size={})", off, src_size);
+							abort();
+						}
+					}
+
+					char *out = new char[(size_t)n_samples * 4];
+					memcpy(out, dp_out.data(), (size_t)n_samples * 4);
+					delete[] fields[dp_idx].data;
+					fields[dp_idx].data = out;
+					fields[dp_idx].data_size = (uint32_t)((size_t)n_samples * 4);
+				}
+				else
+				{
+					logger->error("DP unknown record_codec={}", (int)rec_codec);
+					abort();
+				}
+			}
+
+			// MIN_DP
+			if (min_dp_idx >= 0 && fields[min_dp_idx].present && fields[min_dp_idx].data && fields[min_dp_idx].data_size >= 4 && n_samples > 0 &&
+				fields[min_dp_idx].data_size != (size_t)n_samples * 4)
+			{
+				auto logger = LogManager::Instance().Logger();
+				const uint8_t *src = reinterpret_cast<const uint8_t *>(fields[min_dp_idx].data);
+				const size_t src_size = fields[min_dp_idx].data_size;
+				const uint8_t rec_codec = src[0];
+
+				auto decode_vint = [&](size_t &off, uint64_t &val) -> bool {
+					if (off >= src_size)
+						return false;
+					uint8_t len = fmt_compress::VintCodec::decode(src + off, val);
+					if (len == 0 || off + len > src_size)
+						return false;
+					off += len;
+					return true;
+				};
+
+				if (rec_codec == 0)
+				{
+					const size_t need = 1 + (size_t)n_samples * 4;
+					if (src_size < need)
+					{
+						logger->error("MIN_DP record_codec=0 payload too short (need {}, have {})", need, src_size);
+						abort();
+					}
+					char *out = new char[(size_t)n_samples * 4];
+					memcpy(out, src + 1, (size_t)n_samples * 4);
+					delete[] fields[min_dp_idx].data;
+					fields[min_dp_idx].data = out;
+					fields[min_dp_idx].data_size = (uint32_t)((size_t)n_samples * 4);
+				}
+				else if (rec_codec == 1)
+				{
+					if (dp_idx < 0 || !fields[dp_idx].present || !fields[dp_idx].data || fields[dp_idx].data_size != (size_t)n_samples * 4)
+					{
+						logger->error("MIN_DP record_codec=1 requires DP to reconstruct");
+						abort();
+					}
+					vector<int32_t> out(n_samples, bcf_int32_missing);
+					memcpy(out.data(), fields[dp_idx].data, (size_t)n_samples * 4);
+
+					size_t off = 1;
+					uint64_t exc_cnt = 0;
+					if (!decode_vint(off, exc_cnt))
+					{
+						logger->error("MIN_DP decode: failed to read exc_cnt");
+						abort();
+					}
+					uint32_t pos = 0;
+					for (uint64_t i = 0; i < exc_cnt; ++i)
+					{
+						uint64_t delta = 0, val = 0;
+						if (!decode_vint(off, delta) || !decode_vint(off, val))
+						{
+							logger->error("MIN_DP decode: failed in exc entry {}", i);
+							abort();
+						}
+						pos += (uint32_t)delta;
+						if (pos >= n_samples)
+						{
+							logger->error("MIN_DP decode: pos out of range {}", pos);
+							abort();
+						}
+						out[pos] = (val == 0) ? bcf_int32_missing : (int32_t)((uint32_t)val - 1);
+					}
+
+					for (size_t i = off; i < src_size; ++i)
+					{
+						if (src[i] != 0)
+						{
+							logger->error("MIN_DP decode: unexpected trailing bytes (off={}, size={})", off, src_size);
+							abort();
+						}
+					}
+
+					char *out_bytes = new char[(size_t)n_samples * 4];
+					memcpy(out_bytes, out.data(), (size_t)n_samples * 4);
+					delete[] fields[min_dp_idx].data;
+					fields[min_dp_idx].data = out_bytes;
+					fields[min_dp_idx].data_size = (uint32_t)((size_t)n_samples * 4);
+				}
+				else
+				{
+					logger->error("MIN_DP unknown record_codec={}", (int)rec_codec);
+					abort();
+				}
+			}
+
+			// GQ
+			if (gq_idx >= 0 && fields[gq_idx].present && fields[gq_idx].data && fields[gq_idx].data_size >= 4 && n_samples > 0 &&
+				fields[gq_idx].data_size != (size_t)n_samples * 4)
+			{
+				auto logger = LogManager::Instance().Logger();
+				const uint8_t *src = reinterpret_cast<const uint8_t *>(fields[gq_idx].data);
+				const size_t src_size = fields[gq_idx].data_size;
+				const uint8_t rec_codec = src[0];
+
+				auto decode_vint = [&](size_t &off, uint64_t &val) -> bool {
+					if (off >= src_size)
+						return false;
+					uint8_t len = fmt_compress::VintCodec::decode(src + off, val);
+					if (len == 0 || off + len > src_size)
+						return false;
+					off += len;
+					return true;
+				};
+
+				if (rec_codec == 0)
+				{
+					const size_t need = 1 + (size_t)n_samples * 4;
+					if (src_size < need)
+					{
+						logger->error("GQ record_codec=0 payload too short (need {}, have {})", need, src_size);
+						abort();
+					}
+					char *out = new char[(size_t)n_samples * 4];
+					memcpy(out, src + 1, (size_t)n_samples * 4);
+					delete[] fields[gq_idx].data;
+					fields[gq_idx].data = out;
+					fields[gq_idx].data_size = (uint32_t)((size_t)n_samples * 4);
+				}
+				else if (rec_codec == 1)
+				{
+					vector<int32_t> out(n_samples, bcf_int32_missing);
+					vector<uint8_t> is_raw(n_samples, 0);
+
+					size_t off = 1;
+					uint64_t raw_cnt = 0;
+					if (!decode_vint(off, raw_cnt))
+					{
+						logger->error("GQ decode: failed to read raw_cnt");
+						abort();
+					}
+					uint32_t pos = 0;
+					for (uint64_t i = 0; i < raw_cnt; ++i)
+					{
+						uint64_t delta = 0, val = 0;
+						if (!decode_vint(off, delta) || !decode_vint(off, val))
+						{
+							logger->error("GQ decode: failed in raw entry {}", i);
+							abort();
+						}
+						pos += (uint32_t)delta;
+						if (pos >= n_samples)
+						{
+							logger->error("GQ decode: raw pos out of range {}", pos);
+							abort();
+						}
+						is_raw[pos] = 1;
+						out[pos] = (val == 0) ? bcf_int32_missing : (int32_t)((uint32_t)val - 1);
+					}
+
+					bool has_pl_layout = false;
+					uint32_t pl_stride = 0;
+					const int32_t *pl_vals = nullptr;
+					if (pl_idx >= 0 && fields[pl_idx].present && fields[pl_idx].data && (fields[pl_idx].data_size % 4 == 0))
+					{
+						const uint32_t total_pl = fields[pl_idx].data_size / 4;
+						if (total_pl > 0 && total_pl % n_samples == 0)
+						{
+							pl_stride = total_pl / n_samples;
+							if (pl_stride > 0)
+							{
+								has_pl_layout = true;
+								pl_vals = reinterpret_cast<const int32_t *>(fields[pl_idx].data);
+							}
+						}
+					}
+
+					vector<uint32_t> pl_vec;
+					if (has_pl_layout)
+						pl_vec.resize(pl_stride);
+					for (uint32_t s = 0; s < n_samples; ++s)
+					{
+						if (is_raw[s] || !has_pl_layout)
+							continue;
+
+						const int32_t *sv = pl_vals + (size_t)s * pl_stride;
+						bool pl_valid = true;
+						for (uint32_t j = 0; j < pl_stride; ++j)
+						{
+							const int32_t v = sv[j];
+							if (v == bcf_int32_missing || v == bcf_int32_vector_end || v < 0)
+							{
+								pl_valid = false;
+								break;
+							}
+							pl_vec[j] = (uint32_t)v;
+						}
+						if (!pl_valid)
+							continue;
+
+						uint32_t a_val = 0, b_val = 0;
+						const uint8_t type = fmt_compress::checkPlPattern(pl_vec.data(), pl_stride, a_val, b_val);
+						if (type == 1 || type == 2)
+							out[s] = (int32_t)a_val;
+						else if (type == 3)
+							out[s] = (int32_t)fmt_compress::getSecondMin(pl_vec.data(), pl_stride);
+						else
+							out[s] = bcf_int32_missing;
+					}
+
+					uint64_t exc_cnt = 0;
+					if (!decode_vint(off, exc_cnt))
+					{
+						logger->error("GQ decode: failed to read exc_cnt");
+						abort();
+					}
+					pos = 0;
+					for (uint64_t i = 0; i < exc_cnt; ++i)
+					{
+						uint64_t delta = 0, val = 0;
+						if (!decode_vint(off, delta) || !decode_vint(off, val))
+						{
+							logger->error("GQ decode: failed in exc entry {}", i);
+							abort();
+						}
+						pos += (uint32_t)delta;
+						if (pos >= n_samples)
+						{
+							logger->error("GQ decode: exc pos out of range {}", pos);
+							abort();
+						}
+						out[pos] = (val == 0) ? bcf_int32_missing : (int32_t)((uint32_t)val - 1);
+					}
+
+					for (size_t i = off; i < src_size; ++i)
+					{
+						if (src[i] != 0)
+						{
+							logger->error("GQ decode: unexpected trailing bytes (off={}, size={})", off, src_size);
+							abort();
+						}
+					}
+
+					char *out_bytes = new char[(size_t)n_samples * 4];
+					memcpy(out_bytes, out.data(), (size_t)n_samples * 4);
+					delete[] fields[gq_idx].data;
+					fields[gq_idx].data = out_bytes;
+					fields[gq_idx].data_size = (uint32_t)((size_t)n_samples * 4);
+				}
+				else
+				{
+					logger->error("GQ unknown record_codec={}", (int)rec_codec);
+					abort();
+				}
+			}
+		}
 //**********************************************************************************************************************
 void DecompressionReader::decompress_meta(vector<string> &v_samples, string &header)
 {

@@ -24,14 +24,14 @@ public:
             return it->second;
         }
 
-        uint32_t id = static_cast<uint32_t>(ad_ptrs_.size());
+        uint32_t id = static_cast<uint32_t>(ad_offsets_.size());
         ad_map_[item] = id;
 
         // Store item data
-        size_t offset = ad_items_.size();
+        uint32_t offset = static_cast<uint32_t>(ad_items_.size());
         uint8_t len = item.data_[0] + 1;
         ad_items_.insert(ad_items_.end(), item.data_, item.data_ + len);
-        ad_ptrs_.push_back(ad_items_.data() + offset);
+        ad_offsets_.push_back(offset);
 
         return id;
     }
@@ -44,14 +44,14 @@ public:
             return it->second;
         }
 
-        uint32_t id = static_cast<uint32_t>(pl_ptrs_.size());
+        uint32_t id = static_cast<uint32_t>(pl_offsets_.size());
         pl_map_[item] = id;
 
         // Store item data
-        size_t offset = pl_items_.size();
+        uint32_t offset = static_cast<uint32_t>(pl_items_.size());
         uint8_t len = item.data_[0] + 1;
         pl_items_.insert(pl_items_.end(), item.data_, item.data_ + len);
-        pl_ptrs_.push_back(pl_items_.data() + offset);
+        pl_offsets_.push_back(offset);
 
         return id;
     }
@@ -64,33 +64,33 @@ public:
             return it->second;
         }
 
-        uint32_t id = static_cast<uint32_t>(pid_ptrs_.size());
+        uint32_t id = static_cast<uint32_t>(pid_offsets_.size());
         pid_map_[item] = id;
 
         // Store item data
-        size_t offset = pid_items_.size();
+        uint32_t offset = static_cast<uint32_t>(pid_items_.size());
         uint16_t len;
         memcpy(&len, item.data_, 2);
         len += 2;
         pid_items_.insert(pid_items_.end(), item.data_, item.data_ + len);
-        pid_ptrs_.push_back(pid_items_.data() + offset);
+        pid_offsets_.push_back(offset);
 
         return id;
     }
 
     // Get AD item by ID
     const uint8_t* getADItemPtr(uint32_t id) const {
-        return (id < ad_ptrs_.size()) ? ad_ptrs_[id] : nullptr;
+        return (id < ad_offsets_.size()) ? (ad_items_.data() + ad_offsets_[id]) : nullptr;
     }
 
     // Get PL item by ID
     const uint8_t* getPLItemPtr(uint32_t id) const {
-        return (id < pl_ptrs_.size()) ? pl_ptrs_[id] : nullptr;
+        return (id < pl_offsets_.size()) ? (pl_items_.data() + pl_offsets_[id]) : nullptr;
     }
 
     // Get PID item by ID
     const uint8_t* getPIDItemPtr(uint32_t id) const {
-        return (id < pid_ptrs_.size()) ? pid_ptrs_[id] : nullptr;
+        return (id < pid_offsets_.size()) ? (pid_items_.data() + pid_offsets_[id]) : nullptr;
     }
 
     // Serialize all dictionaries to output buffer
@@ -147,51 +147,51 @@ public:
 
         ad_map_.clear();
         ad_items_.clear();
-        ad_ptrs_.clear();
+        ad_offsets_.clear();
 
         pl_map_.clear();
         pl_items_.clear();
-        pl_ptrs_.clear();
+        pl_offsets_.clear();
 
         pid_map_.clear();
         pid_items_.clear();
-        pid_ptrs_.clear();
+        pid_offsets_.clear();
     }
 
     // Get dictionary sizes for statistics
-    size_t getADCount() const { return ad_ptrs_.size(); }
-    size_t getPLCount() const { return pl_ptrs_.size(); }
-    size_t getPIDCount() const { return pid_ptrs_.size(); }
+    size_t getADCount() const { return ad_offsets_.size(); }
+    size_t getPLCount() const { return pl_offsets_.size(); }
+    size_t getPIDCount() const { return pid_offsets_.size(); }
 
 private:
-    // Rebuild AD pointers after deserialization
+    // Rebuild AD offsets after deserialization
     void rebuildADPtrs() {
-        ad_ptrs_.clear();
-        size_t offset = 0;
+        ad_offsets_.clear();
+        uint32_t offset = 0;
         while (offset < ad_items_.size()) {
-            ad_ptrs_.push_back(ad_items_.data() + offset);
+            ad_offsets_.push_back(offset);
             uint8_t len = ad_items_[offset] + 1;
             offset += len;
         }
     }
 
-    // Rebuild PL pointers after deserialization
+    // Rebuild PL offsets after deserialization
     void rebuildPLPtrs() {
-        pl_ptrs_.clear();
-        size_t offset = 0;
+        pl_offsets_.clear();
+        uint32_t offset = 0;
         while (offset < pl_items_.size()) {
-            pl_ptrs_.push_back(pl_items_.data() + offset);
+            pl_offsets_.push_back(offset);
             uint8_t len = pl_items_[offset] + 1;
             offset += len;
         }
     }
 
-    // Rebuild PID pointers after deserialization
+    // Rebuild PID offsets after deserialization
     void rebuildPIDPtrs() {
-        pid_ptrs_.clear();
-        size_t offset = 0;
+        pid_offsets_.clear();
+        uint32_t offset = 0;
         while (offset < pid_items_.size()) {
-            pid_ptrs_.push_back(pid_items_.data() + offset);
+            pid_offsets_.push_back(offset);
             uint16_t len;
             memcpy(&len, pid_items_.data() + offset, 2);
             offset += len + 2;
@@ -206,17 +206,17 @@ private:
     // AD dictionary
     std::unordered_map<ADItem, uint32_t> ad_map_;
     std::vector<uint8_t> ad_items_;
-    std::vector<const uint8_t*> ad_ptrs_;
+    std::vector<uint32_t> ad_offsets_;
 
     // PL dictionary
     std::unordered_map<PLItem, uint32_t> pl_map_;
     std::vector<uint8_t> pl_items_;
-    std::vector<const uint8_t*> pl_ptrs_;
+    std::vector<uint32_t> pl_offsets_;
 
     // PID dictionary
     std::unordered_map<PIDItem, uint32_t> pid_map_;
     std::vector<uint8_t> pid_items_;
-    std::vector<const uint8_t*> pid_ptrs_;
+    std::vector<uint32_t> pid_offsets_;
 };
 
 }  // namespace fmt_compress

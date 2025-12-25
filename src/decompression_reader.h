@@ -127,9 +127,12 @@ class DecompressionReader {
     std::vector<fixed_fields_rb_dir_entry> fixed_fields_rb_dir;
 
 	vector<uint32_t> v_coder_part_ids;
-    vector<std::unique_ptr<CompressionStrategy>> field_size_codecs;
-    vector<std::unique_ptr<CompressionStrategy>> field_data_codecs;
-    compression_backend_t backend = compression_backend_t::bsc;
+	vector<std::unique_ptr<CompressionStrategy>> field_size_codecs;
+	vector<std::unique_ptr<CompressionStrategy>> field_data_codecs;
+	compression_backend_t backend = compression_backend_t::bsc;
+
+	// FORMAT dictionaries (AD/PL/PID) for special codecs
+	std::unique_ptr<fmt_compress::FmtDictionaries> fmt_dictionaries_;
 
 	int64_t prev_pos;
 	// int id_block = 0;
