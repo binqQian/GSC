@@ -17,7 +17,7 @@ int Samples::loadSamples(vector<string> &v_samples)
     {
         if (!whichIndMap.insert(std::pair<std::string, uint32_t>(v_samples[i], c++)).second)
         {
-            logger->error("Error! Two individuals with the same name!");
+            logger->error("Error! Duplicate sample name: {}", v_samples[i]);
             return 2;
         }
         all_samples += v_samples[i] + "\t";

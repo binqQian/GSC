@@ -199,8 +199,8 @@ bool Decompressor::initDecompression(DecompressionReader &decompression_reader){
     rrr_rank_copy_bit_vector[0] = sdsl::rrr_vector<>::rank_1_type(&decompression_reader.rrr_copy_bit_vector[0]);
     rrr_rank_copy_bit_vector[1] = sdsl::rrr_vector<>::rank_1_type(&decompression_reader.rrr_copy_bit_vector[1]);
 
-    // Allocate full GT buffers only when decoding all samples.
-    bool needs_full_decomp = (params.samples == "");
+    // Lossless mode always uses full GT decoding; lossy sample/range paths may not.
+    bool needs_full_decomp = (params.compress_mode == compress_mode_t::lossless_mode) || params.samples.empty();
     logger->debug("initDecompression: needs_full_decomp={}, params.samples empty={}", needs_full_decomp, params.samples.empty());
     if (needs_full_decomp){
         logger->debug("initDecompression: allocating decomp_data with size={}", decompression_reader.vec_len * 2);
@@ -297,8 +297,28 @@ bool Decompressor::decompressProcess()
     // unique_ptr<CompressedFileLoading> cfile(new CompressedFileLoading());
     if(!decompression_reader.OpenReading(in_file_name, decompression_mode_type))
         return false;
+
+    // Reject mode mismatches early: on-disk mode is stored in header as `mode_type`.
+    if (decompression_reader.file_mode_type && params.compress_mode == compress_mode_t::lossly_mode)
+    {
+        auto logger = LogManager::Instance().Logger();
+        logger->error("Input `.gsc` is lossless (Mode=true); do not use `-M/--mode_lossly` for decompression.");
+        return false;
+    }
+    if (!decompression_reader.file_mode_type && params.compress_mode == compress_mode_t::lossless_mode)
+    {
+        auto logger = LogManager::Instance().Logger();
+        logger->error("Input `.gsc` is lossy (Mode=false); please add `-M/--mode_lossly` for decompression.");
+        return false;
+    }
+    if (params.compress_mode == compress_mode_t::lossless_mode && !params.samples.empty())
+    {
+        auto logger = LogManager::Instance().Logger();
+        logger->info("Lossless sample query enabled: output fixed fields + GT only (skips other fields decoding).");
+    }
     if(decompression_mode_type) {
-        if(!decompression_reader.OpenReadingPart2(in_file_name))
+        const bool start_threads = params.samples.empty();
+        if(!decompression_reader.OpenReadingPart2(in_file_name, start_threads))
             return false;
         
     }    
@@ -340,30 +360,38 @@ bool Decompressor::decompressProcess()
 
             }else{
                 if(params.compress_mode == compress_mode_t::lossless_mode){
-                    uint32_t no_actual_variants =  decompression_reader.actual_variants[cur_chunk_id-1];
+                    if (params.samples.empty())
+                    {
+                        uint32_t no_actual_variants = decompression_reader.actual_variants[cur_chunk_id-1];
 
-                    decompressAll();
+                        decompressAll();
 
-                    // Validate bounds before cleanup
-                    if (no_actual_variants > all_fields_io.size()) {
-                        auto logger = LogManager::Instance().Logger();
-                        logger->error("decompress_thread: BOUNDS ERROR! no_actual_variants={} > all_fields_io.size()={}",
-                                      no_actual_variants, all_fields_io.size());
-                        no_actual_variants = static_cast<uint32_t>(all_fields_io.size());
-                    }
-                    for(uint32_t i = 0; i < no_actual_variants; ++i)
-                        for(size_t j = 0; j < decompression_reader.keys.size(); ++j){
-                            if(all_fields_io[i][j].data_size)
-                            {
-                                delete[] all_fields_io[i][j].data;
-                                all_fields_io[i][j].data = nullptr;
-                                all_fields_io[i][j].data_size = 0;
-                            }
-                            else
-                                all_fields_io[i][j].data = nullptr;
-
+                        // Validate bounds before cleanup
+                        if (no_actual_variants > all_fields_io.size()) {
+                            auto logger = LogManager::Instance().Logger();
+                            logger->error("decompress_thread: BOUNDS ERROR! no_actual_variants={} > all_fields_io.size()={}",
+                                          no_actual_variants, all_fields_io.size());
+                            no_actual_variants = static_cast<uint32_t>(all_fields_io.size());
                         }
-                    all_fields_io.clear();
+                        for(uint32_t i = 0; i < no_actual_variants; ++i)
+                            for(size_t j = 0; j < decompression_reader.keys.size(); ++j){
+                                if(all_fields_io[i][j].data_size)
+                                {
+                                    delete[] all_fields_io[i][j].data;
+                                    all_fields_io[i][j].data = nullptr;
+                                    all_fields_io[i][j].data_size = 0;
+                                }
+                                else
+                                    all_fields_io[i][j].data = nullptr;
+
+                            }
+                        all_fields_io.clear();
+                    }
+                    else
+                    {
+                        // Lossless sample query: decode fixed fields + GT only.
+                        decompressSampleSmart(range);
+                    }
 
                 }
                 else{
@@ -388,7 +416,7 @@ bool Decompressor::decompressProcess()
                 logger->error("process_thread: readFixedFields FAILED at cur_chunk_id={}", cur_chunk_id);
                 break;
             }
-            if(params.compress_mode == compress_mode_t::lossless_mode){
+            if(params.compress_mode == compress_mode_t::lossless_mode && params.samples.empty()){
 
                 uint32_t no_actual_variants =  decompression_reader.actual_variants[cur_chunk_id];
 
@@ -436,7 +464,7 @@ bool Decompressor::decompressProcess()
 
     process_thread->join();
     decompress_thread->join();
-    if(params.compress_mode == compress_mode_t::lossless_mode)
+    if(decompression_mode_type)
         decompression_reader.close();
     Close();
     return true;

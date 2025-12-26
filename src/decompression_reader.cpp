@@ -4,6 +4,7 @@
 #include <algorithm>
 #include <chrono>
 #include <limits>
+#include <unistd.h>
 
 using namespace std::chrono;
 using namespace std;
@@ -83,15 +84,27 @@ bool DecompressionReader::OpenReading(const string &in_file_name, const bool &_d
 	in.read((char *)&mode_type, sizeof(bool));
 	in.read((char *)&other_fields_offset, sizeof(uint64_t));
 	in.read((char *)&sdsl_offset, sizeof(uint64_t));
-	if (mode_type && _decompression_mode_type)
+	file_mode_type = mode_type;
+	if (mode_type)
 	{
-		temp_file2_fname = fname + ".tmp";
+		std::string base = fname;
+		size_t slash = base.find_last_of("/\\");
+		if (slash != std::string::npos)
+			base = base.substr(slash + 1);
+
+		temp_file2_fname = "tmp/gsc_part2_" + std::to_string(getpid()) + "_" + base + ".tmp";
 		in.seekg(other_fields_offset, std::ios::beg);
 		std::ofstream out(temp_file2_fname, std::ios::binary | std::ios::trunc);
 		if (!out)
 		{
-			logger->error("Cannot open destination file: {}", temp_file2_fname);
-			return 1;
+			// Fallback to the legacy behavior (next to the input file).
+			temp_file2_fname = fname + ".tmp";
+			out.open(temp_file2_fname, std::ios::binary | std::ios::trunc);
+			if (!out)
+			{
+				logger->error("Cannot open destination file: {}", temp_file2_fname);
+				return 1;
+			}
 		}
 		const std::streamsize bufferSize = 1024 * 1024;
 		char buffer[bufferSize];
@@ -389,7 +402,7 @@ void DecompressionReader::SetNoThreads(uint32_t _no_threads)
 {
 	no_threads = _no_threads;
 }
-bool DecompressionReader::OpenReadingPart2(const string &in_file_name)
+bool DecompressionReader::OpenReadingPart2(const string &in_file_name, bool start_threads)
 {
 
 	auto logger = LogManager::Instance().Logger();
@@ -470,8 +483,8 @@ bool DecompressionReader::OpenReadingPart2(const string &in_file_name)
 
 		// FORMAT dictionaries tail (AD/PL/PID). Backward compatible.
 		fmt_dictionaries_ = std::make_unique<fmt_compress::FmtDictionaries>();
-		if (pos_part2_params + 2 * sizeof(uint32_t) <= v_desc.size())
-		{
+	if (pos_part2_params + 2 * sizeof(uint32_t) <= v_desc.size())
+	{
 			uint32_t dict_ver = 0;
 			uint32_t dict_size = 0;
 			read(v_desc, pos_part2_params, dict_ver);
@@ -489,9 +502,14 @@ bool DecompressionReader::OpenReadingPart2(const string &in_file_name)
 					return false;
 				}
 			}
-		}
+	}
 
-		InitDecompressParams();
+	if (!start_threads)
+	{
+		return true;
+	}
+
+	InitDecompressParams();
 	for (uint32_t i = 0; i < no_keys; ++i)
 	{
 		decomp_part_queue->PushQueue(i);
@@ -501,39 +519,39 @@ bool DecompressionReader::OpenReadingPart2(const string &in_file_name)
 	for (uint32_t i = 0; i < no_threads; ++i)
 	{
 		part_decompress_thread.emplace_back(thread([&]()
-												   {
-													   while (!decomp_part_queue->IsComplete())
 													   {
-														   uint32_t p_id;
-														   SPackage *pck = new SPackage;
-														   if (!decomp_part_queue->PopQueue(p_id))
+														   while (!decomp_part_queue->IsComplete())
 														   {
-															   delete pck;
-															   break;
-														   }
+															   uint32_t p_id;
+															   SPackage *pck = new SPackage;
+															   if (!decomp_part_queue->PopQueue(p_id))
+															   {
+																   delete pck;
+																   break;
+															   }
 
-														   pck->key_id = p_id;
-														   pck->stream_id_size = file_handle2->GetStreamId("key_" + to_string(p_id) + "_size");
-														   pck->stream_id_data = file_handle2->GetStreamId("key_" + to_string(p_id) + "_data");
+															   pck->key_id = p_id;
+															   pck->stream_id_size = file_handle2->GetStreamId("key_" + to_string(p_id) + "_size");
+															   pck->stream_id_data = file_handle2->GetStreamId("key_" + to_string(p_id) + "_data");
 
-														   if (decompress_other_fileds(pck))
-														   {
+															   if (decompress_other_fileds(pck))
+															   {
 
-															   lock_guard<mutex> lck(m_packages);
+																   lock_guard<mutex> lck(m_packages);
 
-															   v_packages[pck->key_id] = pck;
-														   }
-														   else
-														   {
+																   v_packages[pck->key_id] = pck;
+															   }
+															   else
+															   {
 
-															   pck->v_size.clear();
-															   pck->v_data.clear();
+																   pck->v_size.clear();
+																   pck->v_data.clear();
 
-															   lock_guard<mutex> lck(m_packages);
-															   v_packages[pck->key_id] = pck;
-														   }
-														   cv_packages.notify_all();
-													   } }));
+																   lock_guard<mutex> lck(m_packages);
+																   v_packages[pck->key_id] = pck;
+															   }
+															   cv_packages.notify_all();
+														   } }));
 	}
 
 	return true;
@@ -541,14 +559,19 @@ bool DecompressionReader::OpenReadingPart2(const string &in_file_name)
 //**********************************************************************************************************************
 void DecompressionReader::close()
 {
-	decomp_part_queue->Complete();
-
-	for (uint32_t i = 0; i < no_threads; ++i)
-		part_decompress_thread[i].join();
-
-	if (remove(temp_file2_fname.c_str()) != 0)
+	if (decomp_part_queue)
 	{
-		perror("Error deleting temp2 file");
+		decomp_part_queue->Complete();
+		for (auto &t : part_decompress_thread)
+			t.join();
+	}
+
+	if (!temp_file2_fname.empty())
+	{
+		if (remove(temp_file2_fname.c_str()) != 0)
+		{
+			perror("Error deleting temp2 file");
+		}
 	}
 
 	// file_handle2->Close();

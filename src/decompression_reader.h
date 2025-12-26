@@ -62,14 +62,15 @@ class DecompressionReader {
 
     // GT column tiling metadata
     uint32_t n_col_blocks = 1;           // Number of column blocks
-    uint32_t total_haplotypes = 0;       // Total number of haplotypes
-    vector<pair<uint32_t, uint32_t>> col_block_ranges; // (start_haplotype, n_haplotypes) per column block
-    vector<uint64_t> col_block_vec_lens; // vec_len for each column block
-    bool useLegacyPath = true;           // Backward compatibility flag
-    vector<uint32_t> chunk_block_offsets;
-    uint64_t no_vec;
-    uint64_t no_copy;
-    uint32_t used_bits_cp;
+	    uint32_t total_haplotypes = 0;       // Total number of haplotypes
+	    vector<pair<uint32_t, uint32_t>> col_block_ranges; // (start_haplotype, n_haplotypes) per column block
+	    vector<uint64_t> col_block_vec_lens; // vec_len for each column block
+	    bool useLegacyPath = true;           // Backward compatibility flag
+	    bool file_mode_type = false;         // On-disk mode flag (true: lossless, false: lossy)
+	    vector<uint32_t> chunk_block_offsets;
+	    uint64_t no_vec;
+	    uint64_t no_copy;
+	    uint32_t used_bits_cp;
     uint32_t bm_comp_cp_size;
     CBitMemory bm_comp_copy_orgl_id; //id of copied vector (where is original)
 
@@ -181,10 +182,10 @@ public:
     }
 
 	bool OpenReading(const string &in_file_name, const bool &_decompression_mode_type);
-	bool OpenReadingPart2(const string &in_file_name);
-	void InitDecompressParams();
-	void decompress_meta(vector<string> &v_samples, string &header);
-	bool readFixedFields();
+		bool OpenReadingPart2(const string &in_file_name, bool start_threads = true);
+		void InitDecompressParams();
+		void decompress_meta(vector<string> &v_samples, string &header);
+		bool readFixedFields();
 
 	bool Decoder(vector<block_t> &v_blocks,vector<vector<vector<uint32_t>>> &s_perm,vector<uint8_t> &gt_index,uint32_t cur_chunk_id);
     bool DecoderByRange(vector<block_t> &v_blocks, vector<vector<vector<uint32_t>>> &s_perm,
