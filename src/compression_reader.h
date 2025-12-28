@@ -219,4 +219,5 @@ public:
     uint32_t GetTotalHaplotypes() const { return total_haplotypes; }
     uint32_t GetMaxBlockCols() const { return max_block_cols; }
     const vector<uint64_t>& GetColumnBlockVecLens() const { return col_block_vec_lens; }
+
 };

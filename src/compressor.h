@@ -14,6 +14,7 @@
 #include <tuple>
 #include "compression_strategy.h"
 #include "fmt_field_processor.h"
+#include "field_stats.h"
 // #include <filesystem>
 using namespace std;
 
@@ -114,6 +115,10 @@ class Compressor
     uint64_t QUAL_comp_size = 0;
     uint64_t GT_comp_size = 0;
 
+    // Field compression statistics
+    CompressionStatistics comp_stats_;
+    bool enable_field_stats_ = false;
+
     mutex mtx_v_coder;
 	condition_variable cv_v_coder;
 	vector<uint32_t> v_coder_part_ids;
@@ -186,6 +191,12 @@ public:
     }
     bool CompressProcess();
 
+    // Get compression statistics
+    const CompressionStatistics& GetCompressionStats() const { return comp_stats_; }
+
+private:
+    // Log compression statistics at debug level
+    void LogCompressionStats();
 };
 
 

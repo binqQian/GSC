@@ -972,7 +972,6 @@ bool CompressionReader::SetVariantOtherFields(vector<field_desc> &fields)
 {
     for (uint32_t i = 0; i < no_keys; i++)
     {
-
         switch (keys[i].type)
         {
         case BCF_HT_INT:
@@ -1373,6 +1372,7 @@ void CompressionReader::addVariant(int *gt_data, int ngt_data, variant_desc_t &d
         desc.qual = s.s;
         free(s.s);
     }
+
     if (!vec_read_fixed_fields)
         chunks_min_pos.emplace_back(desc.pos);
 

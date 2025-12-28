@@ -1,5 +1,8 @@
 #include "compressor.h"
 #include "logger.h"
+#include <algorithm>
+#include <cstdio>
+#include <cstdlib>
 #include <iostream>
 
 // **************************************************************************************************
@@ -427,6 +430,16 @@ bool Compressor::CompressProcess()
     auto logger = LogManager::Instance().Logger();
     InitializeCompressionBackend(params.backend);
 
+    enable_field_stats_ = false;
+    if (const char* env = std::getenv("GSC_LOG_LEVEL"))
+    {
+        std::string val(env);
+        std::transform(val.begin(), val.end(), val.begin(), ::tolower);
+        enable_field_stats_ = (val == "debug");
+    }
+    if (enable_field_stats_)
+        comp_stats_.Reset();
+
     MyBarrier my_barrier(3);
 
     unique_ptr<CompressionReader> compression_reader(new CompressionReader(params));
@@ -480,6 +493,11 @@ bool Compressor::CompressProcess()
     // VarBlockQueue<fixed_fixed_field_block> inVarBlockQueue(max((int)params.no_threads * 2, 8));
     VarBlockQueue<fixed_field_chunk> sortVarBlockQueue(max((int)params.no_threads * 2, 8));
     compression_reader->setQueue(&inGtBlockQueue);
+    if (enable_field_stats_)
+    {
+        comp_stats_.total_samples = no_samples;
+        comp_stats_.ploidy = params.ploidy;
+    }
 
     PartQueue<SPackage> part_queue(max((int)params.no_threads * 2, 8));
 
@@ -855,6 +873,16 @@ bool Compressor::CompressProcess()
 
     writeCompressFlie();
 
+    // Set total variants for statistics and log compression statistics
+    if (enable_field_stats_)
+    {
+        uint64_t total_actual_variants = 0;
+        for (uint32_t v : compression_reader->GetActualVariants())
+            total_actual_variants += v;
+        comp_stats_.total_variants = total_actual_variants;
+        LogCompressionStats();
+    }
+
     return true;
 }
 // process the all_zeros and all_copies
@@ -995,6 +1023,28 @@ void Compressor::compress_other_fileds(SPackage &pck, vector<uint8_t> &v_compres
     // Note: SPackage stores per-variant payloads concatenated in v_data; v_size stores per-variant lengths.
     const std::string &field_name = keys[pck.key_id].name;
     const bool is_fmt_field = (keys[pck.key_id].keys_type == key_type_t::fmt);
+    const bool stats_enabled = enable_field_stats_;
+    const bool is_gt_field = is_fmt_field && (field_name == "GT");
+
+    auto addFieldStats = [&](uint64_t raw_bytes, uint64_t compressed_bytes) {
+        if (!stats_enabled || is_gt_field || (raw_bytes == 0 && compressed_bytes == 0))
+            return;
+        if (keys[pck.key_id].keys_type == key_type_t::fmt)
+        {
+            comp_stats_.AddFormatRaw(field_name, raw_bytes);
+            comp_stats_.AddFormatCompressed(field_name, compressed_bytes);
+        }
+        else if (keys[pck.key_id].keys_type == key_type_t::info)
+        {
+            comp_stats_.info.AddRaw(raw_bytes);
+            comp_stats_.info.AddCompressed(compressed_bytes);
+        }
+        else if (keys[pck.key_id].keys_type == key_type_t::flt)
+        {
+            comp_stats_.filter.AddRaw(raw_bytes);
+            comp_stats_.filter.AddCompressed(compressed_bytes);
+        }
+    };
 	    const bool is_sparse_field = (field_name == "PGT" || field_name == "PID");
 	    const bool is_ad_field = (field_name == "AD");
 	    const bool is_dp_field = (field_name == "DP");
@@ -1011,6 +1061,7 @@ void Compressor::compress_other_fileds(SPackage &pck, vector<uint8_t> &v_compres
         // lzma2::lzma2_compress(pck.v_data, v_compressed, 10, 3);
 
         CompressionStrategy *cbsc = field_data_codecs[pck.key_id].get();
+        uint64_t raw_data_bytes = 0;
 
 	        if (is_fmt_field && (is_dp_field || is_min_dp_field || is_gq_field) && keys[pck.key_id].type == BCF_HT_INT && n_samples > 0)
 	        {
@@ -1020,6 +1071,7 @@ void Compressor::compress_other_fileds(SPackage &pck, vector<uint8_t> &v_compres
 	            to_compress.reserve(1 + pck.v_data.size());
 	            to_compress.push_back(1); // codec_id: special
             to_compress.insert(to_compress.end(), pck.v_data.begin(), pck.v_data.end());
+            raw_data_bytes = to_compress.size();
             cbsc->Compress(to_compress, v_compressed);
         }
 	        else if (is_fmt_field && is_sparse_field && keys[pck.key_id].type == BCF_HT_STR && n_samples > 0)
@@ -1185,6 +1237,7 @@ void Compressor::compress_other_fileds(SPackage &pck, vector<uint8_t> &v_compres
 	                to_compress.push_back(0); // codec_id: legacy raw bytes
 	                to_compress.insert(to_compress.end(), pck.v_data.begin(), pck.v_data.end());
 	            }
+	            raw_data_bytes = to_compress.size();
 	            cbsc->Compress(to_compress, v_compressed);
 	        }
 	        else if (is_fmt_field && is_ad_field && keys[pck.key_id].type == BCF_HT_INT && n_samples > 0)
@@ -1305,6 +1358,7 @@ void Compressor::compress_other_fileds(SPackage &pck, vector<uint8_t> &v_compres
                 to_compress.push_back(0); // codec_id: legacy
                 to_compress.insert(to_compress.end(), v_tmp.begin(), v_tmp.end());
             }
+            raw_data_bytes = to_compress.size();
             cbsc->Compress(to_compress, v_compressed);
         }
 	        else if (is_fmt_field && is_pl_field && keys[pck.key_id].type == BCF_HT_INT && n_samples > 0)
@@ -1434,16 +1488,19 @@ void Compressor::compress_other_fileds(SPackage &pck, vector<uint8_t> &v_compres
                 to_compress.push_back(0); // codec_id: legacy
                 to_compress.insert(to_compress.end(), v_tmp.begin(), v_tmp.end());
             }
+            raw_data_bytes = to_compress.size();
             cbsc->Compress(to_compress, v_compressed);
         }
         else if (keys[pck.key_id].type != BCF_HT_INT)
         {
+            raw_data_bytes = pck.v_data.size();
             cbsc->Compress(pck.v_data, v_compressed);
             // zstd::zstd_compress(pck.v_data, v_compressed);
         }
         else
         {
             Encoder(pck.v_data, v_tmp);
+            raw_data_bytes = v_tmp.size();
             cbsc->Compress(v_tmp, v_compressed);
             // zstd::zstd_compress(v_tmp, v_compressed);
         }
@@ -1451,6 +1508,7 @@ void Compressor::compress_other_fileds(SPackage &pck, vector<uint8_t> &v_compres
         // cbsc->Compress(pck.v_data, v_compressed);
 
         file_handle2->AddPartComplete(pck.stream_id_data, pck.part_id, v_compressed);
+        addFieldStats(raw_data_bytes, v_compressed.size());
     }
     else
     {
@@ -1470,6 +1528,7 @@ void Compressor::compress_other_fileds(SPackage &pck, vector<uint8_t> &v_compres
     // zstd::zstd_compress(v_tmp, v_compressed);
 
     file_handle2->AddPartComplete(pck.stream_id_size, pck.part_id, v_compressed);
+    addFieldStats(v_tmp.size(), v_compressed.size());
 
     unlock_coder_compressor(pck);
 }
@@ -1606,6 +1665,11 @@ bool Compressor::compress_meta(vector<string> v_samples, const string &v_header)
     {
         auto codec = MakeCompressionStrategy(params.backend, p_bsc_meta);
         codec->Compress(get<0>(data), get<1>(data));
+        if (enable_field_stats_)
+        {
+            comp_stats_.meta.AddRaw(get<0>(data).size());
+            comp_stats_.meta.AddCompressed(get<1>(data).size());
+        }
 
         // zstd::zstd_compress(get<0>(data), get<1>(data));
 
@@ -1780,12 +1844,33 @@ bool Compressor::compressFixedFieldsChunk(fixed_field_chunk &chunk_io)
         fixed_field_block &out = row_blocks_comp[i];
         out.no_variants = rb.no_variants;
 
+        if (enable_field_stats_)
+        {
+            comp_stats_.chrom.AddRaw(rb.chrom.size());
+            comp_stats_.pos.AddRaw(rb.pos.size());
+            comp_stats_.id.AddRaw(rb.id.size());
+            comp_stats_.ref.AddRaw(rb.ref.size());
+            comp_stats_.alt.AddRaw(rb.alt.size());
+            comp_stats_.qual.AddRaw(rb.qual.size());
+        }
+
         codec->Compress(rb.chrom, out.chrom);
         codec->Compress(rb.pos, out.pos);
         codec->Compress(rb.id, out.id);
         codec->Compress(rb.ref, out.ref);
         codec->Compress(rb.alt, out.alt);
         codec->Compress(rb.qual, out.qual);
+
+        // Collect compressed field sizes for statistics
+        if (enable_field_stats_)
+        {
+            comp_stats_.chrom.AddCompressed(out.chrom.size());
+            comp_stats_.pos.AddCompressed(out.pos.size());
+            comp_stats_.id.AddCompressed(out.id.size());
+            comp_stats_.ref.AddCompressed(out.ref.size());
+            comp_stats_.alt.AddCompressed(out.alt.size());
+            comp_stats_.qual.AddCompressed(out.qual.size());
+        }
     }
 
     uint8_t marker = 0;
@@ -1811,8 +1896,15 @@ bool Compressor::compressFixedFieldsChunk(fixed_field_chunk &chunk_io)
     auto gt_codec = MakeCompressionStrategy(params.backend, p_bsc_fixed_fields);
     for (uint32_t i = 0; i < row_block_count; ++i)
     {
+        if (enable_field_stats_)
+            comp_stats_.gt.AddRaw(chunk_io.gt_row_blocks[i].size());
+
         gt_codec->Compress(chunk_io.gt_row_blocks[i], gt_row_blocks_comp[i]);
         gt_row_blocks_comp[i].emplace_back(marker);
+
+        // Collect GT compressed size for statistics
+        if (enable_field_stats_)
+            comp_stats_.gt.AddCompressed(gt_row_blocks_comp[i].size());
     }
 
     return writeTempChunkRB(chunk_io, row_blocks_comp, gt_row_blocks_comp);
@@ -1994,4 +2086,116 @@ bool Compressor::writeTempChunkRB(const fixed_field_chunk &chunk_io,
     fseek(temp_file, 0, SEEK_END);
 
     return true;
+}
+
+// Log field compression statistics at debug level
+void Compressor::LogCompressionStats()
+{
+    auto logger = LogManager::Instance().Logger();
+    if (!enable_field_stats_)
+        return;
+
+    // Helper function to format size with appropriate unit
+    auto formatSize = [](uint64_t bytes) -> std::string {
+        if (bytes < 1024) {
+            return std::to_string(bytes) + " B";
+        } else if (bytes < 1024 * 1024) {
+            return std::to_string(bytes / 1024) + " KB";
+        } else if (bytes < 1024ULL * 1024 * 1024) {
+            char buf[32];
+            snprintf(buf, sizeof(buf), "%.2f MB", bytes / (1024.0 * 1024));
+            return std::string(buf);
+        } else {
+            char buf[32];
+            snprintf(buf, sizeof(buf), "%.2f GB", bytes / (1024.0 * 1024 * 1024));
+            return std::string(buf);
+        }
+    };
+
+    // Helper function to format ratio as percentage
+    auto formatRatio = [](double ratio) -> std::string {
+        char buf[32];
+        snprintf(buf, sizeof(buf), "%.2f%%", ratio * 100);
+        return std::string(buf);
+    };
+
+    // Helper to calculate percentage of total
+    auto calcPercent = [](uint64_t part, uint64_t total) -> double {
+        if (total == 0) return 0.0;
+        return static_cast<double>(part) / total * 100.0;
+    };
+
+    logger->debug("===============================================================================");
+    logger->debug("                    Field Compression Statistics");
+    logger->debug("===============================================================================");
+
+    uint64_t total_raw = comp_stats_.GetTotalRawSize();
+    uint64_t total_compressed = comp_stats_.GetTotalCompressedSize();
+
+    logger->debug("Total variants: {}", comp_stats_.total_variants);
+    logger->debug("Total samples: {}", comp_stats_.total_samples);
+    logger->debug("Ploidy: {}", comp_stats_.ploidy);
+    logger->debug("");
+
+    logger->debug("{:<12} {:>15} {:>15} {:>12} {:>10}",
+                  "Field", "Raw Size", "Compressed", "Ratio", "% of Total");
+    logger->debug("-------------------------------------------------------------------------------");
+
+    // Fixed fields
+    auto logField = [&](const FieldCompressionStats& field) {
+        uint64_t raw = field.raw_size.load();
+        uint64_t comp = field.compressed_size.load();
+        if (raw > 0 || comp > 0) {
+            logger->debug("{:<12} {:>15} {:>15} {:>12} {:>9.2f}%",
+                          field.name,
+                          formatSize(raw),
+                          formatSize(comp),
+                          formatRatio(field.GetCompressionRatio()),
+                          calcPercent(comp, total_compressed));
+        }
+    };
+
+    logField(comp_stats_.chrom);
+    logField(comp_stats_.pos);
+    logField(comp_stats_.id);
+    logField(comp_stats_.ref);
+    logField(comp_stats_.alt);
+    logField(comp_stats_.qual);
+    logField(comp_stats_.filter);
+    logField(comp_stats_.info);
+    logField(comp_stats_.gt);
+    logField(comp_stats_.meta);
+
+    // FORMAT fields
+    {
+        std::lock_guard<std::mutex> lock(comp_stats_.format_mutex);
+        for (const auto& kv : comp_stats_.format_fields) {
+            logField(kv.second);
+        }
+    }
+
+    logger->debug("-------------------------------------------------------------------------------");
+    logger->debug("{:<12} {:>15} {:>15} {:>12}",
+                  "TOTAL",
+                  formatSize(total_raw),
+                  formatSize(total_compressed),
+                  formatRatio(total_compressed > 0 && total_raw > 0 ?
+                             static_cast<double>(total_compressed) / total_raw : 0.0));
+    logger->debug("===============================================================================");
+
+    // GT field detailed statistics
+    uint64_t gt_raw = comp_stats_.gt.raw_size.load();
+    uint64_t gt_comp = comp_stats_.gt.compressed_size.load();
+    if (gt_raw > 0 && comp_stats_.total_variants > 0 && comp_stats_.total_samples > 0) {
+        uint64_t total_genotypes = static_cast<uint64_t>(comp_stats_.total_variants) *
+                                   comp_stats_.total_samples * comp_stats_.ploidy;
+        double bits_per_gt_raw = (gt_raw * 8.0) / total_genotypes;
+        double bits_per_gt_comp = (gt_comp * 8.0) / total_genotypes;
+
+        logger->debug("");
+        logger->debug("GT Field Details:");
+        logger->debug("  Total genotypes: {}", total_genotypes);
+        logger->debug("  Bits/genotype (raw): {:.2f}", bits_per_gt_raw);
+        logger->debug("  Bits/genotype (compressed): {:.4f}", bits_per_gt_comp);
+    }
 }
