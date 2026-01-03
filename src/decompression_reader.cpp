@@ -541,13 +541,24 @@ bool DecompressionReader::OpenReadingPart2(const string &in_file_name, bool star
 
 																   v_packages[pck->key_id] = pck;
 															   }
-															   else
-															   {
+																   else
+																   {
+																	   auto logger = LogManager::Instance().Logger();
+																	   if (p_id < keys.size())
+																		   logger->error("Decompress field failed: key_id={} name={} stream_size_id={} stream_data_id={} keys_type={} bcf_type={}",
+																		                p_id,
+																		                keys[p_id].name,
+																		                pck->stream_id_size,
+																		                pck->stream_id_data,
+																		                (uint32_t)keys[p_id].keys_type,
+																		                keys[p_id].type);
+																	   else
+																		   logger->error("Decompress field failed: key_id={}", p_id);
 
-																   pck->v_size.clear();
-																   pck->v_data.clear();
+																	   pck->v_size.clear();
+																	   pck->v_data.clear();
 
-																   lock_guard<mutex> lck(m_packages);
+																	   lock_guard<mutex> lck(m_packages);
 																   v_packages[pck->key_id] = pck;
 															   }
 															   cv_packages.notify_all();
@@ -598,7 +609,11 @@ bool DecompressionReader::decompress_other_fileds(SPackage *pck)
 
 	v_tmp.clear();
 
-	file_handle2->GetPart(pck->stream_id_data, v_compressed);
+	if (!file_handle2->GetPart(pck->stream_id_data, v_compressed))
+	{
+		logger->error("Missing stream payload for key_id={} ({})", pck->key_id, keys[pck->key_id].name);
+		return false;
+	}
 
 	// Check for special FMT fields
 	const std::string& field_name = keys[pck->key_id].name;
@@ -618,12 +633,12 @@ bool DecompressionReader::decompress_other_fileds(SPackage *pck)
 		//  - 1: special payload (record-wise stream)
 		if (v_compressed.size() && is_fmt_field && n_samples_u32 > 0)
 		{
-				if ((is_dp_field || is_min_dp_field || is_gq_field) && keys[pck->key_id].type == BCF_HT_INT)
+			if ((is_dp_field || is_min_dp_field || is_gq_field) && keys[pck->key_id].type == BCF_HT_INT)
+			{
+				cbsc->Decompress(v_compressed, v_tmp);
+				if (v_tmp.empty())
 				{
-					cbsc->Decompress(v_compressed, v_tmp);
-					if (v_tmp.empty())
-					{
-						pck->v_data.clear();
+					pck->v_data.clear();
 					return true;
 				}
 
@@ -635,15 +650,16 @@ bool DecompressionReader::decompress_other_fileds(SPackage *pck)
 					Decoder(transposed, pck->v_data);
 					return true;
 				}
-					if (codec_id != 1)
-					{
-						logger->error("Unsupported codec_id={} for FMT {} (INT)", (int)codec_id, field_name);
-						return false;
-					}
-
-					pck->v_data.assign(v_tmp.begin() + 1, v_tmp.end());
-					return true;
+				if (codec_id != 1)
+				{
+					logger->error("Unsupported codec_id={} for FMT {} (INT)", (int)codec_id, field_name);
+					return false;
 				}
+
+				pck->v_data.assign(v_tmp.begin() + 1, v_tmp.end());
+				return true;
+			}
+		}
 
 			if (is_sparse_field && keys[pck->key_id].type == BCF_HT_STR)
 			{
@@ -809,27 +825,43 @@ bool DecompressionReader::decompress_other_fileds(SPackage *pck)
 			return true;
 		}
 
-		if ((is_ad_field || is_pl_field) && keys[pck->key_id].type == BCF_HT_INT)
-		{
-			cbsc->Decompress(v_compressed, v_tmp);
-			if (v_tmp.empty())
+			if ((is_ad_field || is_pl_field) && keys[pck->key_id].type == BCF_HT_INT)
 			{
-				pck->v_data.clear();
-				return true;
-			}
-
-				const uint8_t codec_id = v_tmp[0];
-				if (codec_id == 0)
+				cbsc->Decompress(v_compressed, v_tmp);
+				if (v_tmp.empty())
 				{
-					vector<uint8_t> transposed(v_tmp.begin() + 1, v_tmp.end());
-					pck->v_data.resize(transposed.size());
-					Decoder(transposed, pck->v_data);
+					pck->v_data.clear();
 					return true;
 				}
-				if (codec_id != 1 && codec_id != 2)
+
+					const uint8_t codec_id = v_tmp[0];
+					if (field_name == "AD")
+						logger->debug("FMT AD decode: codec_id={} v_tmp_size={} records={}", (int)codec_id, v_tmp.size(), pck->v_size.size());
+					else if (field_name == "PL")
+						logger->debug("FMT PL decode: codec_id={} v_tmp_size={} records={}", (int)codec_id, v_tmp.size(), pck->v_size.size());
+					if (codec_id == 0)
+					{
+						vector<uint8_t> transposed(v_tmp.begin() + 1, v_tmp.end());
+						pck->v_data.resize(transposed.size());
+						Decoder(transposed, pck->v_data);
+					return true;
+				}
+				if (is_ad_field)
 				{
-					logger->error("Unsupported codec_id={} for FMT {} (INT)", (int)codec_id, field_name);
-					return false;
+					if (codec_id != 1 && codec_id != 2 && codec_id != 3)
+					{
+						logger->error("Unsupported codec_id={} for FMT {} (INT)", (int)codec_id, field_name);
+						return false;
+					}
+				}
+				else
+				{
+					// PL supports codec_id=3 (perm + dict tags).
+					if (codec_id != 1 && codec_id != 2 && codec_id != 3)
+					{
+						logger->error("Unsupported codec_id={} for FMT {} (INT)", (int)codec_id, field_name);
+						return false;
+					}
 				}
 
 			auto decode_vint = [&](size_t &off, uint64_t &val) -> bool {
@@ -846,6 +878,10 @@ bool DecompressionReader::decompress_other_fileds(SPackage *pck)
 				return (buf[bit / 8] >> (bit % 8)) & 1u;
 			};
 
+			auto assign_u32_bits = [](int32_t &dst, uint32_t u) {
+				memcpy(&dst, &u, sizeof(u));
+			};
+
 			size_t total_elems = 0;
 			for (size_t i = 0; i < pck->v_size.size(); ++i)
 				total_elems += pck->v_size[i];
@@ -853,6 +889,24 @@ bool DecompressionReader::decompress_other_fileds(SPackage *pck)
 
 			const size_t tip_bytes = ((size_t)n_samples_u32 * 2 + 7) / 8;
 			size_t in_off = 1;
+			uint32_t ad_block_size = 0;
+			std::vector<uint32_t> ad_baseline_ref;
+			if (is_ad_field && codec_id == 3)
+			{
+				uint64_t bs = 0;
+				if (!decode_vint(in_off, bs))
+				{
+					logger->error("FMT AD codec_id=3 missing block_size");
+					return false;
+				}
+				if (bs == 0 || bs > 1'000'000)
+				{
+					logger->error("FMT AD codec_id=3 invalid block_size={}", (uint64_t)bs);
+					return false;
+				}
+				ad_block_size = (uint32_t)bs;
+				ad_baseline_ref.assign(n_samples_u32, 0);
+			}
 			size_t out_off = 0;
 
 			for (size_t rec_idx = 0; rec_idx < pck->v_size.size(); ++rec_idx)
@@ -866,6 +920,25 @@ bool DecompressionReader::decompress_other_fileds(SPackage *pck)
 					return false;
 				}
 				const uint32_t per_sample = total / n_samples_u32;
+
+				if (is_ad_field && codec_id == 3)
+				{
+					// Block boundary: read baselines (AD[0]) for all samples.
+					if ((rec_idx % ad_block_size) == 0)
+					{
+						for (uint32_t s = 0; s < n_samples_u32; ++s)
+						{
+							uint64_t b = 0;
+							if (!decode_vint(in_off, b))
+							{
+								logger->error("FMT AD codec_id=3 truncated baseline");
+								return false;
+							}
+							ad_baseline_ref[s] = (uint32_t)b;
+						}
+					}
+				}
+
 				if (in_off + tip_bytes > v_tmp.size())
 				{
 					logger->error("FMT {} INT payload truncated in tips", field_name);
@@ -873,6 +946,75 @@ bool DecompressionReader::decompress_other_fileds(SPackage *pck)
 				}
 				const uint8_t *tips = v_tmp.data() + in_off;
 				in_off += tip_bytes;
+
+					size_t ad_payload_end = 0;
+					if (is_ad_field && codec_id == 3)
+					{
+						uint64_t payload_len = 0;
+						if (!decode_vint(in_off, payload_len))
+					{
+							logger->error("FMT AD codec_id=3 missing payload_len (rec_idx={})", rec_idx);
+							return false;
+						}
+						ad_payload_end = in_off + (size_t)payload_len;
+						if (ad_payload_end > v_tmp.size())
+						{
+							logger->error("FMT AD codec_id=3 payload_len out of bounds (rec_idx={}, len={}, in_off={}, tmp_size={})",
+						              rec_idx, (uint64_t)payload_len, in_off, v_tmp.size());
+						return false;
+					}
+				}
+
+				// codec_id=3 (PL): optional per-record permutation data.
+				uint8_t perm_mode = 0;
+				const uint8_t *perm_present = nullptr;
+				const uint8_t *perm_vals = nullptr;
+				uint32_t perm_cnt = 0;
+				size_t perm_val_bytes = 0;
+				if (is_pl_field && codec_id == 3)
+				{
+					if (in_off >= v_tmp.size())
+					{
+						logger->error("FMT PL codec_id=3 payload truncated in perm_mode");
+						return false;
+					}
+					perm_mode = v_tmp[in_off++];
+					if (perm_mode != 0)
+					{
+						const size_t perm_bytes = ((size_t)n_samples_u32 + 7) / 8;
+						if (in_off + perm_bytes > v_tmp.size())
+						{
+							logger->error("FMT PL codec_id=3 payload truncated in perm_present");
+							return false;
+						}
+						perm_present = v_tmp.data() + in_off;
+						in_off += perm_bytes;
+
+						for (uint32_t s = 0; s < n_samples_u32; ++s)
+							if (get_bit(perm_present, s)) ++perm_cnt;
+						perm_val_bytes = ((size_t)perm_cnt * 2 + 7) / 8;
+						if (in_off + perm_val_bytes > v_tmp.size())
+						{
+							logger->error("FMT PL codec_id=3 payload truncated in perm_vals");
+							return false;
+						}
+						perm_vals = v_tmp.data() + in_off;
+						in_off += perm_val_bytes;
+					}
+				}
+
+				uint32_t perm_idx = 0;
+				auto get_perm_for_sample = [&](uint32_t s) -> uint8_t {
+					if (!perm_present)
+						return 0;
+					if (!get_bit(perm_present, s))
+						return 0;
+					const size_t bit0 = (size_t)perm_idx * 2;
+					const uint8_t b0 = get_bit(perm_vals, bit0);
+					const uint8_t b1 = get_bit(perm_vals, bit0 + 1);
+					++perm_idx;
+					return (uint8_t)(b0 | (b1 << 1));
+				};
 
 				int32_t *out = reinterpret_cast<int32_t *>(pck->v_data.data() + out_off);
 				for (uint32_t s = 0; s < n_samples_u32; ++s)
@@ -883,7 +1025,114 @@ bool DecompressionReader::decompress_other_fileds(SPackage *pck)
 
 					if (is_ad_field)
 					{
-						if (tip0 == 0 && tip1 == 0)
+						if (codec_id == 3)
+						{
+							if (tip0 == 0 && tip1 == 0)
+							{
+								for (uint32_t j = 0; j < per_sample; ++j) sv[j] = 0;
+								ad_baseline_ref[s] = 0;
+							}
+							else if (tip0 == 0 && tip1 == 1)
+							{
+								uint64_t zz = 0;
+								if (!decode_vint(in_off, zz))
+								{
+									const int nb = (in_off < v_tmp.size()) ? (int)v_tmp[in_off] : -1;
+									logger->error("FMT AD codec_id=3 truncated delta (rec_idx={}, sample={}, in_off={}, next_byte={})",
+									              rec_idx, s, in_off, nb);
+									return false;
+								}
+									const int64_t diff = ((int64_t)(zz >> 1)) ^ (-(int64_t)(zz & 1u));
+									const uint32_t base0 = ad_baseline_ref[s];
+									const int64_t v0 = (int64_t)base0 + diff;
+									if (v0 < 0 || v0 > (int64_t)UINT32_MAX)
+									{
+										logger->error("FMT AD codec_id=3 delta out of range (rec_idx={}, sample={}, base0={}, zz={}, diff={}, v0={})",
+										              rec_idx, s, base0, (uint64_t)zz, diff, v0);
+										return false;
+									}
+								if (per_sample > 0) assign_u32_bits(sv[0], (uint32_t)v0);
+								for (uint32_t j = 1; j < per_sample; ++j) sv[j] = 0;
+								ad_baseline_ref[s] = (uint32_t)v0;
+							}
+							else if (tip0 == 1 && tip1 == 0)
+							{
+								uint64_t v = 0;
+								if (!decode_vint(in_off, v))
+								{
+									logger->error("FMT AD codec_id=3 truncated alt-only value (rec_idx={}, sample={})", rec_idx, s);
+									return false;
+								}
+								if (per_sample > 0) sv[0] = 0;
+								if (per_sample > 1) assign_u32_bits(sv[1], (uint32_t)v);
+								for (uint32_t j = 2; j < per_sample; ++j) sv[j] = 0;
+								ad_baseline_ref[s] = 0;
+							}
+							else
+							{
+								uint64_t tag = 0;
+								if (!decode_vint(in_off, tag))
+								{
+									logger->error("FMT AD codec_id=3 truncated tag (rec_idx={}, sample={})", rec_idx, s);
+									return false;
+								}
+								if (tag == 0)
+								{
+									for (uint32_t j = 0; j < per_sample; ++j)
+									{
+										uint64_t v = 0;
+										if (!decode_vint(in_off, v))
+										{
+											logger->error("FMT AD codec_id=3 truncated raw cell (rec_idx={}, sample={}, j={})", rec_idx, s, j);
+											return false;
+										}
+										assign_u32_bits(sv[j], (uint32_t)v);
+									}
+								}
+								else
+								{
+									if (!fmt_dictionaries_)
+									{
+										logger->error("FMT AD codec_id=3 requires dictionaries for tag!=0");
+										return false;
+									}
+									const uint32_t id = (uint32_t)(tag - 1);
+									const uint8_t *ptr = fmt_dictionaries_->getADItemPtr(id);
+									if (!ptr)
+									{
+										logger->error("FMT AD dict id={} not found", id);
+										return false;
+									}
+									const uint8_t item_total = (uint8_t)(ptr[0] + 1);
+									const uint8_t type = ptr[1];
+									const uint8_t *data = ptr + 2;
+									const uint32_t bytes_per = (type == 0) ? 1u : (type == 1) ? 2u : 4u;
+									if (2u + per_sample * bytes_per > item_total)
+									{
+										logger->error("FMT AD dict item too short (need {}, have {})", 2u + per_sample * bytes_per, (uint32_t)item_total);
+										return false;
+									}
+									for (uint32_t j = 0; j < per_sample; ++j)
+									{
+										uint32_t u = 0;
+										if (type == 0)
+											u = data[j];
+										else if (type == 1)
+											u = reinterpret_cast<const uint16_t *>(data)[j];
+										else
+											u = reinterpret_cast<const uint32_t *>(data)[j];
+										assign_u32_bits(sv[j], u);
+									}
+								}
+								if (per_sample > 0)
+								{
+									uint32_t u0 = 0;
+									memcpy(&u0, &sv[0], sizeof(u0));
+									ad_baseline_ref[s] = u0;
+								}
+							}
+						}
+						else if (tip0 == 0 && tip1 == 0)
 						{
 							for (uint32_t j = 0; j < per_sample; ++j) sv[j] = 0;
 						}
@@ -896,7 +1145,7 @@ bool DecompressionReader::decompress_other_fileds(SPackage *pck)
 						{
 							uint64_t v = 0;
 							if (!decode_vint(in_off, v)) return false;
-							if (per_sample > 0) sv[0] = (int32_t)(uint32_t)v;
+							if (per_sample > 0) assign_u32_bits(sv[0], (uint32_t)v);
 							for (uint32_t j = 1; j < per_sample; ++j) sv[j] = 0;
 							}
 							else
@@ -907,7 +1156,7 @@ bool DecompressionReader::decompress_other_fileds(SPackage *pck)
 									{
 										uint64_t v = 0;
 										if (!decode_vint(in_off, v)) return false;
-										sv[j] = (int32_t)(uint32_t)v;
+										assign_u32_bits(sv[j], (uint32_t)v);
 									}
 								}
 								else
@@ -920,7 +1169,7 @@ bool DecompressionReader::decompress_other_fileds(SPackage *pck)
 										{
 											uint64_t v = 0;
 											if (!decode_vint(in_off, v)) return false;
-											sv[j] = (int32_t)(uint32_t)v;
+											assign_u32_bits(sv[j], (uint32_t)v);
 										}
 									}
 									else
@@ -955,7 +1204,7 @@ bool DecompressionReader::decompress_other_fileds(SPackage *pck)
 												u = reinterpret_cast<const uint16_t *>(data)[j];
 											else
 												u = reinterpret_cast<const uint32_t *>(data)[j];
-											sv[j] = (int32_t)u;
+											assign_u32_bits(sv[j], u);
 										}
 									}
 								}
@@ -1011,7 +1260,7 @@ bool DecompressionReader::decompress_other_fileds(SPackage *pck)
 									{
 										uint64_t v = 0;
 										if (!decode_vint(in_off, v)) return false;
-										sv[j] = (int32_t)(uint32_t)v;
+										assign_u32_bits(sv[j], (uint32_t)v);
 									}
 								}
 								else
@@ -1024,14 +1273,14 @@ bool DecompressionReader::decompress_other_fileds(SPackage *pck)
 										{
 											uint64_t v = 0;
 											if (!decode_vint(in_off, v)) return false;
-											sv[j] = (int32_t)(uint32_t)v;
+											assign_u32_bits(sv[j], (uint32_t)v);
 										}
 									}
 									else
 									{
 										if (!fmt_dictionaries_)
 										{
-											logger->error("FMT PL codec_id=2 requires dictionaries");
+											logger->error("FMT PL codec_id={} requires dictionaries", (int)codec_id);
 											return false;
 										}
 										const uint32_t id = (uint32_t)(tag - 1);
@@ -1059,26 +1308,60 @@ bool DecompressionReader::decompress_other_fileds(SPackage *pck)
 												u = reinterpret_cast<const uint16_t *>(data)[j];
 											else
 												u = reinterpret_cast<const uint32_t *>(data)[j];
-											sv[j] = (int32_t)u;
+											assign_u32_bits(sv[j], u);
 										}
 									}
 								}
 							}
 						}
+
+						// Undo codec_id=3 normalization for PL len==3: move the 0 back to its original index.
+						if (is_pl_field && codec_id == 3)
+						{
+							const uint8_t perm = get_perm_for_sample(s);
+							if (perm != 0 && per_sample == 3)
+							{
+								const int32_t v0 = sv[0];
+								const int32_t v1 = sv[1];
+								const int32_t v2 = sv[2];
+								if (perm == 1)
+								{
+									// [0,a,b] -> [a,0,b]
+									sv[0] = v1; sv[1] = v0; sv[2] = v2;
+								}
+								else if (perm == 2)
+								{
+									// [0,a,b] -> [b,a,0]
+									sv[0] = v2; sv[1] = v1; sv[2] = v0;
+								}
+							}
+						}
 					}
+
+					if (is_ad_field && codec_id == 3)
+					{
+						if (in_off != ad_payload_end)
+						{
+						logger->error("FMT AD codec_id=3 record payload mismatch (rec_idx={}, in_off={}, payload_end={})", rec_idx, in_off, ad_payload_end);
+						return false;
+					}
+				}
 
 				out_off += (size_t)total * 4;
 			}
 
-			if (out_off != total_elems * 4 || in_off != v_tmp.size())
-			{
-				logger->error("FMT {} INT decode mismatch (out_off={}, exp={}, in_off={}, tmp_size={})",
-					field_name, out_off, total_elems * 4, in_off, v_tmp.size());
-				return false;
+				if (out_off != total_elems * 4 || in_off != v_tmp.size())
+				{
+					logger->error("FMT {} INT decode mismatch (out_off={}, exp={}, in_off={}, tmp_size={})",
+						field_name, out_off, total_elems * 4, in_off, v_tmp.size());
+					return false;
+				}
+				if (field_name == "AD")
+					logger->debug("FMT AD decode ok: bytes={}", pck->v_data.size());
+				else if (field_name == "PL")
+					logger->debug("FMT PL decode ok: bytes={}", pck->v_data.size());
+				return true;
 			}
-			return true;
-		}
-	}
 
 	if (v_compressed.size())
 	{
@@ -1526,7 +1809,11 @@ void DecompressionReader::InitDecompressParams()
 				{
 					if (ad_idx < 0 || !fields[ad_idx].present || !fields[ad_idx].data || (fields[ad_idx].data_size % 4 != 0))
 					{
-						logger->error("DP record_codec=1 requires AD to reconstruct");
+						logger->error("DP record_codec=1 requires AD to reconstruct (ad_idx={}, present={}, data={}, data_size={})",
+						              ad_idx,
+						              (ad_idx >= 0 ? (int)fields[ad_idx].present : -1),
+						              (ad_idx >= 0 ? (const void*)fields[ad_idx].data : nullptr),
+						              (ad_idx >= 0 ? (uint32_t)fields[ad_idx].data_size : 0u));
 						abort();
 					}
 					const uint32_t total_ad = fields[ad_idx].data_size / 4;
