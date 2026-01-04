@@ -1529,36 +1529,55 @@ void Compressor::compress_other_fileds(SPackage &pck, vector<uint8_t> &v_compres
             raw_data_bytes = to_compress.size();
             cbsc->Compress(to_compress, v_compressed);
         }
-	        else if (is_fmt_field && is_pl_field && keys[pck.key_id].type == BCF_HT_INT && n_samples > 0)
-	        {
-	            // PL compression per variant: 2-bit tip encoding + per-sample payload.
-	            // Record encoding:
-	            //   codec_id=1: [tip-bytes][payload...]
-	            //   codec_id=2: [tip-bytes][payload...], and for Tip=11 each sample starts with tag (0=raw, else dict_id+1)
-	            //   codec_id=3: like codec_id=2, plus per-record optional permutation data (for PL[0]!=0 normalization on len==3)
-	            // Type 00: all zeros
-	            // Type 01: pattern 1 (store a,b)
-	            // Type 10: pattern 2 (store a; b=15*a)
-	            // Type 11: store full vector
-	            vector<uint8_t> pl_compressed;
-	            uint8_t vint_buf[16];
-	            const uint8_t codec_id = fmt_dictionaries_ ? 3 : 1;
+		        else if (is_fmt_field && is_pl_field && keys[pck.key_id].type == BCF_HT_INT && n_samples > 0)
+		        {
+		            // PL compression per variant: 2-bit tip encoding + per-sample payload.
+		            // Record encoding:
+		            //   codec_id=1: [tip-bytes][payload...]
+		            //   codec_id=2: [tip-bytes][payload...], and for Tip=11 each sample starts with tag (0=raw, else dict_id+1)
+		            //   codec_id=3: like codec_id=2, plus per-record optional permutation data (for PL[0]!=0 normalization on len==3)
+		            //   codec_id=4: block baseline for a + delta(a) and residual(b-11*a) for biallelic len==3, plus perm sidecar.
+		            // Type 00: all zeros
+		            // Type 01: pattern 1 (store a,b)
+		            // Type 10: pattern 2 (store a; b=15*a)
+		            // Type 11: store full vector
+		            vector<uint8_t> pl_compressed;
+		            uint8_t vint_buf[16];
+		            const uint8_t codec_id = 4;
+		            uint32_t block_size = 16384;
+		            if (const char *bs = getenv("GSC_PL_BLOCK_SIZE"))
+		            {
+		                const long v = strtol(bs, nullptr, 10);
+		                if (v >= 64 && v <= 1'000'000)
+		                    block_size = (uint32_t)v;
+		            }
 
-	            bool ok = true;
-	            pl_compressed.reserve(pck.v_data.size() / 2);
+		            bool ok = true;
+		            pl_compressed.reserve(pck.v_data.size() / 2);
 
-	            auto append_vint_u64 = [&](uint64_t v, std::vector<uint8_t>& out) {
-	                uint8_t vlen = fmt_compress::VintCodec::encode(v, vint_buf);
-	                out.insert(out.end(), vint_buf, vint_buf + vlen);
-	            };
-	            auto append_vint_u32_bits = [&](int32_t v, std::vector<uint8_t>& out) {
-	                uint32_t u = 0;
-	                memcpy(&u, &v, sizeof(u));
-	                append_vint_u64((uint64_t)u, out);
-	            };
-	            auto set_bit = [](std::vector<uint8_t>& buf, size_t bit) {
-	                buf[bit / 8] |= (uint8_t)(1u << (bit % 8));
-	            };
+		            auto append_vint_u64 = [&](uint64_t v, std::vector<uint8_t>& out) {
+		                uint8_t vlen = fmt_compress::VintCodec::encode(v, vint_buf);
+		                out.insert(out.end(), vint_buf, vint_buf + vlen);
+		            };
+		            auto append_vint_u32 = [&](uint32_t u, std::vector<uint8_t>& out) {
+		                append_vint_u64((uint64_t)u, out);
+		            };
+		            auto append_vint_u32_bits = [&](int32_t v, std::vector<uint8_t>& out) {
+		                uint32_t u = 0;
+		                memcpy(&u, &v, sizeof(u));
+		                append_vint_u64((uint64_t)u, out);
+		            };
+		            auto append_zigzag_i64 = [&](int64_t diff, std::vector<uint8_t>& out) {
+		                const uint64_t ud = (uint64_t)diff;
+		                const uint64_t zz = (ud << 1) ^ (uint64_t)(diff >> 63);
+		                append_vint_u64(zz, out);
+		            };
+		            auto abs_i64 = [](int64_t v) -> uint64_t {
+		                return (uint64_t)(v < 0 ? -v : v);
+		            };
+		            auto set_bit = [](std::vector<uint8_t>& buf, size_t bit) {
+		                buf[bit / 8] |= (uint8_t)(1u << (bit % 8));
+		            };
 	            auto pack_2bit_values = [&](const std::vector<uint8_t>& vals, std::vector<uint8_t>& out) {
 	                // vals contain 2-bit values (0..3). Pack in order, little-endian within a byte.
 	                const size_t bits = vals.size() * 2;
@@ -1606,9 +1625,13 @@ void Compressor::compress_other_fileds(SPackage &pck, vector<uint8_t> &v_compres
 	                        ptr += 4;
 	                    }
 	                }
-	                item.data_[0] = (uint8_t)(ptr - item.data_ - 1);
-	                return true;
-	            };
+		                item.data_[0] = (uint8_t)(ptr - item.data_ - 1);
+		                return true;
+		            };
+
+		            // Stream header: block size.
+		            append_vint_u32(block_size, pl_compressed);
+		            std::vector<uint32_t> baseline_a(n_samples, 0);
 
             size_t in_off = 0;
             for (size_t rec_idx = 0; rec_idx < pck.v_size.size(); ++rec_idx)
@@ -1623,6 +1646,45 @@ void Compressor::compress_other_fileds(SPackage &pck, vector<uint8_t> &v_compres
                 }
                 const uint32_t per_sample = total_elems / n_samples;
                 const int32_t *vals = reinterpret_cast<const int32_t *>(pck.v_data.data() + in_off);
+
+	                // Start of block: write baselines (a) for all samples.
+	                if (block_size > 0 && (rec_idx % block_size) == 0)
+	                {
+	                    for (uint32_t s = 0; s < n_samples; ++s)
+	                    {
+	                        uint32_t a = 0;
+	                        if (per_sample == 3)
+	                        {
+	                            const int32_t *sv = vals + (size_t)s * per_sample;
+	                            bool has_special = false;
+	                            for (uint32_t j = 0; j < 3; ++j)
+	                            {
+	                                const int32_t v = sv[j];
+	                                if (v == bcf_int32_missing || v == bcf_int32_vector_end || v < 0)
+	                                {
+	                                    has_special = true;
+	                                    break;
+	                                }
+	                            }
+	                            if (!has_special)
+	                            {
+	                                const uint32_t p0 = (uint32_t)sv[0];
+	                                const uint32_t p1 = (uint32_t)sv[1];
+	                                const uint32_t p2 = (uint32_t)sv[2];
+	                                uint32_t min_v = p0;
+	                                uint32_t min_pos = 0;
+	                                if (p1 < min_v) { min_v = p1; min_pos = 1; }
+	                                if (p2 < min_v) { min_v = p2; min_pos = 2; }
+	                                if (min_v == 0 && min_pos == 1)
+	                                    a = p0; // [a,0,b] -> [0,a,b]
+	                                else
+	                                    a = p1; // [0,a,b] or [b,a,0]
+	                            }
+	                        }
+	                        baseline_a[s] = a;
+	                        append_vint_u32(a, pl_compressed);
+	                    }
+	                }
 
 	                vector<uint8_t> tips;
 	                tips.reserve((size_t)n_samples * 2);
@@ -1655,8 +1717,7 @@ void Compressor::compress_other_fileds(SPackage &pck, vector<uint8_t> &v_compres
 	                    {
 	                        tips.push_back(1);
 	                        tips.push_back(1);
-	                        if (codec_id != 1)
-	                            append_vint_u64(0, payload); // tag=0 => raw values
+	                        append_vint_u64(0, payload); // tag=0 => raw values (u32 bits)
 	                        for (uint32_t j = 0; j < per_sample; ++j)
 	                            append_vint_u32_bits(sv[j], payload);
 	                        continue;
@@ -1668,7 +1729,7 @@ void Compressor::compress_other_fileds(SPackage &pck, vector<uint8_t> &v_compres
 	                    uint32_t tmp_pl[3];
 	                    bool used_perm = false;
 	                    uint8_t perm_val = 0;
-	                    if (codec_id == 3 && per_sample == 3 && pl_vec[0] != 0)
+	                    if (per_sample == 3 && pl_vec[0] != 0)
 	                    {
 	                        uint32_t min_v = pl_vec[0];
 	                        uint32_t min_pos = 0;
@@ -1706,68 +1767,95 @@ void Compressor::compress_other_fileds(SPackage &pck, vector<uint8_t> &v_compres
 
 	                    uint32_t a_val = 0, b_val = 0;
 	                    const uint8_t type = fmt_compress::checkPlPattern(pl_used, per_sample, a_val, b_val);
-                    if (type == 0)
-                    {
-                        tips.push_back(0);
-                        tips.push_back(0);
-                    }
-	                    else if (type == 1)
+	                    if (type == 0)
 	                    {
 	                        tips.push_back(0);
-	                        tips.push_back(1);
+	                        tips.push_back(0);
+	                        if (per_sample == 3)
+	                            baseline_a[s] = 0;
+	                    }
+	                    else if (type == 1)
+	                    {
 	                        if (used_perm)
 	                        {
 	                            set_bit(perm_present, s);
 	                            perm_vals.push_back(perm_val);
 	                        }
-	                        uint8_t vlen = fmt_compress::VintCodec::encode(a_val, vint_buf);
-	                        payload.insert(payload.end(), vint_buf, vint_buf + vlen);
-	                        vlen = fmt_compress::VintCodec::encode(b_val, vint_buf);
-	                        payload.insert(payload.end(), vint_buf, vint_buf + vlen);
+	                        if (per_sample == 3)
+	                        {
+	                            const int64_t delta_a = (int64_t)a_val - (int64_t)baseline_a[s];
+	                            const int64_t residual = (int64_t)b_val - 11ll * (int64_t)a_val;
+	                            if (abs_i64(delta_a) <= 63 && abs_i64(residual) <= 63)
+	                            {
+	                                tips.push_back(1);
+	                                tips.push_back(0);
+	                                append_zigzag_i64(delta_a, payload);
+	                                append_zigzag_i64(residual, payload);
+	                            }
+	                            else
+	                            {
+	                                tips.push_back(1);
+	                                tips.push_back(1);
+	                                append_vint_u64(1, payload); // tag=1 => pattern1 (a,b)
+	                                append_vint_u32(a_val, payload);
+	                                append_vint_u32(b_val, payload);
+	                            }
+	                            baseline_a[s] = a_val;
+	                        }
+	                        else
+	                        {
+	                            tips.push_back(1);
+	                            tips.push_back(1);
+	                            append_vint_u64(1, payload); // tag=1 => pattern1 (a,b)
+	                            append_vint_u32(a_val, payload);
+	                            append_vint_u32(b_val, payload);
+	                            baseline_a[s] = a_val;
+	                        }
 	                    }
 	                    else if (type == 2)
 	                    {
-	                        tips.push_back(1);
-	                        tips.push_back(0);
 	                        if (used_perm)
 	                        {
 	                            set_bit(perm_present, s);
 	                            perm_vals.push_back(perm_val);
 	                        }
-	                        uint8_t vlen = fmt_compress::VintCodec::encode(a_val, vint_buf);
-	                        payload.insert(payload.end(), vint_buf, vint_buf + vlen);
+	                        tips.push_back(0);
+	                        tips.push_back(1);
+	                        const int64_t delta_a = (int64_t)a_val - (int64_t)baseline_a[s];
+	                        append_zigzag_i64(delta_a, payload);
+	                        baseline_a[s] = a_val;
 	                    }
 	                    else
 	                    {
 	                        tips.push_back(1);
 	                        tips.push_back(1);
-	                        if (codec_id == 1)
+	                        bool stored_dict = false;
+	                        uint32_t dict_id = 0;
+	                        if (fmt_dictionaries_)
 	                        {
-	                            for (uint32_t j = 0; j < per_sample; ++j)
+	                            fmt_compress::PLItem item;
+	                            if (try_build_pl_item(pl_vec, item))
 	                            {
-	                                uint8_t vlen = fmt_compress::VintCodec::encode(pl_vec[j], vint_buf);
-	                                payload.insert(payload.end(), vint_buf, vint_buf + vlen);
+	                                dict_id = fmt_dictionaries_->getPLItemId(item);
+	                                stored_dict = true;
 	                            }
 	                        }
-	                        else
+	                        // tag=0 raw (vint values), tag=1 reserved for pattern1 (a,b), tag>=2 => dict_id=tag-2
+	                        append_vint_u64(stored_dict ? ((uint64_t)dict_id + 2u) : 0u, payload);
+	                        if (!stored_dict)
 	                        {
-	                            bool stored_dict = false;
-	                            uint32_t dict_id = 0;
-	                            if (fmt_dictionaries_)
-	                            {
-	                                fmt_compress::PLItem item;
-	                                if (try_build_pl_item(pl_vec, item))
-	                                {
-	                                    dict_id = fmt_dictionaries_->getPLItemId(item);
-	                                    stored_dict = true;
-	                                }
-	                            }
-	                            append_vint_u64(stored_dict ? ((uint64_t)dict_id + 1u) : 0u, payload);
-	                            if (!stored_dict)
-	                            {
-	                                for (uint32_t j = 0; j < per_sample; ++j)
-	                                    append_vint_u64((uint64_t)pl_vec[j], payload);
-	                            }
+	                            for (uint32_t j = 0; j < per_sample; ++j)
+	                                append_vint_u64((uint64_t)pl_vec[j], payload);
+	                        }
+	                        if (per_sample == 3)
+	                        {
+	                            uint32_t a = pl_vec[1];
+	                            uint32_t min_v = pl_vec[0];
+	                            uint32_t min_pos = 0;
+	                            for (uint32_t j = 1; j < 3; ++j)
+	                                if (pl_vec[j] < min_v) { min_v = pl_vec[j]; min_pos = j; }
+	                            if (min_v == 0 && min_pos == 1) a = pl_vec[0];
+	                            baseline_a[s] = a;
 	                        }
 	                    }
 	                }
@@ -1782,28 +1870,27 @@ void Compressor::compress_other_fileds(SPackage &pck, vector<uint8_t> &v_compres
                     pl_compressed[tip_start + (i / 8)] |= (uint8_t)(1u << (i % 8));
                 }
 
-	                // codec_id=3: optional permutation section for this record.
-	                if (codec_id == 3)
+	                // codec_id=4: optional permutation section for this record.
+	                bool has_perm = false;
+	                for (size_t i = 0; i < perm_present.size(); ++i)
 	                {
-	                    bool has_perm = false;
-	                    for (size_t i = 0; i < perm_present.size(); ++i)
+	                    if (perm_present[i] != 0)
 	                    {
-	                        if (perm_present[i] != 0)
-	                        {
-	                            has_perm = true;
-	                            break;
-	                        }
-	                    }
-	                    pl_compressed.push_back(has_perm ? 1u : 0u);
-	                    if (has_perm)
-	                    {
-	                        pl_compressed.insert(pl_compressed.end(), perm_present.begin(), perm_present.end());
-	                        std::vector<uint8_t> packed_perm;
-	                        pack_2bit_values(perm_vals, packed_perm);
-	                        pl_compressed.insert(pl_compressed.end(), packed_perm.begin(), packed_perm.end());
+	                        has_perm = true;
+	                        break;
 	                    }
 	                }
+	                pl_compressed.push_back(has_perm ? 1u : 0u);
+	                if (has_perm)
+	                {
+	                    pl_compressed.insert(pl_compressed.end(), perm_present.begin(), perm_present.end());
+	                    std::vector<uint8_t> packed_perm;
+	                    pack_2bit_values(perm_vals, packed_perm);
+	                    pl_compressed.insert(pl_compressed.end(), packed_perm.begin(), packed_perm.end());
+	                }
 
+	                // codec_id=4: write payload length for robust decoding.
+	                append_vint_u32((uint32_t)payload.size(), pl_compressed);
 	                pl_compressed.insert(pl_compressed.end(), payload.begin(), payload.end());
 
 	                in_off += (size_t)total_elems * 4;
