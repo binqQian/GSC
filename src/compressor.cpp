@@ -1240,31 +1240,35 @@ void Compressor::compress_other_fileds(SPackage &pck, vector<uint8_t> &v_compres
 	            raw_data_bytes = to_compress.size();
 	            cbsc->Compress(to_compress, v_compressed);
 	        }
-	        else if (is_fmt_field && is_ad_field && keys[pck.key_id].type == BCF_HT_INT && n_samples > 0)
-	        {
-	            // AD compression per variant: 2-bit tip encoding per sample.
-	            // Record encoding:
-	            //   codec_id=1: [tip-bytes][values...]
-	            //   codec_id=2: [tip-bytes][values...], and for Tip=11 each sample starts with tag (0=raw, else dict_id+1)
-	            //   codec_id=3: baseline+delta for AD[0], plus optional dict tags for Tip=11.
-	            //
-	            // codec_id=3 stream layout (after codec_id):
-	            //   [block_size_vint]
-	            //   for each variant record:
-	            //     if (rec_idx % block_size == 0): [baseline_ref[sample]=AD[0] vint] * n_samples
-	            //     [tip-bytes][payload...]
-	            //
-	            // Tips (2-bit) for codec_id=3:
-	            //   00: all zeros
-	            //   01: only AD[0] non-zero => store zigzag(delta) vs baseline_ref, then update baseline_ref
-	            //   10: only AD[1] non-zero (and others zero) => store AD[1] raw (vint), baseline_ref becomes 0
-	            //   11: general case => store tag then (raw values or dict id)
-	            vector<uint8_t> ad_compressed;
-	            uint8_t vint_buf[16];
-	            const uint8_t codec_id = 3;
-	            uint32_t block_size = 16384;
-	            if (const char *bs = getenv("GSC_AD_BASELINE_BLOCK"))
-	            {
+		        else if (is_fmt_field && is_ad_field && keys[pck.key_id].type == BCF_HT_INT && n_samples > 0)
+		        {
+		            // AD compression per variant: 2-bit tip encoding per sample.
+		            // Record encoding:
+		            //   codec_id=1: [tip-bytes][values...]
+		            //   codec_id=2: [tip-bytes][values...], and for Tip=11 each sample starts with tag (0=raw, else dict_id+1)
+		            //   codec_id=3: baseline+delta for AD[0], plus optional dict tags for Tip=11.
+		            //   codec_id=4: baseline+delta for sum(AD) (variant-count blocks), plus optional dict tags for Tip=11.
+		            //
+		            // codec_id=4 stream layout (after codec_id):
+		            //   [block_size_vint]
+		            //   for each variant record:
+		            //     if (rec_idx % block_size == 0): [baseline_sum[sample]=sum(AD) vint] * n_samples
+		            //     [tip-bytes][payload_len_vint][payload...]
+		            //
+		            // Tips (2-bit) for codec_id=4:
+		            //   00: all zeros
+		            //   01: ref-only (AD[0]>0, AD[1..]=0) => store zigzag(delta_sum) vs baseline_sum, then update baseline_sum
+		            //   10: alt-only (biallelic, AD[0]=0, AD[1]>0) => store zigzag(delta_sum), then update baseline_sum
+		            //   11: general case => store tag then:
+		            //         tag=0: raw values (u32 bits via vint)
+		            //         tag=1: sum+alt encoding (biallelic, both non-zero): [delta_sum][alt]
+		            //         tag>=2: dict_id = tag-2
+		            vector<uint8_t> ad_compressed;
+		            uint8_t vint_buf[16];
+		            const uint8_t codec_id = 4;
+		            uint32_t block_size = 16384;
+		            if (const char *bs = getenv("GSC_AD_BASELINE_BLOCK"))
+		            {
 	                const long v = strtol(bs, nullptr, 10);
 	                if (v >= 64 && v <= 1'000'000)
 	                    block_size = (uint32_t)v;
@@ -1290,10 +1294,10 @@ void Compressor::compress_other_fileds(SPackage &pck, vector<uint8_t> &v_compres
 	                memcpy(&u, &v, sizeof(u));
 	                append_vint_u64((uint64_t)u, out);
 	            };
-	            auto try_build_ad_item = [&](const int32_t* sv, uint32_t cnt, fmt_compress::ADItem& item) -> bool {
-	                if (cnt == 0)
-	                    return false;
-	                // ADItem payload capacity: 46 bytes (bytes 2..47).
+		            auto try_build_ad_item = [&](const int32_t* sv, uint32_t cnt, fmt_compress::ADItem& item) -> bool {
+		                if (cnt == 0)
+		                    return false;
+		                // ADItem payload capacity: 46 bytes (bytes 2..47).
 	                uint32_t max_v = 0;
 	                for (uint32_t j = 0; j < cnt; ++j)
 	                {
@@ -1335,15 +1339,15 @@ void Compressor::compress_other_fileds(SPackage &pck, vector<uint8_t> &v_compres
 	                }
 	                item.data_[0] = (uint8_t)(ptr - item.data_ - 1);
 	                return true;
-	            };
+		            };
 
-	            // Stream header: block size.
-	            append_vint_u32(block_size, ad_compressed);
-	            std::vector<uint32_t> baseline_ref(n_samples, 0);
+		            // Stream header: block size.
+		            append_vint_u32(block_size, ad_compressed);
+		            std::vector<uint32_t> baseline_sum(n_samples, 0);
 
-	            size_t in_off = 0;
-	            for (size_t rec_idx = 0; rec_idx < pck.v_size.size(); ++rec_idx)
-	            {
+		            size_t in_off = 0;
+		            for (size_t rec_idx = 0; rec_idx < pck.v_size.size(); ++rec_idx)
+		            {
 	                const uint32_t total_elems = pck.v_size[rec_idx];
 	                if (total_elems == 0)
 	                    continue;
@@ -1352,36 +1356,42 @@ void Compressor::compress_other_fileds(SPackage &pck, vector<uint8_t> &v_compres
 	                    ok = false;
 	                    break;
 	                }
-	                const uint32_t per_sample = total_elems / n_samples;
-	                const int32_t *vals = reinterpret_cast<const int32_t *>(pck.v_data.data() + in_off);
+		                const uint32_t per_sample = total_elems / n_samples;
+		                const int32_t *vals = reinterpret_cast<const int32_t *>(pck.v_data.data() + in_off);
 
-	                // Start of block: write baselines (AD[0]) for all samples.
-	                if (block_size > 0 && (rec_idx % block_size) == 0)
-	                {
-	                    for (uint32_t s = 0; s < n_samples; ++s)
-	                    {
-	                        const int32_t *sv = vals + (size_t)s * per_sample;
-	                        uint32_t b = 0;
-	                        if (per_sample > 0)
-	                        {
-	                            const int32_t v0 = sv[0];
-	                            if (v0 != bcf_int32_missing && v0 != bcf_int32_vector_end && v0 >= 0)
-	                                b = (uint32_t)v0;
-	                        }
-	                        baseline_ref[s] = b;
-	                        append_vint_u32(b, ad_compressed);
-	                    }
-	                }
+		                // Start of block: write baselines (sum(AD)) for all samples.
+		                if (block_size > 0 && (rec_idx % block_size) == 0)
+		                {
+		                    for (uint32_t s = 0; s < n_samples; ++s)
+		                    {
+		                        const int32_t *sv = vals + (size_t)s * per_sample;
+		                        uint64_t sum = 0;
+		                        bool ok_sum = true;
+		                        for (uint32_t j = 0; j < per_sample; ++j)
+		                        {
+		                            const int32_t v = sv[j];
+		                            if (v == bcf_int32_missing || v == bcf_int32_vector_end || v < 0)
+		                            {
+		                                ok_sum = false;
+		                                break;
+		                            }
+		                            sum += (uint64_t)(uint32_t)v;
+		                        }
+		                        const uint32_t b = ok_sum ? (uint32_t)std::min<uint64_t>(sum, (uint64_t)UINT32_MAX) : 0u;
+		                        baseline_sum[s] = b;
+		                        append_vint_u32(b, ad_compressed);
+		                    }
+		                }
 
-	                vector<uint8_t> tips;
+		                vector<uint8_t> tips;
 	                tips.reserve((size_t)n_samples * 2);
 	                vector<uint8_t> payload;
 	                payload.reserve((size_t)total_elems);
 
-	                for (uint32_t s = 0; s < n_samples; ++s)
-	                {
-	                    const int32_t *sv = vals + (size_t)s * per_sample;
-	                    bool has_special = false;
+		                for (uint32_t s = 0; s < n_samples; ++s)
+		                {
+		                    const int32_t *sv = vals + (size_t)s * per_sample;
+		                    bool has_special = false;
 	                    for (uint32_t j = 0; j < per_sample; ++j)
 	                    {
 	                        const int32_t v = sv[j];
@@ -1392,72 +1402,71 @@ void Compressor::compress_other_fileds(SPackage &pck, vector<uint8_t> &v_compres
 	                        }
 	                    }
 
-	                    if (has_special || per_sample == 0)
-	                    {
-	                        tips.push_back(1);
-	                        tips.push_back(1);
-	                        // tag=0 => raw values follow
-	                        append_vint_u64(0, payload);
-	                        for (uint32_t j = 0; j < per_sample; ++j)
-	                            append_vint_u32_bits(sv[j], payload);
-	                        if (per_sample > 0)
-	                        {
-	                            baseline_ref[s] = (uint32_t)sv[0];
-	                        }
-	                    }
-	                    else
-	                    {
-	                        // Fast paths for "single non-zero" patterns.
-	                        bool all_zero = true;
-	                        bool only0 = false;
-	                        bool only1 = false;
+		                    if (has_special || per_sample == 0)
+		                    {
+		                        tips.push_back(1);
+		                        tips.push_back(1);
+		                        // tag=0 => raw values follow
+		                        append_vint_u64(0, payload);
+		                        for (uint32_t j = 0; j < per_sample; ++j)
+		                            append_vint_u32_bits(sv[j], payload);
+		                        // Keep baseline_sum[s] unchanged (missing/special values should not pollute the baseline).
+		                    }
+		                    else
+		                    {
+		                        // Sum(AD) baseline+delta with biallelic fast paths.
+		                        uint64_t sum64 = 0;
+		                        for (uint32_t j = 0; j < per_sample; ++j)
+		                            sum64 += (uint64_t)(uint32_t)sv[j];
+		                        const uint32_t sum = (uint32_t)std::min<uint64_t>(sum64, (uint64_t)UINT32_MAX);
 
-	                        if (per_sample >= 2)
-	                        {
-	                            const uint32_t u0 = (uint32_t)sv[0];
-	                            const uint32_t u1 = (uint32_t)sv[1];
-	                            bool rest_zero = true;
-	                            for (uint32_t j = 2; j < per_sample; ++j)
-	                            {
-	                                if (sv[j] != 0)
-	                                {
-	                                    rest_zero = false;
-	                                    break;
-	                                }
-	                            }
-	                            all_zero = (u0 == 0 && u1 == 0 && rest_zero);
-	                            only0 = (u0 != 0 && u1 == 0 && rest_zero);
-	                            only1 = (u0 == 0 && u1 != 0 && rest_zero);
-	                        }
-	                        else if (per_sample == 1)
-	                        {
-	                            all_zero = (sv[0] == 0);
-	                            only0 = (sv[0] != 0);
-	                            only1 = false;
-	                        }
+		                        bool all_alts_zero = true;
+		                        for (uint32_t j = 1; j < per_sample; ++j)
+		                        {
+		                            if (sv[j] != 0)
+		                            {
+		                                all_alts_zero = false;
+		                                break;
+		                            }
+		                        }
+		                        const bool all_zero = (sum == 0);
+		                        const bool ref_only = (!all_zero && all_alts_zero);
+		                        const bool alt_only = (per_sample == 2 && sv[0] == 0 && sv[1] != 0);
+		                        const bool biallelic_both = (per_sample == 2 && sv[0] != 0 && sv[1] != 0);
 
-	                        if (all_zero)
-	                        {
-	                            tips.push_back(0);
-	                            tips.push_back(0);
-	                            baseline_ref[s] = 0;
-	                        }
-	                        else if (only0)
-	                        {
-	                            tips.push_back(0);
-	                            tips.push_back(1);
-	                            const uint32_t v0 = (uint32_t)sv[0];
-	                            const int64_t diff = (int64_t)v0 - (int64_t)baseline_ref[s];
-	                            append_zigzag_i64(diff, payload);
-	                            baseline_ref[s] = v0;
-	                        }
-	                        else if (only1)
-	                        {
-	                            tips.push_back(1);
-	                            tips.push_back(0);
-	                            append_vint_u32((uint32_t)sv[1], payload);
-	                            baseline_ref[s] = 0;
-	                        }
+		                        if (all_zero)
+		                        {
+		                            tips.push_back(0);
+		                            tips.push_back(0);
+		                            baseline_sum[s] = 0;
+		                        }
+		                        else if (ref_only)
+		                        {
+		                            tips.push_back(0);
+		                            tips.push_back(1);
+		                            const int64_t diff = (int64_t)sum - (int64_t)baseline_sum[s];
+		                            append_zigzag_i64(diff, payload);
+		                            baseline_sum[s] = sum;
+		                        }
+		                        else if (alt_only)
+		                        {
+		                            tips.push_back(1);
+		                            tips.push_back(0);
+		                            const int64_t diff = (int64_t)sum - (int64_t)baseline_sum[s];
+		                            append_zigzag_i64(diff, payload);
+		                            baseline_sum[s] = sum;
+		                        }
+		                        else if (biallelic_both)
+		                        {
+		                            tips.push_back(1);
+		                            tips.push_back(1);
+		                            // tag=1 => sum+alt encoding
+		                            append_vint_u64(1, payload);
+		                            const int64_t diff = (int64_t)sum - (int64_t)baseline_sum[s];
+		                            append_zigzag_i64(diff, payload);
+		                            append_vint_u32((uint32_t)sv[1], payload);
+		                            baseline_sum[s] = sum;
+		                        }
 		                        else
 		                        {
 		                            tips.push_back(1);
@@ -1466,24 +1475,24 @@ void Compressor::compress_other_fileds(SPackage &pck, vector<uint8_t> &v_compres
 		                            uint32_t dict_id = 0;
 		                            if (fmt_dictionaries_)
 		                            {
-	                                fmt_compress::ADItem item;
-	                                if (try_build_ad_item(sv, per_sample, item))
-	                                {
-	                                    dict_id = fmt_dictionaries_->getADItemId(item);
-	                                    stored_dict = true;
-	                                }
-	                            }
-	                            append_vint_u64(stored_dict ? ((uint64_t)dict_id + 1u) : 0u, payload);
-	                            if (!stored_dict)
-	                            {
-	                                for (uint32_t j = 0; j < per_sample; ++j)
-	                                    append_vint_u32_bits(sv[j], payload);
-	                            }
-	                            if (per_sample > 0)
-	                                baseline_ref[s] = (uint32_t)sv[0];
-	                        }
-	                    }
-	                }
+		                                fmt_compress::ADItem item;
+		                                if (try_build_ad_item(sv, per_sample, item))
+		                                {
+		                                    dict_id = fmt_dictionaries_->getADItemId(item);
+		                                    stored_dict = true;
+		                                }
+		                            }
+		                            // tag=0 raw, tag=1 reserved for sum+alt, tag>=2 => dict_id=tag-2
+		                            append_vint_u64(stored_dict ? ((uint64_t)dict_id + 2u) : 0u, payload);
+		                            if (!stored_dict)
+		                            {
+		                                for (uint32_t j = 0; j < per_sample; ++j)
+		                                    append_vint_u32_bits(sv[j], payload);
+		                            }
+		                            baseline_sum[s] = sum;
+		                        }
+		                    }
+		                }
 
 	                const size_t tip_bytes = ((size_t)n_samples * 2 + 7) / 8;
 	                const size_t tip_start = ad_compressed.size();
