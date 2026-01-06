@@ -1182,8 +1182,7 @@ int Decompressor::BedFormatDecompress(){
     auto logger = LogManager::Instance().Logger();
     if (!decompression_reader.useLegacyPath)
     {
-        logger->error("BED output is not yet supported for tiled GT blocks.");
-        return 1;
+        return BedFormatDecompressTiled();
     }
     done_unique.clear();
     stored_unique.clear();
@@ -1353,7 +1352,160 @@ int Decompressor::BedFormatDecompress(){
     done_unique.clear();
 
     return 0;
-    
+
+}
+
+//*****************************************************************************************************************
+int Decompressor::BedFormatDecompressTiled()
+{
+    auto logger = LogManager::Instance().Logger();
+    logger->debug("BedFormatDecompressTiled: entering");
+    done_unique.clear();
+    stored_unique.clear();
+
+    // Disable vector caching for tiled mode since different column blocks
+    // have different vector lengths, which causes memory issues when reusing cached vectors
+    uint64_t saved_max_stored_unique = max_stored_unique;
+    max_stored_unique = 0;
+
+    const uint32_t n_col_blocks = decompression_reader.n_col_blocks;
+    const uint32_t full_vec_len = decompression_reader.vec_len;
+    const uint32_t row_block_variants = row_block_size ? row_block_size : haplotype_count;
+
+    logger->debug("BedFormatDecompressTiled: n_col_blocks={}, full_vec_len={}, row_block_variants={}, haplotype_count={}",
+                 n_col_blocks, full_vec_len, row_block_variants, haplotype_count);
+
+    if (!n_col_blocks || !row_block_variants)
+    {
+        logger->error("Invalid tiling metadata (n_col_blocks={}, row_block_variants={})", n_col_blocks, row_block_variants);
+        return 1;
+    }
+
+    if (decompression_reader.col_block_ranges.size() != n_col_blocks ||
+        decompression_reader.col_block_vec_lens.size() != n_col_blocks)
+    {
+        logger->error("Mismatch in column block metadata sizes");
+        return 1;
+    }
+
+    vector<uint8_t> my_str(haplotype_count);
+
+    uint64_t start_pair_id = static_cast<uint64_t>(start_chunk_actual_pos) * n_col_blocks;
+    uint64_t gt_index_base_pair_id = start_pair_id;
+    if (decompression_reader.has_fixed_fields_rb_dir &&
+        decompression_reader.fixed_fields_chunk_version >= GSC_FIXED_FIELDS_RB_VERSION_V2 &&
+        chunk_variant_offset_io)
+    {
+        gt_index_base_pair_id += static_cast<uint64_t>(chunk_variant_offset_io) * n_col_blocks;
+    }
+    uint64_t curr_non_copy_vec_id_offset = gt_index_base_pair_id * 2 - rrr_rank_zeros_bit_vector[0](gt_index_base_pair_id) -
+                                           rrr_rank_zeros_bit_vector[1](gt_index_base_pair_id) - rrr_rank_copy_bit_vector[0](gt_index_base_pair_id) -
+                                           rrr_rank_copy_bit_vector[1](gt_index_base_pair_id);
+
+    uint64_t max_col_vec_len = 0;
+    for (auto len : decompression_reader.col_block_vec_lens)
+        if (len > max_col_vec_len)
+            max_col_vec_len = len;
+
+    if (max_col_vec_len == 0)
+    {
+        logger->error("max_col_vec_len is 0!");
+        return 1;
+    }
+
+    vector<uint8_t> col_decomp_perm(max_col_vec_len * 2);
+    vector<uint8_t> col_decomp(max_col_vec_len * 2);
+
+    uint64_t pair_base = start_pair_id + static_cast<uint64_t>(chunk_variant_offset_io) * n_col_blocks;
+
+    for (size_t block_id = 0; block_id < fixed_variants_chunk_io.size(); ++block_id)
+    {
+        const uint32_t block_variants = static_cast<uint32_t>(fixed_variants_chunk_io[block_id].data_compress.size());
+
+        if (block_id >= sort_perm_io.size())
+        {
+            logger->error("block_id {} >= sort_perm_io.size() {}", block_id, sort_perm_io.size());
+            return 1;
+        }
+        if (sort_perm_io[block_id].size() != n_col_blocks)
+        {
+            logger->error("sort_perm_io[{}].size()={} != n_col_blocks={}", block_id, sort_perm_io[block_id].size(), n_col_blocks);
+            return 1;
+        }
+
+        logger->debug("BedFormatDecompressTiled: processing block_id={}, block_variants={}", block_id, block_variants);
+
+        for (uint32_t var_in_block = 0; var_in_block < block_variants; ++var_in_block)
+        {
+            variant_desc_t desc = fixed_variants_chunk_io[block_id].data_compress[var_in_block];
+
+            // Skip multi-allelic continuation records for BED output
+            if (desc.alt.find("<M>") != string::npos)
+                continue;
+
+            // Decode GT data for all column blocks
+            fill_n(decomp_data, full_vec_len * 2, 0);
+            for (uint32_t cb = 0; cb < n_col_blocks; ++cb)
+            {
+                const uint32_t col_block_size = decompression_reader.col_block_ranges[cb].second;
+                const uint32_t col_vec_len = static_cast<uint32_t>(decompression_reader.col_block_vec_lens[cb]);
+                const uint64_t pair_index = pair_base + static_cast<uint64_t>(cb) * block_variants + var_in_block;
+
+                fill_n(col_decomp_perm.data(), col_vec_len * 2, 0);
+                decoded_vector_row(pair_index * 2, 0, curr_non_copy_vec_id_offset, col_vec_len, 0, col_decomp_perm.data());
+                decoded_vector_row(pair_index * 2 + 1, 0, curr_non_copy_vec_id_offset, col_vec_len, col_vec_len, col_decomp_perm.data());
+
+                fill_n(col_decomp.data(), col_vec_len * 2, 0);
+                decode_perm_rev(col_vec_len, col_vec_len, col_block_size, sort_perm_io[block_id][cb],
+                                col_decomp_perm.data(), col_decomp.data());
+
+                const uint32_t start_hap = decompression_reader.col_block_ranges[cb].first;
+                insert_block_bits(decomp_data, col_decomp.data(), full_vec_len, start_hap, col_block_size);
+                insert_block_bits(decomp_data + full_vec_len, col_decomp.data() + col_vec_len, full_vec_len, start_hap, col_block_size);
+            }
+
+            // Convert to character genotypes
+            int vec1_start;
+            int vec2_start = full_vec_len;
+            for (vec1_start = 0; vec1_start < full_byte_count; ++vec1_start)
+            {
+                lookup_table_ptr = (long long *)(gt_lookup_table[decomp_data[vec1_start]][decomp_data[vec2_start++]]);
+                tmp_arr[vec1_start] = *lookup_table_ptr;
+            }
+            memcpy(my_str.data(), tmp_arr, full_byte_count << 3);
+            if (trailing_bits)
+                memcpy(my_str.data() + (full_byte_count << 3), gt_lookup_table[decomp_data[vec1_start]][decomp_data[vec2_start]], trailing_bits);
+
+            // Write BIM line
+            string desc_pos = to_string(desc.pos);
+            size_t comma_pos = desc.alt.find(",");
+            string desc_alt = comma_pos == string::npos ? desc.alt : desc.alt.substr(0, comma_pos);
+            string bim_line = desc.chrom + "\t" + desc.id + "\t" + genetic_distance + "\t" + desc_pos + "\t" + desc_alt + "\t" + desc.ref + "\n";
+            out_bim.Write(bim_line.c_str(), bim_line.size());
+
+            // Write BED data
+            for (int i = 0; i < (int)haplotype_count; i += 2)
+            {
+                char first = my_str[i];
+                char second = my_str[i + 1];
+                out_bed.PutBit(bits_lut[first][second][0]);
+                out_bed.PutBit(bits_lut[first][second][1]);
+            }
+            out_bed.FlushPartialByteBuffer();
+        }
+        pair_base += static_cast<uint64_t>(block_variants) * n_col_blocks;
+    }
+
+    logger->info("Processed chunk {}", cur_chunk_id);
+
+    for (auto &it : done_unique)
+        delete[] it.second;
+    done_unique.clear();
+
+    // Restore max_stored_unique
+    max_stored_unique = saved_max_stored_unique;
+
+    return 0;
 }
 
 //*****************************************************************************************************************

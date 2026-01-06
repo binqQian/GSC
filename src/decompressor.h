@@ -227,6 +227,7 @@ class Decompressor {
     int decompressAllTiled();
 
     int BedFormatDecompress();
+    int BedFormatDecompressTiled();
 
     int decompressRange(const string & range);
     int decompressRangeTiled(const string & range);
