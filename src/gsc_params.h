@@ -26,7 +26,10 @@ enum class file_type
 {
     VCF_File,
     BCF_File,
-    BED_File
+    BED_File,
+    PGEN_File,
+    BGEN_File,
+    GDS_File
 };
 
 const bsc_params_t p_bsc_fixed_fields = {25, 16, 64, LIBBSC_BLOCKSORTER_BWT, LIBBSC_CODER_QLFC_ADAPTIVE};

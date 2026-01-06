@@ -97,11 +97,30 @@ class Decompressor {
     vector<htsFile*> split_files;
 
     bcf_hdr_t * out_hdr = nullptr;
-    bcf1_t * rec;
+    bcf1_t * rec = nullptr;
 
     COutFile out_fam;
     COutFile out_bim;
     COutFile out_bed;
+
+    // PLINK2 PGEN output (experimental)
+    COutFile out_pgen;
+    COutFile out_pvar;
+    COutFile out_psam;
+
+    // BGEN output (experimental)
+    COutFile out_bgen;
+    COutFile out_sample;
+
+    // Export bookkeeping
+    uint32_t export_variant_count_ = 0;
+
+    // Direct conversion lookup tables (initialized after gt_lookup_table is built)
+    alignas(64) uint8_t gsc_to_pgen_lut[256][256];
+    alignas(64) uint8_t gsc_to_bgen_ploidy[256][256][4];
+    alignas(64) uint8_t gsc_to_bgen_prob[256][256][8];
+    bool gsc_to_pgen_lut_ready_ = false;
+    bool gsc_to_bgen_lut_ready_ = false;
 
     string cur_chrom = "";
     int cur_file = -1;
@@ -228,6 +247,17 @@ class Decompressor {
 
     int BedFormatDecompress();
     int BedFormatDecompressTiled();
+
+    int PgenFormatDecompress();
+    int PgenFormatDecompressTiled();
+    void initGscToPgenLUT();
+    void finalizePgen(); // patches header fields if needed
+
+    int BgenFormatDecompress();
+    int BgenFormatDecompressTiled();
+    void initGscToBgenLUT();
+    void writeBgenHeaderAndSampleBlock();
+    void finalizeBgen(); // patches header fields if needed
 
     int decompressRange(const string & range);
     int decompressRangeTiled(const string & range);

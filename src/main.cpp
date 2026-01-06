@@ -127,11 +127,15 @@ Where:
     -o,  --out [out_file]  Specify the output file (default: VCF). If omitted, output is sent to standard output (stdout).
     --compressor [name]    Select compressor: bsc (default), zstd, brotli.
 
-Options:
+    Options:
 
     General Options:
         -M,  --mode_lossly    Choose lossy compression mode (default: lossless).
         -b,  --bcf            Output a BCF file (default: VCF).
+             --make-bed        Output PLINK 1 BED/BIM/FAM (biallelic only; current behavior skips <M> records).
+             --make-pgen       Output PLINK 2 PGEN/PVAR/PSAM (experimental; biallelic only).
+             --make-bgen       Output BGEN v1.2 (layout 2, zlib, 8-bit probs) + .sample (experimental; biallelic only).
+             --make-gds        Output via VCF and external R/SeqArray (see docs/gsc2gds.R; not implemented in core binary).
 
     Filter options (applicable in lossy compression mode only):
         -r,  --range [X]      Specify range in format [start],[end] (e.g., -r 4999756,4999852).
@@ -466,6 +470,18 @@ int params_options(int argc, const char *argv[]){
 
                 params.out_type = file_type::BED_File;    
 
+            else if (strcmp(argv[i], "--make-pgen") == 0)
+
+                params.out_type = file_type::PGEN_File;
+
+            else if (strcmp(argv[i], "--make-bgen") == 0)
+
+                params.out_type = file_type::BGEN_File;
+
+            else if (strcmp(argv[i], "--make-gds") == 0)
+
+                params.out_type = file_type::GDS_File;
+
             else if (strcmp(argv[i], "--threads") == 0 || strcmp(argv[i], "-t") == 0){
 
                 i++;
@@ -723,6 +739,16 @@ int decompress_entry(){
     if(params.out_type == file_type::BCF_File && params.out_file_name =="")
 
         return usage_decompress();
+
+    if ((params.out_type == file_type::BED_File ||
+         params.out_type == file_type::PGEN_File ||
+         params.out_type == file_type::BGEN_File ||
+         params.out_type == file_type::GDS_File) &&
+        (params.out_file_name.empty() || params.out_file_name == "-"))
+    {
+        // These formats write multiple files and require an output prefix.
+        return usage_decompress();
+    }
 
     Decompressor decompressor(params);    // Load settings and data
 
