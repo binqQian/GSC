@@ -75,6 +75,13 @@ set(SOURCES
     src/logger.cpp
     src/compression_strategy.cpp
     include/cpp-mmf/memory_mapped_file.cpp
+
+    # gVCF compression module
+    src/gvcf/gvcf_encoding.cpp
+    src/gvcf/gvcf_block.cpp
+    src/gvcf/gvcf_field_compress.cpp
+    src/gvcf/gvcf_field_decompress.cpp
+    src/gvcf/gvcf_compressor.cpp
 )
 
 add_executable(gsc ${SOURCES})
@@ -84,6 +91,7 @@ target_include_directories(gsc
         ${CMAKE_SOURCE_DIR}/include
         ${CMAKE_SOURCE_DIR}/include/cpp-mmf
         ${CMAKE_SOURCE_DIR}/src/fmt_compress
+        ${CMAKE_SOURCE_DIR}/src/gvcf
 )
 
 target_compile_options(gsc PRIVATE ${COMMON_COMPILE_FLAGS})
