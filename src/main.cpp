@@ -627,11 +627,17 @@ int params_options(int argc, const char *argv[]){
             
             else if (strcmp(argv[i], "--no-header") == 0 || strcmp(argv[i], "-H") == 0)
 
+            {
                 params.out_header_flag = false;
+                params.header_only = false;
+            }
 
             else if (strcmp(argv[i], "--header-only") == 0 || strcmp(argv[i], "-h") == 0)
 
+            {
                 params.out_header_flag = true;
+                params.header_only = true;
+            }
 
             else if (strcmp(argv[i], "-I") == 0){
 

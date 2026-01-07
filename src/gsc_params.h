@@ -85,6 +85,7 @@ struct GSC_Params
     bool split_flag;
     bool merge_file_flag;
     bool out_header_flag;
+    bool header_only;
     uint32_t minAC,maxAC;
 
     float minAF, maxAF;
@@ -124,6 +125,7 @@ struct GSC_Params
         // out_ohter_fields = false;
         split_flag = false;
         out_header_flag = true;
+        header_only = false;
         records_to_process = UINT32_MAX;
         mode = '\0';
         out_id = "";

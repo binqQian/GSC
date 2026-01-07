@@ -1680,13 +1680,8 @@ bool GVCFQueryer::QueryRange(const std::string& chrom, uint64_t start, uint64_t 
             }
 
             uint64_t pos = block.position.pos[i];
-            uint64_t var_end = pos;
-            if (i < block.info.end.size() && block.info.end[i] > 0) {
-                var_end = block.info.end[i];
-            }
-
-            // Check if variant overlaps with query range
-            if (!(var_end < start || end < pos)) {
+            // Range query semantics: filter by POS within [start, end] (inclusive).
+            if (pos >= start && pos <= end) {
                 if (!WriteVCFRecord(out_fp, hdr, block, i)) {
                     logger->error("Failed to write variant");
                     bcf_hdr_destroy(hdr);

@@ -596,8 +596,21 @@ bool DecompressionReader::decompress_other_fileds(SPackage *pck)
 	CompressionStrategy *cbsc_size = field_size_codecs[pck->key_id].get();
 	CompressionStrategy *cbsc = field_data_codecs[pck->key_id].get();
 
+	if (pck->stream_id_size < 0 || pck->stream_id_data < 0)
+	{
+		// Field stream not present in the file (e.g., header-defined but always empty).
+		pck->v_size.clear();
+		pck->v_data.clear();
+		return true;
+	}
+
 	if (!file_handle2->GetPart(pck->stream_id_size, v_compressed))
-		return false;
+	{
+		logger->debug("Missing stream size part for key_id={} ({})", pck->key_id, keys[pck->key_id].name);
+		pck->v_size.clear();
+		pck->v_data.clear();
+		return true;
+	}
 
 	cbsc_size->Decompress(v_compressed, v_tmp);
 
@@ -611,8 +624,10 @@ bool DecompressionReader::decompress_other_fileds(SPackage *pck)
 
 	if (!file_handle2->GetPart(pck->stream_id_data, v_compressed))
 	{
-		logger->error("Missing stream payload for key_id={} ({})", pck->key_id, keys[pck->key_id].name);
-		return false;
+		logger->debug("Missing stream payload for key_id={} ({})", pck->key_id, keys[pck->key_id].name);
+		pck->v_size.clear();
+		pck->v_data.clear();
+		return true;
 	}
 
 	// Check for special FMT fields

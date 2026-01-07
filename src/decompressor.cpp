@@ -357,6 +357,22 @@ bool Decompressor::decompressProcess()
     if(analyzeInputSamples(v_samples)) // Retrieving sample name.
         return false;
 
+    if (params.header_only)
+    {
+        if (params.split_flag)
+        {
+            auto logger = LogManager::Instance().Logger();
+            logger->error("--header-only is not compatible with --split");
+            return false;
+        }
+        if (!(out_type == file_type::VCF_File || out_type == file_type::BCF_File))
+        {
+            auto logger = LogManager::Instance().Logger();
+            logger->error("--header-only is only supported for VCF/BCF output");
+            return false;
+        }
+    }
+
 
     if(params.split_flag){
 
@@ -374,6 +390,15 @@ bool Decompressor::decompressProcess()
         if(!OpenForWriting())
             return false;
         initOut();
+    }
+
+    if (params.header_only)
+    {
+        // Header was written by initOut(). Exit early without decoding records.
+        if (decompression_mode_type)
+            decompression_reader.close();
+        Close();
+        return true;
     }
 
     initDecompression(decompression_reader);
@@ -4222,8 +4247,19 @@ int Decompressor::initOut()
             bcf_hdr_sync(out_hdr);
         }
 
-        if (bcf_hdr_write(out_file, out_hdr) < 0)
-            return 1;
+        const bool wants_no_header = !params.out_header_flag;
+        if (wants_no_header && out_type == file_type::BCF_File)
+        {
+            LogManager::Instance().Logger()->warn("BCF output always includes header; ignoring --no-header");
+        }
+
+        const bool should_write_header =
+            params.out_header_flag || params.header_only || (out_type == file_type::BCF_File);
+        if (should_write_header)
+        {
+            if (bcf_hdr_write(out_file, out_hdr) < 0)
+                return 1;
+        }
 
         // Initialize parallel writer if enabled
         if (use_parallel_writing_) {
