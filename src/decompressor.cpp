@@ -3,6 +3,7 @@
 #include <bitset>
 #include <chrono>
 #include <limits>
+#include <zlib.h>
 
 using namespace std::chrono;
 
@@ -28,6 +29,29 @@ std::string vcf_write_mode(const std::string &path, char compression_level) {
     if (compression_level >= '0' && compression_level <= '9')
         mode.push_back(compression_level);
     return mode;
+}
+
+bool patch_u32_le_at(const std::string& path, long offset, uint32_t value) {
+    FILE* f = fopen(path.c_str(), "r+b");
+    if (!f)
+        return false;
+    if (fseek(f, offset, SEEK_SET) != 0) {
+        fclose(f);
+        return false;
+    }
+    const size_t n = fwrite(&value, sizeof(value), 1, f);
+    fclose(f);
+    return n == 1;
+}
+
+bool is_biallelic_desc_for_export(const variant_desc_t& desc) {
+    // Skip GSC multi-allelic split markers (<N>/<M>) and general multi-allelic ALT lists.
+    // BGEN/PGEN outputs here are biallelic-only.
+    if (desc.alt.find('<') != std::string::npos)
+        return false;
+    if (desc.alt.find(',') != std::string::npos)
+        return false;
+    return true;
 }
 
 } // namespace
@@ -262,7 +286,13 @@ bool Decompressor::initDecompression(DecompressionReader &decompression_reader){
     logger->debug("initDecompression: calling initialLut");
     initialLut();
     logger->debug("initDecompression: lut initialization done");
-    if(out_type != file_type::BED_File){
+
+    if (out_type == file_type::PGEN_File && !gsc_to_pgen_lut_ready_)
+        initGscToPgenLUT();
+    if (out_type == file_type::BGEN_File && !gsc_to_bgen_lut_ready_)
+        initGscToBgenLUT();
+
+    if(out_type == file_type::VCF_File || out_type == file_type::BCF_File){
         int fmt_id = bcf_hdr_id2int(out_hdr,BCF_DT_ID,"GT");
         bcf_enc_int1(&str, fmt_id);
         bcf_enc_size(&str, decompression_reader.ploidy, BCF_BT_INT8);
@@ -330,6 +360,13 @@ bool Decompressor::decompressProcess()
 
     if(params.split_flag){
 
+        if (!(out_type == file_type::VCF_File || out_type == file_type::BCF_File))
+        {
+            auto logger = LogManager::Instance().Logger();
+            logger->error("Split output is only supported for VCF/BCF.");
+            return false;
+        }
+
         if(!splitFileWriting(static_cast<int>(decompression_reader.d_where_chrom.size())))
             return false;
         initOutSplitFile();
@@ -349,20 +386,33 @@ bool Decompressor::decompressProcess()
         return false;
     } 
     cur_chunk_id = start_chunk_id;
-    unique_ptr<thread> decompress_thread(new thread([&]{
+	    unique_ptr<thread> decompress_thread(new thread([&]{
 
-        while(cur_chunk_id < end_chunk_id){
-            my_barrier.count_down_and_wait();
-            my_barrier.count_down_and_wait();
-            initalIndex();
-            if(out_type == file_type::BED_File){
-                BedFormatDecompress();
+	        while(cur_chunk_id < end_chunk_id){
+	            my_barrier.count_down_and_wait();
+	            my_barrier.count_down_and_wait();
+	            initalIndex();
+	            if(out_type == file_type::BED_File){
+	                BedFormatDecompress();
 
-            }else{
-                if(params.compress_mode == compress_mode_t::lossless_mode){
-                    if (params.samples.empty())
-                    {
-                        uint32_t no_actual_variants = decompression_reader.actual_variants[cur_chunk_id-1];
+	            }
+                else if (out_type == file_type::PGEN_File)
+                {
+                    PgenFormatDecompress();
+                }
+                else if (out_type == file_type::BGEN_File)
+                {
+                    BgenFormatDecompress();
+                }
+                else if (out_type == file_type::GDS_File)
+                {
+                    // Not implemented; OpenForWriting() should have rejected this already.
+                }
+                else{
+	                if(params.compress_mode == compress_mode_t::lossless_mode){
+	                    if (params.samples.empty())
+	                    {
+	                        uint32_t no_actual_variants = decompression_reader.actual_variants[cur_chunk_id-1];
 
                         decompressAll();
 
@@ -408,20 +458,21 @@ bool Decompressor::decompressProcess()
     }));
 
 
-    unique_ptr<thread> process_thread(new thread([&]{
-        while (cur_chunk_id < end_chunk_id)
-        {
-            if(!decompression_reader.readFixedFields()){
+	    unique_ptr<thread> process_thread(new thread([&]{
+	        while (cur_chunk_id < end_chunk_id)
+	        {
+	            if(!decompression_reader.readFixedFields()){
                 auto logger = LogManager::Instance().Logger();
                 logger->error("process_thread: readFixedFields FAILED at cur_chunk_id={}", cur_chunk_id);
                 break;
             }
-            if(params.compress_mode == compress_mode_t::lossless_mode && params.samples.empty()){
+	            if(params.compress_mode == compress_mode_t::lossless_mode && params.samples.empty() &&
+                   (out_type == file_type::VCF_File || out_type == file_type::BCF_File)){
 
-                uint32_t no_actual_variants =  decompression_reader.actual_variants[cur_chunk_id];
+	                uint32_t no_actual_variants =  decompression_reader.actual_variants[cur_chunk_id];
 
-                while (no_actual_variants--)
-                {
+	                while (no_actual_variants--)
+	                {
                     all_fields.emplace_back(vector<field_desc>(decompression_reader.keys.size()));
                     decompression_reader.GetVariants(all_fields.back());
 
@@ -469,17 +520,52 @@ bool Decompressor::decompressProcess()
     Close();
     return true;
 }
-bool Decompressor::Close(){
-	if (in_file_name == "-") {
-        if(remove(decompression_reader.fname.c_str()) != 0)
-		    perror("Error deleting temp file");
 
-	}
+void Decompressor::finalizePgen()
+{
+    auto logger = LogManager::Instance().Logger();
+    if (out_file_name == "-")
+        return;
+    const std::string path = out_file_name + ".pgen";
+    if (!patch_u32_le_at(path, 3, export_variant_count_))
+        logger->error("Failed to patch PGEN variant_count in {}", path);
+}
+
+void Decompressor::finalizeBgen()
+{
+    auto logger = LogManager::Instance().Logger();
+    if (out_file_name == "-")
+        return;
+    const std::string path = out_file_name + ".bgen";
+    if (!patch_u32_le_at(path, 8, export_variant_count_))
+        logger->error("Failed to patch BGEN variant_count in {}", path);
+}
+
+bool Decompressor::Close(){
+		if (in_file_name == "-") {
+	        if(remove(decompression_reader.fname.c_str()) != 0)
+			    perror("Error deleting temp file");
+
+		}
     if(out_type == file_type::BED_File){
         out_fam.Close();
         out_bed.Close();
         out_bim.Close();
-    }else{
+    }
+    else if (out_type == file_type::PGEN_File)
+    {
+        out_pgen.Close();
+        out_pvar.Close();
+        out_psam.Close();
+        finalizePgen();
+    }
+    else if (out_type == file_type::BGEN_File)
+    {
+        out_bgen.Close();
+        out_sample.Close();
+        finalizeBgen();
+    }
+    else{
         // Finalize parallel writer before closing output file
         if (parallel_writer_) {
             parallel_writer_->Finalize();
@@ -508,8 +594,17 @@ bool Decompressor::Close(){
         }
         if(str.m)
             free(str.s);
-        if(tmp_arr)
-            delete[] tmp_arr;
+    }
+    if (tmp_arr)
+    {
+        delete[] tmp_arr;
+        tmp_arr = nullptr;
+    }
+    if (str.m)
+    {
+        str.s = nullptr;
+        str.m = 0;
+        str.l = 0;
     }
     return true;
 }
@@ -635,6 +730,69 @@ void Decompressor::initialLut()
             }
         }
     }
+}
+
+void Decompressor::initGscToPgenLUT()
+{
+    for (int p0 = 0; p0 < 256; ++p0)
+    {
+        for (int p1 = 0; p1 < 256; ++p1)
+        {
+            uint8_t out_byte = 0;
+            for (int sample_idx = 0; sample_idx < 4; ++sample_idx)
+            {
+                const char h0 = gt_lookup_table[p0][p1][sample_idx * 2];
+                const char h1 = gt_lookup_table[p0][p1][sample_idx * 2 + 1];
+                const bool missing = (h0 == '.' || h1 == '.' || h0 == '2' || h1 == '2');
+                const uint8_t gt = missing ? 0b11 : static_cast<uint8_t>((h0 == '1') + (h1 == '1'));
+                out_byte |= static_cast<uint8_t>(gt << (sample_idx * 2));
+            }
+            gsc_to_pgen_lut[p0][p1] = out_byte;
+        }
+    }
+    gsc_to_pgen_lut_ready_ = true;
+}
+
+void Decompressor::initGscToBgenLUT()
+{
+    for (int p0 = 0; p0 < 256; ++p0)
+    {
+        for (int p1 = 0; p1 < 256; ++p1)
+        {
+            for (int sample_idx = 0; sample_idx < 4; ++sample_idx)
+            {
+                const char h0 = gt_lookup_table[p0][p1][sample_idx * 2];
+                const char h1 = gt_lookup_table[p0][p1][sample_idx * 2 + 1];
+                const bool missing = (h0 == '.' || h1 == '.' || h0 == '2' || h1 == '2');
+                if (missing)
+                {
+                    gsc_to_bgen_ploidy[p0][p1][sample_idx] = 0x82;
+                    gsc_to_bgen_prob[p0][p1][sample_idx * 2] = 0;
+                    gsc_to_bgen_prob[p0][p1][sample_idx * 2 + 1] = 0;
+                    continue;
+                }
+
+                gsc_to_bgen_ploidy[p0][p1][sample_idx] = 0x02;
+                const int alt_count = (h0 == '1') + (h1 == '1');
+                if (alt_count == 0)
+                {
+                    gsc_to_bgen_prob[p0][p1][sample_idx * 2] = 255;
+                    gsc_to_bgen_prob[p0][p1][sample_idx * 2 + 1] = 0;
+                }
+                else if (alt_count == 1)
+                {
+                    gsc_to_bgen_prob[p0][p1][sample_idx * 2] = 0;
+                    gsc_to_bgen_prob[p0][p1][sample_idx * 2 + 1] = 255;
+                }
+                else
+                {
+                    gsc_to_bgen_prob[p0][p1][sample_idx * 2] = 0;
+                    gsc_to_bgen_prob[p0][p1][sample_idx * 2 + 1] = 0;
+                }
+            }
+        }
+    }
+    gsc_to_bgen_lut_ready_ = true;
 }
 void Decompressor::getRangeGT(uint8_t *a,const vector<uint32_t> &rev_perm,size_t no_rec, vector<uint8_t> &str){
 
@@ -1182,8 +1340,7 @@ int Decompressor::BedFormatDecompress(){
     auto logger = LogManager::Instance().Logger();
     if (!decompression_reader.useLegacyPath)
     {
-        logger->error("BED output is not yet supported for tiled GT blocks.");
-        return 1;
+        return BedFormatDecompressTiled();
     }
     done_unique.clear();
     stored_unique.clear();
@@ -1353,7 +1510,500 @@ int Decompressor::BedFormatDecompress(){
     done_unique.clear();
 
     return 0;
-    
+
+}
+
+//*****************************************************************************************************************
+int Decompressor::BedFormatDecompressTiled()
+{
+    auto logger = LogManager::Instance().Logger();
+    logger->debug("BedFormatDecompressTiled: entering");
+    done_unique.clear();
+    stored_unique.clear();
+
+    // Disable vector caching for tiled mode since different column blocks
+    // have different vector lengths, which causes memory issues when reusing cached vectors
+    uint64_t saved_max_stored_unique = max_stored_unique;
+    max_stored_unique = 0;
+
+    const uint32_t n_col_blocks = decompression_reader.n_col_blocks;
+    const uint32_t full_vec_len = decompression_reader.vec_len;
+    const uint32_t row_block_variants = row_block_size ? row_block_size : haplotype_count;
+
+    logger->debug("BedFormatDecompressTiled: n_col_blocks={}, full_vec_len={}, row_block_variants={}, haplotype_count={}",
+                 n_col_blocks, full_vec_len, row_block_variants, haplotype_count);
+
+    if (!n_col_blocks || !row_block_variants)
+    {
+        logger->error("Invalid tiling metadata (n_col_blocks={}, row_block_variants={})", n_col_blocks, row_block_variants);
+        return 1;
+    }
+
+    if (decompression_reader.col_block_ranges.size() != n_col_blocks ||
+        decompression_reader.col_block_vec_lens.size() != n_col_blocks)
+    {
+        logger->error("Mismatch in column block metadata sizes");
+        return 1;
+    }
+
+    vector<uint8_t> my_str(haplotype_count);
+
+    uint64_t start_pair_id = static_cast<uint64_t>(start_chunk_actual_pos) * n_col_blocks;
+    uint64_t gt_index_base_pair_id = start_pair_id;
+    if (decompression_reader.has_fixed_fields_rb_dir &&
+        decompression_reader.fixed_fields_chunk_version >= GSC_FIXED_FIELDS_RB_VERSION_V2 &&
+        chunk_variant_offset_io)
+    {
+        gt_index_base_pair_id += static_cast<uint64_t>(chunk_variant_offset_io) * n_col_blocks;
+    }
+    uint64_t curr_non_copy_vec_id_offset = gt_index_base_pair_id * 2 - rrr_rank_zeros_bit_vector[0](gt_index_base_pair_id) -
+                                           rrr_rank_zeros_bit_vector[1](gt_index_base_pair_id) - rrr_rank_copy_bit_vector[0](gt_index_base_pair_id) -
+                                           rrr_rank_copy_bit_vector[1](gt_index_base_pair_id);
+
+    uint64_t max_col_vec_len = 0;
+    for (auto len : decompression_reader.col_block_vec_lens)
+        if (len > max_col_vec_len)
+            max_col_vec_len = len;
+
+    if (max_col_vec_len == 0)
+    {
+        logger->error("max_col_vec_len is 0!");
+        return 1;
+    }
+
+    vector<uint8_t> col_decomp_perm(max_col_vec_len * 2);
+    vector<uint8_t> col_decomp(max_col_vec_len * 2);
+
+    uint64_t pair_base = start_pair_id + static_cast<uint64_t>(chunk_variant_offset_io) * n_col_blocks;
+
+    for (size_t block_id = 0; block_id < fixed_variants_chunk_io.size(); ++block_id)
+    {
+        const uint32_t block_variants = static_cast<uint32_t>(fixed_variants_chunk_io[block_id].data_compress.size());
+
+        if (block_id >= sort_perm_io.size())
+        {
+            logger->error("block_id {} >= sort_perm_io.size() {}", block_id, sort_perm_io.size());
+            return 1;
+        }
+        if (sort_perm_io[block_id].size() != n_col_blocks)
+        {
+            logger->error("sort_perm_io[{}].size()={} != n_col_blocks={}", block_id, sort_perm_io[block_id].size(), n_col_blocks);
+            return 1;
+        }
+
+        logger->debug("BedFormatDecompressTiled: processing block_id={}, block_variants={}", block_id, block_variants);
+
+        for (uint32_t var_in_block = 0; var_in_block < block_variants; ++var_in_block)
+        {
+            variant_desc_t desc = fixed_variants_chunk_io[block_id].data_compress[var_in_block];
+
+            // Skip multi-allelic continuation records for BED output
+            if (desc.alt.find("<M>") != string::npos)
+                continue;
+
+            // Decode GT data for all column blocks
+            fill_n(decomp_data, full_vec_len * 2, 0);
+            for (uint32_t cb = 0; cb < n_col_blocks; ++cb)
+            {
+                const uint32_t col_block_size = decompression_reader.col_block_ranges[cb].second;
+                const uint32_t col_vec_len = static_cast<uint32_t>(decompression_reader.col_block_vec_lens[cb]);
+                const uint64_t pair_index = pair_base + static_cast<uint64_t>(cb) * block_variants + var_in_block;
+
+                fill_n(col_decomp_perm.data(), col_vec_len * 2, 0);
+                decoded_vector_row(pair_index * 2, 0, curr_non_copy_vec_id_offset, col_vec_len, 0, col_decomp_perm.data());
+                decoded_vector_row(pair_index * 2 + 1, 0, curr_non_copy_vec_id_offset, col_vec_len, col_vec_len, col_decomp_perm.data());
+
+                fill_n(col_decomp.data(), col_vec_len * 2, 0);
+                decode_perm_rev(col_vec_len, col_vec_len, col_block_size, sort_perm_io[block_id][cb],
+                                col_decomp_perm.data(), col_decomp.data());
+
+                const uint32_t start_hap = decompression_reader.col_block_ranges[cb].first;
+                insert_block_bits(decomp_data, col_decomp.data(), full_vec_len, start_hap, col_block_size);
+                insert_block_bits(decomp_data + full_vec_len, col_decomp.data() + col_vec_len, full_vec_len, start_hap, col_block_size);
+            }
+
+            // Convert to character genotypes
+            int vec1_start;
+            int vec2_start = full_vec_len;
+            for (vec1_start = 0; vec1_start < full_byte_count; ++vec1_start)
+            {
+                lookup_table_ptr = (long long *)(gt_lookup_table[decomp_data[vec1_start]][decomp_data[vec2_start++]]);
+                tmp_arr[vec1_start] = *lookup_table_ptr;
+            }
+            memcpy(my_str.data(), tmp_arr, full_byte_count << 3);
+            if (trailing_bits)
+                memcpy(my_str.data() + (full_byte_count << 3), gt_lookup_table[decomp_data[vec1_start]][decomp_data[vec2_start]], trailing_bits);
+
+            // Write BIM line
+            string desc_pos = to_string(desc.pos);
+            size_t comma_pos = desc.alt.find(",");
+            string desc_alt = comma_pos == string::npos ? desc.alt : desc.alt.substr(0, comma_pos);
+            string bim_line = desc.chrom + "\t" + desc.id + "\t" + genetic_distance + "\t" + desc_pos + "\t" + desc_alt + "\t" + desc.ref + "\n";
+            out_bim.Write(bim_line.c_str(), bim_line.size());
+
+            // Write BED data
+            for (int i = 0; i < (int)haplotype_count; i += 2)
+            {
+                char first = my_str[i];
+                char second = my_str[i + 1];
+                out_bed.PutBit(bits_lut[first][second][0]);
+                out_bed.PutBit(bits_lut[first][second][1]);
+            }
+            out_bed.FlushPartialByteBuffer();
+        }
+        pair_base += static_cast<uint64_t>(block_variants) * n_col_blocks;
+    }
+
+    logger->info("Processed chunk {}", cur_chunk_id);
+
+    for (auto &it : done_unique)
+        delete[] it.second;
+    done_unique.clear();
+
+    // Restore max_stored_unique
+    max_stored_unique = saved_max_stored_unique;
+
+    return 0;
+}
+
+int Decompressor::PgenFormatDecompress()
+{
+    auto logger = LogManager::Instance().Logger();
+    if (!params.samples.empty())
+    {
+        logger->error("PGEN output does not currently support --samples subset.");
+        return 1;
+    }
+    if (decompression_reader.useLegacyPath)
+    {
+        logger->error("PGEN output requires tiled .gsc input (recompress with non-legacy block settings).");
+        return 1;
+    }
+    return PgenFormatDecompressTiled();
+}
+
+int Decompressor::PgenFormatDecompressTiled()
+{
+    auto logger = LogManager::Instance().Logger();
+    done_unique.clear();
+    stored_unique.clear();
+
+    // Disable vector caching for tiled mode (matches BED tiled implementation)
+    const uint64_t saved_max_stored_unique = max_stored_unique;
+    max_stored_unique = 0;
+
+    const uint32_t n_col_blocks = decompression_reader.n_col_blocks;
+    const uint32_t full_vec_len = decompression_reader.vec_len;
+    const uint32_t n_samples = decompression_reader.n_samples;
+    const uint32_t row_block_variants = row_block_size ? row_block_size : haplotype_count;
+
+    if (!n_col_blocks || !row_block_variants)
+    {
+        logger->error("Invalid tiling metadata for PGEN output");
+        max_stored_unique = saved_max_stored_unique;
+        return 1;
+    }
+    if (decompression_reader.col_block_ranges.size() != n_col_blocks ||
+        decompression_reader.col_block_vec_lens.size() != n_col_blocks)
+    {
+        logger->error("Mismatch in column block metadata sizes for PGEN output");
+        max_stored_unique = saved_max_stored_unique;
+        return 1;
+    }
+
+    uint64_t start_pair_id = static_cast<uint64_t>(start_chunk_actual_pos) * n_col_blocks;
+    uint64_t gt_index_base_pair_id = start_pair_id;
+    if (decompression_reader.has_fixed_fields_rb_dir &&
+        decompression_reader.fixed_fields_chunk_version >= GSC_FIXED_FIELDS_RB_VERSION_V2 &&
+        chunk_variant_offset_io)
+    {
+        gt_index_base_pair_id += static_cast<uint64_t>(chunk_variant_offset_io) * n_col_blocks;
+    }
+    uint64_t curr_non_copy_vec_id_offset = gt_index_base_pair_id * 2 - rrr_rank_zeros_bit_vector[0](gt_index_base_pair_id) -
+                                           rrr_rank_zeros_bit_vector[1](gt_index_base_pair_id) - rrr_rank_copy_bit_vector[0](gt_index_base_pair_id) -
+                                           rrr_rank_copy_bit_vector[1](gt_index_base_pair_id);
+
+    uint64_t max_col_vec_len = 0;
+    for (auto len : decompression_reader.col_block_vec_lens)
+        if (len > max_col_vec_len)
+            max_col_vec_len = len;
+    if (max_col_vec_len == 0)
+    {
+        logger->error("max_col_vec_len is 0 for PGEN output");
+        max_stored_unique = saved_max_stored_unique;
+        return 1;
+    }
+    vector<uint8_t> col_decomp_perm(max_col_vec_len * 2);
+    vector<uint8_t> col_decomp(max_col_vec_len * 2);
+
+    uint64_t pair_base = start_pair_id + static_cast<uint64_t>(chunk_variant_offset_io) * n_col_blocks;
+
+    for (size_t block_id = 0; block_id < fixed_variants_chunk_io.size(); ++block_id)
+    {
+        const uint32_t block_variants = static_cast<uint32_t>(fixed_variants_chunk_io[block_id].data_compress.size());
+        if (block_id >= sort_perm_io.size() || sort_perm_io[block_id].size() != n_col_blocks)
+        {
+            logger->error("sort_perm_io mismatch for PGEN output (block_id={}, sort_perm_io.size()={}, expected n_col_blocks={})",
+                          block_id, sort_perm_io.size(), n_col_blocks);
+            max_stored_unique = saved_max_stored_unique;
+            return 1;
+        }
+        for (uint32_t var_in_block = 0; var_in_block < block_variants; ++var_in_block)
+        {
+            const variant_desc_t &desc = fixed_variants_chunk_io[block_id].data_compress[var_in_block];
+            if (!is_biallelic_desc_for_export(desc))
+                continue;
+
+            fill_n(decomp_data, full_vec_len * 2, 0);
+            for (uint32_t cb = 0; cb < n_col_blocks; ++cb)
+            {
+                const uint32_t col_block_size = decompression_reader.col_block_ranges[cb].second;
+                const uint32_t col_vec_len = static_cast<uint32_t>(decompression_reader.col_block_vec_lens[cb]);
+                const uint64_t pair_index = pair_base + static_cast<uint64_t>(cb) * block_variants + var_in_block;
+
+                fill_n(col_decomp_perm.data(), col_vec_len * 2, 0);
+                decoded_vector_row(pair_index * 2, 0, curr_non_copy_vec_id_offset, col_vec_len, 0, col_decomp_perm.data());
+                decoded_vector_row(pair_index * 2 + 1, 0, curr_non_copy_vec_id_offset, col_vec_len, col_vec_len, col_decomp_perm.data());
+
+                fill_n(col_decomp.data(), col_vec_len * 2, 0);
+                decode_perm_rev(col_vec_len, col_vec_len, col_block_size, sort_perm_io[block_id][cb],
+                                col_decomp_perm.data(), col_decomp.data());
+
+                const uint32_t start_hap = decompression_reader.col_block_ranges[cb].first;
+                insert_block_bits(decomp_data, col_decomp.data(), full_vec_len, start_hap, col_block_size);
+                insert_block_bits(decomp_data + full_vec_len, col_decomp.data() + col_vec_len, full_vec_len, start_hap, col_block_size);
+            }
+
+            // Write PVAR row
+            const std::string id = desc.id.empty() ? "." : desc.id;
+            std::string pvar_line = desc.chrom + "\t" + std::to_string(desc.pos) + "\t" + id + "\t" + desc.ref + "\t" + desc.alt + "\n";
+            out_pvar.Write(pvar_line.c_str(), pvar_line.size());
+
+            // Write packed hardcalls to PGEN (4 samples per byte)
+            const uint8_t* bvec0 = decomp_data;
+            const uint8_t* bvec1 = decomp_data + full_vec_len;
+            const uint32_t full_bytes = n_samples / 4;
+            const uint32_t rem = n_samples % 4;
+            for (uint32_t i = 0; i < full_bytes; ++i)
+                out_pgen.PutByte(gsc_to_pgen_lut[bvec0[i]][bvec1[i]]);
+            if (rem)
+            {
+                uint8_t out_byte = gsc_to_pgen_lut[bvec0[full_bytes]][bvec1[full_bytes]];
+                out_byte &= static_cast<uint8_t>(0xFFu >> ((4 - rem) * 2));
+                out_pgen.PutByte(out_byte);
+            }
+
+            ++export_variant_count_;
+        }
+        pair_base += static_cast<uint64_t>(block_variants) * n_col_blocks;
+    }
+
+    for (auto &it : done_unique)
+        delete[] it.second;
+    done_unique.clear();
+
+    max_stored_unique = saved_max_stored_unique;
+    return 0;
+}
+
+int Decompressor::BgenFormatDecompress()
+{
+    auto logger = LogManager::Instance().Logger();
+    if (!params.samples.empty())
+    {
+        logger->error("BGEN output does not currently support --samples subset.");
+        return 1;
+    }
+    if (decompression_reader.useLegacyPath)
+    {
+        logger->error("BGEN output requires tiled .gsc input (recompress with non-legacy block settings).");
+        return 1;
+    }
+    return BgenFormatDecompressTiled();
+}
+
+int Decompressor::BgenFormatDecompressTiled()
+{
+    auto logger = LogManager::Instance().Logger();
+    done_unique.clear();
+    stored_unique.clear();
+
+    const uint64_t saved_max_stored_unique = max_stored_unique;
+    max_stored_unique = 0;
+
+    const uint32_t n_col_blocks = decompression_reader.n_col_blocks;
+    const uint32_t full_vec_len = decompression_reader.vec_len;
+    const uint32_t n_samples = decompression_reader.n_samples;
+    const uint32_t row_block_variants = row_block_size ? row_block_size : haplotype_count;
+
+    if (!n_col_blocks || !row_block_variants)
+    {
+        logger->error("Invalid tiling metadata for BGEN output");
+        max_stored_unique = saved_max_stored_unique;
+        return 1;
+    }
+    if (decompression_reader.col_block_ranges.size() != n_col_blocks ||
+        decompression_reader.col_block_vec_lens.size() != n_col_blocks)
+    {
+        logger->error("Mismatch in column block metadata sizes for BGEN output");
+        max_stored_unique = saved_max_stored_unique;
+        return 1;
+    }
+
+    uint64_t start_pair_id = static_cast<uint64_t>(start_chunk_actual_pos) * n_col_blocks;
+    uint64_t gt_index_base_pair_id = start_pair_id;
+    if (decompression_reader.has_fixed_fields_rb_dir &&
+        decompression_reader.fixed_fields_chunk_version >= GSC_FIXED_FIELDS_RB_VERSION_V2 &&
+        chunk_variant_offset_io)
+    {
+        gt_index_base_pair_id += static_cast<uint64_t>(chunk_variant_offset_io) * n_col_blocks;
+    }
+    uint64_t curr_non_copy_vec_id_offset = gt_index_base_pair_id * 2 - rrr_rank_zeros_bit_vector[0](gt_index_base_pair_id) -
+                                           rrr_rank_zeros_bit_vector[1](gt_index_base_pair_id) - rrr_rank_copy_bit_vector[0](gt_index_base_pair_id) -
+                                           rrr_rank_copy_bit_vector[1](gt_index_base_pair_id);
+
+    uint64_t max_col_vec_len = 0;
+    for (auto len : decompression_reader.col_block_vec_lens)
+        if (len > max_col_vec_len)
+            max_col_vec_len = len;
+    if (max_col_vec_len == 0)
+    {
+        logger->error("max_col_vec_len is 0 for BGEN output");
+        max_stored_unique = saved_max_stored_unique;
+        return 1;
+    }
+    vector<uint8_t> col_decomp_perm(max_col_vec_len * 2);
+    vector<uint8_t> col_decomp(max_col_vec_len * 2);
+
+    const uint32_t uncompressed_size = 4 + n_samples + 2 + 2 * n_samples; // N + ploidy + phased/B + probs
+    vector<uint8_t> uncompressed;
+    uncompressed.resize(uncompressed_size);
+
+    uint64_t pair_base = start_pair_id + static_cast<uint64_t>(chunk_variant_offset_io) * n_col_blocks;
+
+    for (size_t block_id = 0; block_id < fixed_variants_chunk_io.size(); ++block_id)
+    {
+        const uint32_t block_variants = static_cast<uint32_t>(fixed_variants_chunk_io[block_id].data_compress.size());
+        if (block_id >= sort_perm_io.size() || sort_perm_io[block_id].size() != n_col_blocks)
+        {
+            logger->error("sort_perm_io mismatch for BGEN output (block_id={}, sort_perm_io.size()={}, expected n_col_blocks={})",
+                          block_id, sort_perm_io.size(), n_col_blocks);
+            max_stored_unique = saved_max_stored_unique;
+            return 1;
+        }
+        for (uint32_t var_in_block = 0; var_in_block < block_variants; ++var_in_block)
+        {
+            const variant_desc_t &desc = fixed_variants_chunk_io[block_id].data_compress[var_in_block];
+            if (!is_biallelic_desc_for_export(desc))
+                continue;
+
+            fill_n(decomp_data, full_vec_len * 2, 0);
+            for (uint32_t cb = 0; cb < n_col_blocks; ++cb)
+            {
+                const uint32_t col_block_size = decompression_reader.col_block_ranges[cb].second;
+                const uint32_t col_vec_len = static_cast<uint32_t>(decompression_reader.col_block_vec_lens[cb]);
+                const uint64_t pair_index = pair_base + static_cast<uint64_t>(cb) * block_variants + var_in_block;
+
+                fill_n(col_decomp_perm.data(), col_vec_len * 2, 0);
+                decoded_vector_row(pair_index * 2, 0, curr_non_copy_vec_id_offset, col_vec_len, 0, col_decomp_perm.data());
+                decoded_vector_row(pair_index * 2 + 1, 0, curr_non_copy_vec_id_offset, col_vec_len, col_vec_len, col_decomp_perm.data());
+
+                fill_n(col_decomp.data(), col_vec_len * 2, 0);
+                decode_perm_rev(col_vec_len, col_vec_len, col_block_size, sort_perm_io[block_id][cb],
+                                col_decomp_perm.data(), col_decomp.data());
+
+                const uint32_t start_hap = decompression_reader.col_block_ranges[cb].first;
+                insert_block_bits(decomp_data, col_decomp.data(), full_vec_len, start_hap, col_block_size);
+                insert_block_bits(decomp_data + full_vec_len, col_decomp.data() + col_vec_len, full_vec_len, start_hap, col_block_size);
+            }
+
+            // Identifying data
+            const std::string varid = desc.id.empty() ? "." : desc.id;
+            const std::string rsid = varid;
+            const std::string chrom = desc.chrom;
+            const uint32_t pos = desc.pos;
+            const std::string ref = desc.ref;
+            const std::string alt = desc.alt;
+
+            out_bgen.WriteUInt(static_cast<uint16_t>(varid.size()), 2);
+            out_bgen.Write(varid.c_str(), varid.size());
+            out_bgen.WriteUInt(static_cast<uint16_t>(rsid.size()), 2);
+            out_bgen.Write(rsid.c_str(), rsid.size());
+            out_bgen.WriteUInt(static_cast<uint16_t>(chrom.size()), 2);
+            out_bgen.Write(chrom.c_str(), chrom.size());
+            out_bgen.WriteUInt(pos, 4);
+
+            out_bgen.WriteUInt(static_cast<uint16_t>(2), 2); // allele_count
+            out_bgen.WriteUInt(static_cast<uint32_t>(ref.size()), 4);
+            out_bgen.Write(ref.c_str(), ref.size());
+            out_bgen.WriteUInt(static_cast<uint32_t>(alt.size()), 4);
+            out_bgen.Write(alt.c_str(), alt.size());
+
+            // Uncompressed genotype data (Layout 2)
+            uncompressed[0] = static_cast<uint8_t>(n_samples & 0xFFu);
+            uncompressed[1] = static_cast<uint8_t>((n_samples >> 8) & 0xFFu);
+            uncompressed[2] = static_cast<uint8_t>((n_samples >> 16) & 0xFFu);
+            uncompressed[3] = static_cast<uint8_t>((n_samples >> 24) & 0xFFu);
+
+            const size_t ploidy_off = 4;
+            const size_t phased_off = ploidy_off + n_samples;
+            const size_t b_off = phased_off + 1;
+            const size_t prob_off = b_off + 1;
+
+            uncompressed[phased_off] = 0;
+            uncompressed[b_off] = 8;
+
+            const uint8_t* bvec0 = decomp_data;
+            const uint8_t* bvec1 = decomp_data + full_vec_len;
+            const uint32_t full_bytes = n_samples / 4;
+            const uint32_t rem = n_samples % 4;
+
+            for (uint32_t i = 0; i < full_bytes; ++i)
+            {
+                const uint8_t p0 = bvec0[i];
+                const uint8_t p1 = bvec1[i];
+                memcpy(uncompressed.data() + ploidy_off + i * 4, gsc_to_bgen_ploidy[p0][p1], 4);
+                memcpy(uncompressed.data() + prob_off + i * 8, gsc_to_bgen_prob[p0][p1], 8);
+            }
+            if (rem)
+            {
+                const uint8_t p0 = bvec0[full_bytes];
+                const uint8_t p1 = bvec1[full_bytes];
+                memcpy(uncompressed.data() + ploidy_off + full_bytes * 4, gsc_to_bgen_ploidy[p0][p1], rem);
+                memcpy(uncompressed.data() + prob_off + full_bytes * 8, gsc_to_bgen_prob[p0][p1], rem * 2);
+            }
+
+            // Compress with zlib
+            vector<uint8_t> compressed;
+            compressed.resize(compressBound(uncompressed.size()));
+            uLongf compressed_size = compressed.size();
+            const int zres = compress2(compressed.data(), &compressed_size,
+                                       uncompressed.data(), uncompressed.size(),
+                                       Z_BEST_SPEED);
+            if (zres != Z_OK)
+            {
+                logger->error("BGEN zlib compression failed (zres={})", zres);
+                max_stored_unique = saved_max_stored_unique;
+                return 1;
+            }
+
+            const uint32_t comp_len = static_cast<uint32_t>(compressed_size) + 4;
+            const uint32_t uncomp_len = static_cast<uint32_t>(uncompressed.size());
+            out_bgen.WriteUInt(comp_len, 4);
+            out_bgen.WriteUInt(uncomp_len, 4);
+            out_bgen.Write(compressed.data(), static_cast<size_t>(compressed_size));
+
+            ++export_variant_count_;
+        }
+        pair_base += static_cast<uint64_t>(block_variants) * n_col_blocks;
+    }
+
+    for (auto &it : done_unique)
+        delete[] it.second;
+    done_unique.clear();
+
+    max_stored_unique = saved_max_stored_unique;
+    return 0;
 }
 
 //*****************************************************************************************************************
@@ -3297,43 +3947,69 @@ bool Decompressor::OpenForWriting()
 
     if (out_file_name != "-")
     {
-        // char *gz_fname = (char *)malloc(strlen(out_file_name.c_str()) + 5);
-
         if (out_type == file_type::VCF_File)
         {
-            // snprintf(gz_fname, strlen(out_file_name.c_str()) + 5, "%s.vcf", out_file_name.c_str());
-            // out_file = hts_open(gz_fname, "w");
             const std::string vcf_mode = vcf_write_mode(out_file_name, compression_level);
             out_file = hts_open(out_file_name.c_str(), vcf_mode.c_str());
-            
         }
         else if(out_type == file_type::BCF_File)
         {
-
-            // snprintf(gz_fname, strlen(out_file_name.c_str()) + 5, "%s.bcf", out_file_name.c_str());
-            // out_file = hts_open(gz_fname, write_mode);
             out_file = hts_open(out_file_name.c_str(), write_mode);
-            
         }
-        else{
-            
+        else if (out_type == file_type::BED_File)
+        {
             if(!out_fam.Open(out_file_name + ".fam" , "w"))
 	        {
-		        cerr << "Cannot open " << out_file_name << ".fam file\n";
+                logger->error("Cannot open {}.fam", out_file_name);
 		        return false;
 	        }
             if(!out_bim.Open(out_file_name + ".bim" , "w"))
 	        {
-		        cerr << "Cannot open " << out_file_name << ".bim file\n";
+                logger->error("Cannot open {}.bim", out_file_name);
 		        return false;
 	        }
             if(!out_bed.Open(out_file_name + ".bed" , "wb"))
 	        {
-		        cerr << "Cannot open " << out_file_name << ".bed file\n";
+                logger->error("Cannot open {}.bed", out_file_name);
 		        return false;
 	        }
         }
-        // free(out_file_name);
+        else if (out_type == file_type::PGEN_File)
+        {
+            if(!out_pgen.Open(out_file_name + ".pgen" , "wb"))
+            {
+                logger->error("Cannot open {}.pgen", out_file_name);
+                return false;
+            }
+            if(!out_pvar.Open(out_file_name + ".pvar" , "w"))
+            {
+                logger->error("Cannot open {}.pvar", out_file_name);
+                return false;
+            }
+            if(!out_psam.Open(out_file_name + ".psam" , "w"))
+            {
+                logger->error("Cannot open {}.psam", out_file_name);
+                return false;
+            }
+        }
+        else if (out_type == file_type::BGEN_File)
+        {
+            if(!out_bgen.Open(out_file_name + ".bgen" , "wb"))
+            {
+                logger->error("Cannot open {}.bgen", out_file_name);
+                return false;
+            }
+            if(!out_sample.Open(out_file_name + ".sample" , "w"))
+            {
+                logger->error("Cannot open {}.sample", out_file_name);
+                return false;
+            }
+        }
+        else if (out_type == file_type::GDS_File)
+        {
+            logger->error("--make-gds is not implemented in the core binary; please convert via VCF + SeqArray.");
+            return false;
+        }
     }
     else
     {
@@ -3342,29 +4018,18 @@ bool Decompressor::OpenForWriting()
             const std::string vcf_mode = vcf_write_mode(out_file_name, compression_level);
             out_file = hts_open("-", vcf_mode.c_str());
         }
-
         else if(out_type == file_type::BCF_File)
+        {
             out_file = hts_open("-", write_mode);
-        else{
-            if(!out_fam.Open("-" , "w"))
-	        {
-
-		        return false;
-	        }
-            if(!out_bim.Open("-" , "w"))
-	        {
-		        
-		        return false;
-	        }
-            if(!out_bed.Open("-" , "wb"))
-	        {
-		        
-		        return false;
-	        }
-        } 
-
+        }
+        else
+        {
+            logger->error("This output format requires --out <prefix> (cannot write to stdout).");
+            return false;
+        }
     }
-    if(out_type != file_type::BED_File){
+
+    if(out_type == file_type::VCF_File || out_type == file_type::BCF_File){
         if (!out_file){
             logger->error("Could not open output file {}", out_file_name);
             return false;
@@ -3410,6 +4075,43 @@ int Decompressor::initOutSplitFile(){
     }
     return 0;
 }
+
+void Decompressor::writeBgenHeaderAndSampleBlock()
+{
+    // BGEN v1.2, layout 2, zlib-compressed SNP blocks, with sample identifiers.
+    const uint32_t sample_count = decompression_reader.n_samples;
+    const uint32_t free_data_length = 0;
+    const uint32_t header_length = 20 + free_data_length;
+    const uint32_t flags = (1u << 0) | (2u << 2) | (1u << 31);
+
+    // Sample identifier block size in bytes (including sample_count field).
+    uint32_t sample_block_size = 8; // block_length (4) + sample_count (4)
+    for (const auto& s : v_samples)
+        sample_block_size += 2 + static_cast<uint32_t>(s.size());
+
+    // First variant block absolute offset from file start.
+    const uint32_t offset = 4 + 4 + header_length + sample_block_size;
+
+    out_bgen.WriteUInt(offset, 4);
+    out_bgen.WriteUInt(header_length, 4);
+    out_bgen.WriteUInt(0, 4); // variant_count placeholder; patched on close
+    out_bgen.WriteUInt(sample_count, 4);
+    out_bgen.Write("bgen", 4);
+    out_bgen.WriteUInt(free_data_length, 4);
+    out_bgen.WriteUInt(flags, 4);
+
+    // Sample identifier block
+    uint32_t block_length = 4; // sample_count
+    for (const auto& s : v_samples)
+        block_length += 2 + static_cast<uint32_t>(s.size());
+    out_bgen.WriteUInt(block_length, 4);
+    out_bgen.WriteUInt(sample_count, 4);
+    for (const auto& s : v_samples)
+    {
+        out_bgen.WriteUInt(static_cast<uint16_t>(s.size()), 2);
+        out_bgen.Write(s.c_str(), s.size());
+    }
+}
 // *****************************************************************************************************************
 void Decompressor::WriteBEDMagicNumbers() {
 
@@ -3423,6 +4125,7 @@ void Decompressor::WriteBEDMagicNumbers() {
 }
 int Decompressor::initOut()
 {
+    export_variant_count_ = 0;
     if(out_type == file_type::BED_File){
         string str = "";
         smpl.get_all_samples(str);
@@ -3437,6 +4140,41 @@ int Decompressor::initOut()
             out_fam.Write(fam_line.c_str(), fam_line.size());
         }
         WriteBEDMagicNumbers();
+    }
+    else if (out_type == file_type::PGEN_File)
+    {
+        auto logger = LogManager::Instance().Logger();
+        logger->warn("PGEN output is experimental; validate with plink2 before use.");
+
+        // PGEN header (minimal placeholder; variant_count patched on close)
+        out_pgen.PutByte(0x6C);
+        out_pgen.PutByte(0x1B);
+        out_pgen.PutByte(0x02);
+        out_pgen.WriteUInt(0, 4); // variant_count placeholder
+        out_pgen.WriteUInt(decompression_reader.n_samples, 4);
+
+        out_pvar.Write("#CHROM\tPOS\tID\tREF\tALT\n", sizeof("#CHROM\tPOS\tID\tREF\tALT\n") - 1);
+        out_psam.Write("#IID\n", 5);
+        for (const auto& sample : v_samples)
+        {
+            std::string line = sample + "\n";
+            out_psam.Write(line.c_str(), line.size());
+        }
+    }
+    else if (out_type == file_type::BGEN_File)
+    {
+        auto logger = LogManager::Instance().Logger();
+        logger->warn("BGEN output is experimental; validate with bgenix/qctool before use.");
+
+        out_sample.Write("ID_1 ID_2 missing\n", sizeof("ID_1 ID_2 missing\n") - 1);
+        out_sample.Write("0 0 0\n", 6);
+        for (const auto& sample : v_samples)
+        {
+            std::string line = sample + " " + sample + " 0\n";
+            out_sample.Write(line.c_str(), line.size());
+        }
+
+        writeBgenHeaderAndSampleBlock();
     }
     else{
         header += "#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\tFORMAT"; 
