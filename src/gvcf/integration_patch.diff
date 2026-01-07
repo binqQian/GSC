@@ -1,0 +1,44 @@
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -76,6 +76,12 @@ set(SOURCES
+     src/logger.cpp
+     src/compression_strategy.cpp
+     include/cpp-mmf/memory_mapped_file.cpp
++
++    # gVCF compression module
++    src/gvcf/gvcf_encoding.cpp
++    src/gvcf/gvcf_block.cpp
++    src/gvcf/gvcf_field_compress.cpp
++    src/gvcf/gvcf_field_decompress.cpp
+ )
+
+ add_executable(gsc ${SOURCES})
+@@ -85,6 +91,7 @@ target_include_directories(gsc
+         ${CMAKE_SOURCE_DIR}/include
+         ${CMAKE_SOURCE_DIR}/include/cpp-mmf
+         ${CMAKE_SOURCE_DIR}/src/fmt_compress
++        ${CMAKE_SOURCE_DIR}/src/gvcf
+ )
+
+ target_compile_options(gsc PRIVATE ${COMMON_COMPILE_FLAGS})
+
+diff --git a/src/gsc_params.h b/src/gsc_params.h
+--- a/src/gsc_params.h
++++ b/src/gsc_params.h
+@@ -85,6 +85,9 @@ struct GSC_Params
+     float minAF, maxAF;
+     float min_qual, max_qual;
+     std::string out_id;
++
++    // gVCF specific options
++    bool gvcf_mode;
+
+     GSC_Params()
+     {
+@@ -127,6 +130,7 @@ struct GSC_Params
+         minAF = 0;
+         maxAF = 1;
++        gvcf_mode = false;
+     }
+ };

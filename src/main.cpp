@@ -25,6 +25,8 @@
 
 #include "logger.h"
 
+#include "gvcf/gvcf_compressor.h"
+
 // #include <algorithm>
 
 #include <cstdio>
@@ -55,6 +57,10 @@ int compress_entry();
 
 int decompress_entry();
 
+int gvcf_compress_entry();
+
+int gvcf_decompress_entry();
+
 int params_options(int argc, const char *argv[]);
 
 void decom(Decompressor &decompressor);
@@ -76,8 +82,10 @@ int usage()
     auto logger = LogManager::Instance().Logger();
     logger->info("Usage: gsc [option] [arguments]");
     logger->info("Available options:");
-    logger->info("\tcompress - compress VCF/BCF file");
+    logger->info("\tcompress - compress VCF/BCF file (multi-sample)");
     logger->info("\tdecompress - query and decompress to VCF/BCF file");
+    logger->info("\tgvcf - compress single-sample gVCF file (optimized)");
+    logger->info("\tgvcf-decompress - decompress gVCF compressed file");
 
     exit(0);
 }
@@ -235,6 +243,18 @@ int main(int argc, const char *argv[])
             logger->error("Decompression error.");
     }
 
+    else if(params.task_mode == task_mode_t::mgvcf_compress){
+        result = gvcf_compress_entry();
+        if (result)
+            logger->error("gVCF compression error.");
+    }
+
+    else if(params.task_mode == task_mode_t::mgvcf_decompress){
+        result = gvcf_decompress_entry();
+        if (result)
+            logger->error("gVCF decompression error.");
+    }
+
     high_resolution_clock::time_point end = high_resolution_clock::now();
 
 	duration<double> time_duration = duration_cast<duration<double>>(end - start);
@@ -259,7 +279,13 @@ int params_options(int argc, const char *argv[]){
 
 	else if (string(argv[1]) == "decompress")
 		params.task_mode = task_mode_t::mdecompress;
-    
+
+    else if (string(argv[1]) == "gvcf")
+        params.task_mode = task_mode_t::mgvcf_compress;
+
+    else if (string(argv[1]) == "gvcf-decompress")
+        params.task_mode = task_mode_t::mgvcf_decompress;
+
     else
         return usage();
 
@@ -695,10 +721,55 @@ int params_options(int argc, const char *argv[]){
 
             logger->warn("Warning: No output file specified and no data provided via stdout!");
 
-        }        
-        
-    } 
-    return 1;  
+        }
+
+    }
+    // Parse gVCF compression options
+    else if(params.task_mode == task_mode_t::mgvcf_compress ||
+            params.task_mode == task_mode_t::mgvcf_decompress){
+
+        int i = 2;
+        for(; i < argc; ++i){
+
+            if (argv[i][0] != '-'){
+                break;
+            }
+
+            if (strcmp(argv[i], "--in") == 0 || strcmp(argv[i], "-i") == 0){
+                i++;
+                if (i >= argc)
+                    return usage();
+                params.in_file_name = string(argv[i]);
+            }
+            else if (strcmp(argv[i], "--out") == 0 || strcmp(argv[i], "-o") == 0){
+                i++;
+                if (i >= argc)
+                    return usage();
+                params.out_file_name = string(argv[i]);
+            }
+            else if (strcmp(argv[i], "--compressor") == 0){
+                i++;
+                if (i >= argc)
+                    return usage();
+                std::string backend_name = argv[i];
+                if (backend_name != "bsc" && backend_name != "zstd" && backend_name != "brotli") {
+                    logger->error("Unsupported compressor: {}", backend_name);
+                    return usage();
+                }
+                params.backend = parse_backend(backend_name);
+            }
+        }
+
+        if(params.in_file_name == "-"){
+            logger->error("Error: gVCF mode requires input file (-i)!");
+            return usage();
+        }
+        if(params.out_file_name == "-"){
+            logger->error("Error: gVCF mode requires output file (-o)!");
+            return usage();
+        }
+    }
+    return 1;
 }
  //**********************************************************************************************************************************
 
@@ -719,7 +790,7 @@ int compress_entry()
 //  Program decompression inlet
 int decompress_entry(){
 
-    // bool result = true;    
+    // bool result = true;
     if(params.out_type == file_type::BCF_File && params.out_file_name =="")
 
         return usage_decompress();
@@ -728,10 +799,53 @@ int decompress_entry(){
 
     // decompressor.getChrom();              //Obtaining chromosome information.
 
-       
+
     if(!decompressor.decompressProcess())
         return 1;
-        
+
+
+    return 0;
+}
+
+// *********************************************************************************************************************
+//  gVCF compression entry (single-sample optimized)
+int gvcf_compress_entry(){
+
+    auto logger = LogManager::Instance().Logger();
+    logger->info("Starting gVCF compression mode (single-sample optimized)");
+
+    gvcf::GVCFCompressor compressor(params);
+
+    if(!compressor.Compress()){
+        return 1;
+    }
+
+    const auto& stats = compressor.GetStatistics();
+    logger->info("Compressed {} variants, ratio: {:.2f}%",
+                stats.total_variants, stats.compression_ratio * 100.0f);
+
+    return 0;
+}
+
+// *********************************************************************************************************************
+//  gVCF decompression entry
+int gvcf_decompress_entry(){
+
+    auto logger = LogManager::Instance().Logger();
+    logger->info("Starting gVCF decompression mode");
+
+    // Check if input file is gVCF compressed format
+    if(!gvcf::IsGVCFCompressed(params.in_file_name)){
+        logger->error("Input file is not in gVCF compressed format");
+        logger->info("Use 'decompress' command for regular GSC files");
+        return 1;
+    }
+
+    gvcf::GVCFDecompressor decompressor(params);
+
+    if(!decompressor.Decompress()){
+        return 1;
+    }
 
     return 0;
 }
