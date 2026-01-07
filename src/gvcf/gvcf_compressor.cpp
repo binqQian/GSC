@@ -491,8 +491,8 @@ bool GVCFCompressor::WriteFileHeader() {
     // Write magic number
     fwrite(&GVCF_FILE_MAGIC, sizeof(uint32_t), 1, output_file_);
 
-    // Write version (V3 = compressed header)
-    uint32_t version = 3;
+    // Write version (V4 = block index for range query)
+    uint32_t version = GVCF_FILE_VERSION;
     fwrite(&version, sizeof(uint32_t), 1, output_file_);
 
     // Write compression backend (V2+)
@@ -552,6 +552,25 @@ bool GVCFCompressor::CompressAndWriteBlock(const GVCFBlock& block) {
     uint64_t offset = ftell(output_file_);
     block_offsets_.push_back(offset);
 
+    // Record block index (V4: for range query)
+    if (block.variant_count > 0) {
+        BlockIndex idx;
+        idx.chrom = block.position.chrom[0];
+        idx.start_pos = block.position.pos[0];
+
+        // End position: use END field of last record if available, otherwise use POS
+        uint32_t last_idx = block.variant_count - 1;
+        if (last_idx < block.info.end.size() && block.info.end[last_idx] > 0) {
+            idx.end_pos = block.info.end[last_idx];
+        } else {
+            idx.end_pos = block.position.pos[last_idx];
+        }
+
+        idx.file_offset = offset;
+        idx.variant_count = block.variant_count;
+        block_indices_.push_back(idx);
+    }
+
     // Compress block
     CompressedGVCFBlock compressed;
     GVCFBlockCompressor compressor(backend_, config_);
@@ -607,6 +626,24 @@ bool GVCFCompressor::WriteFileFooter() {
 
     // Write total variant count
     fwrite(&stats_.total_variants, sizeof(uint64_t), 1, output_file_);
+
+    // V4: Write block indices for range query
+    // Format: [num_indices] [for each: chrom_len, chrom, start_pos, end_pos, file_offset, variant_count]
+    uint32_t num_indices = static_cast<uint32_t>(block_indices_.size());
+    fwrite(&num_indices, sizeof(uint32_t), 1, output_file_);
+
+    for (const auto& idx : block_indices_) {
+        // Write chromosome name
+        uint32_t chrom_len = static_cast<uint32_t>(idx.chrom.size());
+        fwrite(&chrom_len, sizeof(uint32_t), 1, output_file_);
+        fwrite(idx.chrom.data(), 1, chrom_len, output_file_);
+
+        // Write positions and offset
+        fwrite(&idx.start_pos, sizeof(uint64_t), 1, output_file_);
+        fwrite(&idx.end_pos, sizeof(uint64_t), 1, output_file_);
+        fwrite(&idx.file_offset, sizeof(uint64_t), 1, output_file_);
+        fwrite(&idx.variant_count, sizeof(uint32_t), 1, output_file_);
+    }
 
     // Write footer offset at the end
     fwrite(&footer_offset, sizeof(uint64_t), 1, output_file_);
@@ -787,10 +824,11 @@ bool GVCFDecompressor::ReadFileHeader() {
     if (fread(&version, sizeof(uint32_t), 1, input_file_) != 1) {
         return false;
     }
-    if (version > 3) {  // Support up to V3
+    if (version > 4) {  // Support up to V4
         logger->error("Unsupported file version: {}", version);
         return false;
     }
+    file_version_ = version;
 
     // Read compression backend (V2+)
     compression_backend_t file_backend = compression_backend_t::zstd;  // V1 default
@@ -909,6 +947,43 @@ bool GVCFDecompressor::ReadFileHeader() {
     block_offsets_.resize(num_blocks_);
     if (fread(block_offsets_.data(), sizeof(uint64_t), num_blocks_, input_file_) != num_blocks_) {
         return false;
+    }
+
+    // Read total variant count
+    uint64_t total_variants;
+    if (fread(&total_variants, sizeof(uint64_t), 1, input_file_) != 1) {
+        return false;
+    }
+
+    // V4: Read block indices for range query
+    if (file_version_ >= 4) {
+        uint32_t num_indices;
+        if (fread(&num_indices, sizeof(uint32_t), 1, input_file_) != 1) {
+            return false;
+        }
+
+        block_indices_.resize(num_indices);
+        for (uint32_t i = 0; i < num_indices; i++) {
+            // Read chromosome name
+            uint32_t chrom_len;
+            if (fread(&chrom_len, sizeof(uint32_t), 1, input_file_) != 1) {
+                return false;
+            }
+            block_indices_[i].chrom.resize(chrom_len);
+            if (fread(&block_indices_[i].chrom[0], 1, chrom_len, input_file_) != chrom_len) {
+                return false;
+            }
+
+            // Read positions and offset
+            if (fread(&block_indices_[i].start_pos, sizeof(uint64_t), 1, input_file_) != 1 ||
+                fread(&block_indices_[i].end_pos, sizeof(uint64_t), 1, input_file_) != 1 ||
+                fread(&block_indices_[i].file_offset, sizeof(uint64_t), 1, input_file_) != 1 ||
+                fread(&block_indices_[i].variant_count, sizeof(uint32_t), 1, input_file_) != 1) {
+                return false;
+            }
+        }
+
+        logger->debug("Loaded {} block indices for range query", num_indices);
     }
 
     return true;
@@ -1141,6 +1216,493 @@ bool IsGVCFCompressed(const std::string& filename) {
 
     fclose(fp);
     return result;
+}
+
+// ============================================================================
+// GVCFQueryer Implementation
+// ============================================================================
+
+GVCFQueryer::GVCFQueryer(const std::string& input_file)
+    : input_filename_(input_file)
+    , input_file_(nullptr)
+    , num_blocks_(0)
+    , file_version_(0)
+    , total_variants_(0)
+{
+}
+
+GVCFQueryer::~GVCFQueryer() {
+    if (input_file_) {
+        fclose(input_file_);
+        input_file_ = nullptr;
+    }
+}
+
+bool GVCFQueryer::Open() {
+    auto logger = LogManager::Instance().Logger();
+
+    // Open input file
+    input_file_ = fopen(input_filename_.c_str(), "rb");
+    if (!input_file_) {
+        logger->error("Failed to open input file: {}", input_filename_);
+        return false;
+    }
+
+    // Read and verify magic number
+    uint32_t magic;
+    if (fread(&magic, sizeof(uint32_t), 1, input_file_) != 1 || magic != GVCF_FILE_MAGIC) {
+        logger->error("Invalid gVCF compressed file");
+        return false;
+    }
+
+    // Read version
+    if (fread(&file_version_, sizeof(uint32_t), 1, input_file_) != 1) {
+        return false;
+    }
+    if (file_version_ > 4) {
+        logger->error("Unsupported file version: {}", file_version_);
+        return false;
+    }
+
+    // Read compression backend
+    compression_backend_t file_backend = compression_backend_t::zstd;
+    if (file_version_ >= 2) {
+        uint8_t backend_id;
+        if (fread(&backend_id, sizeof(uint8_t), 1, input_file_) != 1) {
+            return false;
+        }
+        if (backend_id <= static_cast<uint8_t>(compression_backend_t::brotli)) {
+            file_backend = static_cast<compression_backend_t>(backend_id);
+        }
+    }
+
+    // Set backend for decompression
+    SetGVCFBackend(file_backend);
+    InitializeCompressionBackend(file_backend);
+
+    // Create backend adapter
+    auto decompress_fn = [](const std::vector<uint8_t>& input, std::vector<uint8_t>& output) -> bool {
+        if (input.empty()) {
+            output.clear();
+            return true;
+        }
+        return GVCFDecompressData(input.data(), input.size(), output);
+    };
+    auto decompress_ptr_fn = [](const uint8_t* input, size_t size, std::vector<uint8_t>& output) -> bool {
+        if (size == 0) {
+            output.clear();
+            return true;
+        }
+        return GVCFDecompressData(input, size, output);
+    };
+    backend_ = std::make_shared<GSCBackendAdapter>(nullptr, decompress_fn, decompress_ptr_fn);
+
+    // Read number of samples
+    uint32_t num_samples;
+    if (fread(&num_samples, sizeof(uint32_t), 1, input_file_) != 1) {
+        return false;
+    }
+
+    // Read header text
+    if (file_version_ >= 3) {
+        uint8_t header_flag;
+        if (fread(&header_flag, sizeof(uint8_t), 1, input_file_) != 1) {
+            return false;
+        }
+
+        if (header_flag == 1) {
+            uint32_t original_size, compressed_size;
+            if (fread(&original_size, sizeof(uint32_t), 1, input_file_) != 1 ||
+                fread(&compressed_size, sizeof(uint32_t), 1, input_file_) != 1) {
+                return false;
+            }
+            std::vector<uint8_t> compressed_data(compressed_size);
+            if (fread(compressed_data.data(), 1, compressed_size, input_file_) != compressed_size) {
+                return false;
+            }
+            EnsureGVCFStrategy();
+            std::vector<uint8_t> decompressed_data;
+            if (!g_gvcf_strategy || !g_gvcf_strategy->Decompress(compressed_data, decompressed_data)) {
+                return false;
+            }
+            header_text_.assign(decompressed_data.begin(), decompressed_data.end());
+        } else {
+            uint32_t header_size;
+            if (fread(&header_size, sizeof(uint32_t), 1, input_file_) != 1) {
+                return false;
+            }
+            header_text_.resize(header_size);
+            if (fread(&header_text_[0], 1, header_size, input_file_) != header_size) {
+                return false;
+            }
+        }
+    } else {
+        uint32_t header_size;
+        if (fread(&header_size, sizeof(uint32_t), 1, input_file_) != 1) {
+            return false;
+        }
+        header_text_.resize(header_size);
+        if (fread(&header_text_[0], 1, header_size, input_file_) != header_size) {
+            return false;
+        }
+    }
+
+    // Read sample names
+    sample_names_.clear();
+    for (uint32_t i = 0; i < num_samples; i++) {
+        uint32_t name_size;
+        if (fread(&name_size, sizeof(uint32_t), 1, input_file_) != 1) {
+            return false;
+        }
+        std::string name(name_size, '\0');
+        if (fread(&name[0], 1, name_size, input_file_) != name_size) {
+            return false;
+        }
+        sample_names_.push_back(name);
+    }
+
+    // Skip placeholder
+    uint64_t placeholder;
+    if (fread(&placeholder, sizeof(uint64_t), 1, input_file_) != 1) {
+        return false;
+    }
+
+    // Read footer
+    fseek(input_file_, -static_cast<long>(sizeof(uint64_t)), SEEK_END);
+    uint64_t footer_offset;
+    if (fread(&footer_offset, sizeof(uint64_t), 1, input_file_) != 1) {
+        return false;
+    }
+
+    fseek(input_file_, footer_offset, SEEK_SET);
+
+    // Read block count
+    if (fread(&num_blocks_, sizeof(uint32_t), 1, input_file_) != 1) {
+        return false;
+    }
+
+    // Read block offsets
+    block_offsets_.resize(num_blocks_);
+    if (fread(block_offsets_.data(), sizeof(uint64_t), num_blocks_, input_file_) != num_blocks_) {
+        return false;
+    }
+
+    // Read total variant count
+    if (fread(&total_variants_, sizeof(uint64_t), 1, input_file_) != 1) {
+        return false;
+    }
+
+    // V4: Read block indices for range query
+    if (file_version_ >= 4) {
+        uint32_t num_indices;
+        if (fread(&num_indices, sizeof(uint32_t), 1, input_file_) != 1) {
+            return false;
+        }
+
+        block_indices_.resize(num_indices);
+        for (uint32_t i = 0; i < num_indices; i++) {
+            uint32_t chrom_len;
+            if (fread(&chrom_len, sizeof(uint32_t), 1, input_file_) != 1) {
+                return false;
+            }
+            block_indices_[i].chrom.resize(chrom_len);
+            if (fread(&block_indices_[i].chrom[0], 1, chrom_len, input_file_) != chrom_len) {
+                return false;
+            }
+
+            if (fread(&block_indices_[i].start_pos, sizeof(uint64_t), 1, input_file_) != 1 ||
+                fread(&block_indices_[i].end_pos, sizeof(uint64_t), 1, input_file_) != 1 ||
+                fread(&block_indices_[i].file_offset, sizeof(uint64_t), 1, input_file_) != 1 ||
+                fread(&block_indices_[i].variant_count, sizeof(uint32_t), 1, input_file_) != 1) {
+                return false;
+            }
+        }
+
+        logger->info("Loaded {} block indices for range query", num_indices);
+    } else {
+        logger->warn("File version {} does not support range query (V4+ required)", file_version_);
+    }
+
+    return true;
+}
+
+std::vector<uint32_t> GVCFQueryer::FindBlocksInRange(const std::string& chrom,
+                                                      uint64_t start, uint64_t end) const {
+    std::vector<uint32_t> result;
+
+    for (uint32_t i = 0; i < block_indices_.size(); i++) {
+        const auto& idx = block_indices_[i];
+
+        // Check chromosome match
+        if (idx.chrom != chrom) {
+            continue;
+        }
+
+        // Check if block overlaps with query range
+        // Block range: [idx.start_pos, idx.end_pos]
+        // Query range: [start, end]
+        // Overlap condition: NOT (block_end < query_start OR query_end < block_start)
+        if (!(idx.end_pos < start || end < idx.start_pos)) {
+            result.push_back(i);
+        }
+    }
+
+    return result;
+}
+
+bool GVCFQueryer::ReadBlock(uint32_t block_id, GVCFBlock& block) {
+    auto logger = LogManager::Instance().Logger();
+
+    if (block_id >= block_offsets_.size()) {
+        logger->error("Invalid block_id {} (num_blocks={})", block_id, block_offsets_.size());
+        return false;
+    }
+
+    fseek(input_file_, block_offsets_[block_id], SEEK_SET);
+
+    // Read block size
+    uint32_t block_size;
+    if (fread(&block_size, sizeof(uint32_t), 1, input_file_) != 1) {
+        return false;
+    }
+
+    // Sanity check
+    if (block_size > 100 * 1024 * 1024) {
+        logger->error("Block size too large: {}", block_size);
+        return false;
+    }
+
+    // Read block data
+    std::vector<uint8_t> buffer(block_size);
+    if (fread(buffer.data(), 1, block_size, input_file_) != block_size) {
+        return false;
+    }
+
+    // Deserialize compressed block
+    CompressedGVCFBlock compressed;
+    if (!compressed.Deserialize(buffer)) {
+        return false;
+    }
+
+    // Decompress
+    GVCFBlockDecompressor decompressor(backend_);
+    return decompressor.Decompress(compressed, block);
+}
+
+bool GVCFQueryer::WriteVCFRecord(void* output_file, void* header,
+                                  const GVCFBlock& block, uint32_t idx) {
+    htsFile* out_fp = static_cast<htsFile*>(output_file);
+    bcf_hdr_t* hdr = static_cast<bcf_hdr_t*>(header);
+
+    if (!out_fp || !hdr) {
+        return false;
+    }
+
+    bcf1_t* rec = bcf_init1();
+    if (!rec) {
+        return false;
+    }
+
+    // Set CHROM and POS
+    rec->rid = bcf_hdr_name2id(hdr, block.position.chrom[idx].c_str());
+    if (rec->rid < 0) {
+        std::string contig_line = "##contig=<ID=" + block.position.chrom[idx] + ">";
+        bcf_hdr_append(hdr, contig_line.c_str());
+        bcf_hdr_sync(hdr);
+        rec->rid = bcf_hdr_name2id(hdr, block.position.chrom[idx].c_str());
+    }
+
+    rec->pos = block.position.pos[idx] - 1;
+
+    // Set ID
+    bcf_update_id(hdr, rec, block.position.id[idx].c_str());
+
+    // Set alleles
+    std::vector<const char*> alleles;
+    alleles.push_back(block.sequence.ref[idx].c_str());
+    for (const auto& alt : block.sequence.alt[idx]) {
+        alleles.push_back(alt.c_str());
+    }
+    bcf_update_alleles(hdr, rec, alleles.data(), alleles.size());
+
+    // Set QUAL
+    if (block.quality.qual[idx] >= 0) {
+        rec->qual = block.quality.qual[idx];
+    }
+
+    // Set FILTER
+    if (!block.quality.filter[idx].empty() && block.quality.filter[idx] != ".") {
+        int flt_id = bcf_hdr_id2int(hdr, BCF_DT_ID, block.quality.filter[idx].c_str());
+        if (flt_id >= 0) {
+            bcf_update_filter(hdr, rec, &flt_id, 1);
+        }
+    }
+
+    // Set INFO/END
+    if (idx < block.info.end.size() && block.info.end[idx] > 0) {
+        int32_t end_val = static_cast<int32_t>(block.info.end[idx]);
+        bcf_update_info_int32(hdr, rec, "END", &end_val, 1);
+    }
+
+    // Set GT
+    if (idx < block.sample.gt.size()) {
+        const auto& gt = block.sample.gt[idx];
+        int32_t gt_arr[2];
+        gt_arr[0] = (gt.allele1 < 0) ? bcf_gt_missing : bcf_gt_unphased(gt.allele1);
+        gt_arr[1] = (gt.allele2 < 0) ? bcf_gt_missing :
+                    (gt.phased ? bcf_gt_phased(gt.allele2) : bcf_gt_unphased(gt.allele2));
+        bcf_update_genotypes(hdr, rec, gt_arr, 2);
+    }
+
+    // Set DP
+    if (idx < block.sample.dp.size() && block.sample.dp[idx] >= 0) {
+        int32_t dp = block.sample.dp[idx];
+        bcf_update_format_int32(hdr, rec, "DP", &dp, 1);
+    }
+
+    // Set GQ
+    if (idx < block.sample.gq.size() && block.sample.gq[idx] >= 0) {
+        int32_t gq = block.sample.gq[idx];
+        bcf_update_format_int32(hdr, rec, "GQ", &gq, 1);
+    }
+
+    // Set MIN_DP
+    if (idx < block.sample.min_dp.size() && block.sample.min_dp[idx] >= 0) {
+        int32_t min_dp = block.sample.min_dp[idx];
+        bcf_update_format_int32(hdr, rec, "MIN_DP", &min_dp, 1);
+    }
+
+    // Set PL
+    if (idx < block.sample.pl.size() && !block.sample.pl[idx].empty()) {
+        bcf_update_format_int32(hdr, rec, "PL",
+                               block.sample.pl[idx].data(),
+                               block.sample.pl[idx].size());
+    }
+
+    // Set AD
+    if (idx < block.sample.ad.size() && !block.sample.ad[idx].empty()) {
+        bcf_update_format_int32(hdr, rec, "AD",
+                               block.sample.ad[idx].data(),
+                               block.sample.ad[idx].size());
+    }
+
+    int ret = bcf_write(out_fp, hdr, rec);
+    bcf_destroy1(rec);
+
+    return ret >= 0;
+}
+
+bool GVCFQueryer::QueryRange(const std::string& chrom, uint64_t start, uint64_t end,
+                              const std::string& output_file) {
+    auto logger = LogManager::Instance().Logger();
+
+    if (file_version_ < 4) {
+        logger->error("Range query requires file version 4 or higher (current: {})", file_version_);
+        return false;
+    }
+
+    // Find blocks that overlap with the query range
+    std::vector<uint32_t> block_ids = FindBlocksInRange(chrom, start, end);
+
+    if (block_ids.empty()) {
+        logger->info("No variants found in range {}:{}-{}", chrom, start, end);
+        // Create empty output file with header
+    }
+
+    logger->info("Found {} blocks overlapping with range {}:{}-{}", block_ids.size(), chrom, start, end);
+
+    // Determine output mode
+    std::string output_mode = "w";
+    if (output_file.size() > 4 && output_file.substr(output_file.size() - 4) == ".bcf") {
+        output_mode = "wb";
+    } else if ((output_file.size() > 7 && output_file.substr(output_file.size() - 7) == ".vcf.gz") ||
+               (output_file.size() > 3 && output_file.substr(output_file.size() - 3) == ".gz")) {
+        output_mode = "wz";
+    }
+
+    // Open output file
+    htsFile* out_fp = hts_open(output_file.c_str(), output_mode.c_str());
+    if (!out_fp) {
+        logger->error("Failed to open output file: {}", output_file);
+        return false;
+    }
+
+    // Create and write header
+    bcf_hdr_t* hdr = bcf_hdr_init("w");
+    std::istringstream iss(header_text_);
+    std::string line;
+    while (std::getline(iss, line)) {
+        if (line.empty()) continue;
+        if (line[0] == '#' && line[1] == '#') {
+            bcf_hdr_append(hdr, line.c_str());
+        } else if (line[0] == '#') {
+            std::istringstream header_iss(line);
+            std::string col;
+            int col_idx = 0;
+            while (std::getline(header_iss, col, '\t')) {
+                if (col_idx >= 9) {
+                    bcf_hdr_add_sample(hdr, col.c_str());
+                }
+                col_idx++;
+            }
+        }
+    }
+
+    if (bcf_hdr_sync(hdr) < 0) {
+        logger->error("Failed to sync header");
+        bcf_hdr_destroy(hdr);
+        hts_close(out_fp);
+        return false;
+    }
+
+    if (bcf_hdr_write(out_fp, hdr) < 0) {
+        logger->error("Failed to write header");
+        bcf_hdr_destroy(hdr);
+        hts_close(out_fp);
+        return false;
+    }
+
+    // Process each block
+    uint64_t output_count = 0;
+    for (uint32_t block_id : block_ids) {
+        GVCFBlock block;
+        if (!ReadBlock(block_id, block)) {
+            logger->error("Failed to read block {}", block_id);
+            bcf_hdr_destroy(hdr);
+            hts_close(out_fp);
+            return false;
+        }
+
+        // Write variants that fall within the query range
+        for (uint32_t i = 0; i < block.variant_count; i++) {
+            if (block.position.chrom[i] != chrom) {
+                continue;
+            }
+
+            uint64_t pos = block.position.pos[i];
+            uint64_t var_end = pos;
+            if (i < block.info.end.size() && block.info.end[i] > 0) {
+                var_end = block.info.end[i];
+            }
+
+            // Check if variant overlaps with query range
+            if (!(var_end < start || end < pos)) {
+                if (!WriteVCFRecord(out_fp, hdr, block, i)) {
+                    logger->error("Failed to write variant");
+                    bcf_hdr_destroy(hdr);
+                    hts_close(out_fp);
+                    return false;
+                }
+                output_count++;
+            }
+        }
+    }
+
+    bcf_hdr_destroy(hdr);
+    hts_close(out_fp);
+
+    logger->info("Query complete: {} variants output to {}", output_count, output_file);
+    return true;
 }
 
 } // namespace gvcf

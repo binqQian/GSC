@@ -18,11 +18,27 @@ namespace gvcf {
 
 // Magic number for gVCF compressed format (different from regular GSC)
 constexpr uint32_t GVCF_FILE_MAGIC = 0x47564346; // "GVCF"
-constexpr uint32_t GVCF_FILE_VERSION = 2;  // V2: added backend field
+constexpr uint32_t GVCF_FILE_VERSION = 4;  // V4: block index for range query
 
 // Backend selection functions
 void SetGVCFBackend(compression_backend_t backend);
 compression_backend_t GetGVCFBackend();
+
+/**
+ * Block index for range query support.
+ * Stores the genomic range covered by each block.
+ */
+struct BlockIndex {
+    std::string chrom;        // Chromosome name
+    uint64_t start_pos;       // Start position (1-based, inclusive)
+    uint64_t end_pos;         // End position (1-based, inclusive, using END field if available)
+    uint64_t file_offset;     // File offset to the block
+    uint32_t variant_count;   // Number of variants in the block
+
+    BlockIndex() : start_pos(0), end_pos(0), file_offset(0), variant_count(0) {}
+    BlockIndex(const std::string& c, uint64_t s, uint64_t e, uint64_t off, uint32_t cnt)
+        : chrom(c), start_pos(s), end_pos(e), file_offset(off), variant_count(cnt) {}
+};
 
 /**
  * gVCF Compressor - handles single-sample gVCF file compression
@@ -91,6 +107,7 @@ private:
     // Block tracking
     uint32_t current_block_id_;
     std::vector<uint64_t> block_offsets_;
+    std::vector<BlockIndex> block_indices_;  // V4: block index for range query
 
     // Sample info
     uint32_t num_samples_;
@@ -115,7 +132,7 @@ public:
     // Main decompression entry point
     bool Decompress();
 
-    // Query support
+    // Query support (deprecated, use GVCFQueryer instead)
     bool DecompressRange(const std::string& chrom, uint64_t start, uint64_t end);
 
 private:
@@ -139,7 +156,58 @@ private:
 
     // File metadata
     uint32_t num_blocks_;
+    uint32_t file_version_;  // V4: to handle version differences
     std::vector<uint64_t> block_offsets_;
+    std::vector<BlockIndex> block_indices_;  // V4: block index for range query
+    std::string header_text_;
+    std::vector<std::string> sample_names_;
+};
+
+/**
+ * gVCF Range Query - supports querying variants by genomic range
+ */
+class GVCFQueryer {
+public:
+    explicit GVCFQueryer(const std::string& input_file);
+    ~GVCFQueryer();
+
+    // Open file and read index
+    bool Open();
+
+    // Query variants in a range, output to file
+    bool QueryRange(const std::string& chrom, uint64_t start, uint64_t end,
+                   const std::string& output_file);
+
+    // Get block indices (for inspection)
+    const std::vector<BlockIndex>& GetBlockIndices() const { return block_indices_; }
+
+    // Get total variant count
+    uint64_t GetTotalVariants() const { return total_variants_; }
+
+private:
+    // Find blocks that overlap with the query range
+    std::vector<uint32_t> FindBlocksInRange(const std::string& chrom,
+                                            uint64_t start, uint64_t end) const;
+
+    // Read and decompress a specific block
+    bool ReadBlock(uint32_t block_id, GVCFBlock& block);
+
+    // Write VCF record
+    bool WriteVCFRecord(void* output_file, void* header,
+                       const GVCFBlock& block, uint32_t idx);
+
+    std::string input_filename_;
+    FILE* input_file_;
+
+    // Decompression context
+    std::shared_ptr<CompressionBackend> backend_;
+
+    // File metadata
+    uint32_t num_blocks_;
+    uint32_t file_version_;
+    uint64_t total_variants_;
+    std::vector<uint64_t> block_offsets_;
+    std::vector<BlockIndex> block_indices_;
     std::string header_text_;
     std::vector<std::string> sample_names_;
 };

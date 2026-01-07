@@ -61,6 +61,8 @@ int gvcf_compress_entry();
 
 int gvcf_decompress_entry();
 
+int gvcf_query_entry();
+
 int params_options(int argc, const char *argv[]);
 
 void decom(Decompressor &decompressor);
@@ -86,6 +88,7 @@ int usage()
     logger->info("\tdecompress - query and decompress to VCF/BCF file");
     logger->info("\tgvcf - compress single-sample gVCF file (optimized)");
     logger->info("\tgvcf-decompress - decompress gVCF compressed file");
+    logger->info("\tgvcf-query - query gVCF compressed file by range");
 
     exit(0);
 }
@@ -255,6 +258,12 @@ int main(int argc, const char *argv[])
             logger->error("gVCF decompression error.");
     }
 
+    else if(params.task_mode == task_mode_t::mgvcf_query){
+        result = gvcf_query_entry();
+        if (result)
+            logger->error("gVCF query error.");
+    }
+
     high_resolution_clock::time_point end = high_resolution_clock::now();
 
 	duration<double> time_duration = duration_cast<duration<double>>(end - start);
@@ -285,6 +294,9 @@ int params_options(int argc, const char *argv[]){
 
     else if (string(argv[1]) == "gvcf-decompress")
         params.task_mode = task_mode_t::mgvcf_decompress;
+
+    else if (string(argv[1]) == "gvcf-query")
+        params.task_mode = task_mode_t::mgvcf_query;
 
     else
         return usage();
@@ -769,6 +781,49 @@ int params_options(int argc, const char *argv[]){
             return usage();
         }
     }
+    // Parse gVCF query options
+    else if(params.task_mode == task_mode_t::mgvcf_query){
+
+        int i = 2;
+        for(; i < argc; ++i){
+
+            if (argv[i][0] != '-'){
+                break;
+            }
+
+            if (strcmp(argv[i], "--in") == 0 || strcmp(argv[i], "-i") == 0){
+                i++;
+                if (i >= argc)
+                    return usage();
+                params.in_file_name = string(argv[i]);
+            }
+            else if (strcmp(argv[i], "--out") == 0 || strcmp(argv[i], "-o") == 0){
+                i++;
+                if (i >= argc)
+                    return usage();
+                params.out_file_name = string(argv[i]);
+            }
+            else if (strcmp(argv[i], "--range") == 0 || strcmp(argv[i], "-r") == 0){
+                i++;
+                if (i >= argc)
+                    return usage();
+                params.range = string(argv[i]);
+            }
+        }
+
+        if(params.in_file_name == "-"){
+            logger->error("Error: gvcf-query requires input file (-i)!");
+            return usage();
+        }
+        if(params.out_file_name == "-"){
+            logger->error("Error: gvcf-query requires output file (-o)!");
+            return usage();
+        }
+        if(params.range.empty()){
+            logger->error("Error: gvcf-query requires range (-r chr:start-end)!");
+            return usage();
+        }
+    }
     return 1;
 }
  //**********************************************************************************************************************************
@@ -844,6 +899,74 @@ int gvcf_decompress_entry(){
     gvcf::GVCFDecompressor decompressor(params);
 
     if(!decompressor.Decompress()){
+        return 1;
+    }
+
+    return 0;
+}
+
+// *********************************************************************************************************************
+//  gVCF range query entry
+int gvcf_query_entry(){
+
+    auto logger = LogManager::Instance().Logger();
+    logger->info("Starting gVCF range query mode");
+
+    // Check if input file is gVCF compressed format
+    if(!gvcf::IsGVCFCompressed(params.in_file_name)){
+        logger->error("Input file is not in gVCF compressed format");
+        return 1;
+    }
+
+    // Parse range string: chr:start-end or chr:start,end
+    std::string range = params.range;
+    std::string chrom;
+    uint64_t start = 0, end = 0;
+
+    // Find chromosome separator
+    size_t colon_pos = range.find(':');
+    if (colon_pos == std::string::npos) {
+        logger->error("Invalid range format. Use chr:start-end (e.g., chr1:10000-20000)");
+        return 1;
+    }
+
+    chrom = range.substr(0, colon_pos);
+    std::string pos_range = range.substr(colon_pos + 1);
+
+    // Find position separator (- or ,)
+    size_t sep_pos = pos_range.find('-');
+    if (sep_pos == std::string::npos) {
+        sep_pos = pos_range.find(',');
+    }
+    if (sep_pos == std::string::npos) {
+        logger->error("Invalid range format. Use chr:start-end (e.g., chr1:10000-20000)");
+        return 1;
+    }
+
+    try {
+        start = std::stoull(pos_range.substr(0, sep_pos));
+        end = std::stoull(pos_range.substr(sep_pos + 1));
+    } catch (const std::exception& e) {
+        logger->error("Invalid position values in range: {}", e.what());
+        return 1;
+    }
+
+    if (start > end) {
+        std::swap(start, end);
+    }
+
+    logger->info("Query range: {}:{}-{}", chrom, start, end);
+
+    // Create queryer and execute
+    gvcf::GVCFQueryer queryer(params.in_file_name);
+
+    if (!queryer.Open()) {
+        logger->error("Failed to open input file");
+        return 1;
+    }
+
+    if (!queryer.QueryRange(chrom, start, end, params.out_file_name)) {
+        logger->error("Query failed");
         return 1;
     }
 

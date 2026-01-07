@@ -10,7 +10,8 @@ enum class task_mode_t
     mcompress,
     mdecompress,
     mgvcf_compress,      // gVCF-specific compression (single-sample)
-    mgvcf_decompress     // gVCF-specific decompression
+    mgvcf_decompress,    // gVCF-specific decompression
+    mgvcf_query          // gVCF range query
 };
 enum class compress_mode_t
 {
