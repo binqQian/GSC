@@ -4,7 +4,7 @@
  */
 
 #include "gvcf_field_decompress.h"
-#include "../logger.h"
+#include "logger.h"
 #include <cstring>
 
 namespace gvcf {

@@ -6,8 +6,8 @@
 #include "gvcf_compressor.h"
 #include "htslib/vcf.h"
 #include "htslib/hts.h"
-#include "../compression_strategy.h"
-#include "../logger.h"
+#include "compression_strategy.h"
+#include "logger.h"
 #include <algorithm>
 #include <cstring>
 #include <sstream>

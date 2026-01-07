@@ -25,18 +25,6 @@ enum class compression_backend_t
     zstd,
     brotli
 };
-enum class compress_mode_t
-{
-    lossly_mode,
-    lossless_mode
-    
-};
-enum class compression_backend_t
-{
-    bsc,
-    zstd,
-    brotli
-};
 enum class file_type
 {
     VCF_File,

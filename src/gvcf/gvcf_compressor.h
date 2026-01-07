@@ -12,7 +12,7 @@
 #include <memory>
 #include <cstdint>
 #include "gvcf.h"
-#include "../gsc_params.h"
+#include "gsc_params.h"
 
 namespace gvcf {
 

@@ -90,6 +90,7 @@ target_include_directories(gsc
     PRIVATE
         ${CMAKE_SOURCE_DIR}/include
         ${CMAKE_SOURCE_DIR}/include/cpp-mmf
+        ${CMAKE_SOURCE_DIR}/src
         ${CMAKE_SOURCE_DIR}/src/fmt_compress
         ${CMAKE_SOURCE_DIR}/src/gvcf
 )

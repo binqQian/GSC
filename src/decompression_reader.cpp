@@ -1,6 +1,6 @@
 #include "decompression_reader.h"
 #include "logger.h"
-#include "fmt_utils.h"
+#include "fmt_compress/fmt_utils.h"
 #include <algorithm>
 #include <chrono>
 #include <limits>

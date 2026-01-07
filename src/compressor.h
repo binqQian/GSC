@@ -13,7 +13,7 @@
 #include "queues.h"
 #include <tuple>
 #include "compression_strategy.h"
-#include "fmt_field_processor.h"
+#include "fmt_compress/fmt_field_processor.h"
 #include "field_stats.h"
 // #include <filesystem>
 using namespace std;

@@ -1,7 +1,7 @@
 #include "compression_reader.h"
 #include "logger.h"
-#include "fmt_utils.h"
-#include "vint_codec.h"
+#include "fmt_compress/fmt_utils.h"
+#include "fmt_compress/vint_codec.h"
 #include <iostream>
 #include <fstream>
 #include <sstream>
