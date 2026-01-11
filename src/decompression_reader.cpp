@@ -861,23 +861,25 @@ bool DecompressionReader::decompress_other_fileds(SPackage *pck)
 						Decoder(transposed, pck->v_data);
 					return true;
 				}
-					if (is_ad_field)
-					{
-						if (codec_id != 1 && codec_id != 2 && codec_id != 3 && codec_id != 4)
+						if (is_ad_field)
 						{
-							logger->error("Unsupported codec_id={} for FMT {} (INT)", (int)codec_id, field_name);
-							return false;
-						}
+							if (codec_id != 1 && codec_id != 2 && codec_id != 3 && codec_id != 4 && codec_id != 5)
+							{
+								logger->error("Unsupported codec_id={} for FMT {} (INT)", (int)codec_id, field_name);
+								return false;
+							}
 					}
-					else
-					{
-						// PL supports codec_id=3 (perm + dict tags) and codec_id=4 (baseline+delta+ratio + perm).
-						if (codec_id != 1 && codec_id != 2 && codec_id != 3 && codec_id != 4)
+						else
 						{
-							logger->error("Unsupported codec_id={} for FMT {} (INT)", (int)codec_id, field_name);
-							return false;
+							// PL supports codec_id=3 (perm + dict tags), codec_id=4 (baseline+delta+ratio + perm),
+							// codec_id=5 (like 4, but Tip10 delta/residual is 12-bit packed),
+							// codec_id=6 (like 4, but Type2/Type1 delta/residual are split into separate substreams).
+							if (codec_id != 1 && codec_id != 2 && codec_id != 3 && codec_id != 4 && codec_id != 5 && codec_id != 6)
+							{
+								logger->error("Unsupported codec_id={} for FMT {} (INT)", (int)codec_id, field_name);
+								return false;
+							}
 						}
-					}
 
 			auto decode_vint = [&](size_t &off, uint64_t &val) -> bool {
 				if (off >= v_tmp.size())
@@ -908,12 +910,12 @@ bool DecompressionReader::decompress_other_fileds(SPackage *pck)
 					std::vector<uint32_t> ad_baseline_ref;
 					uint32_t pl_block_size = 0;
 					std::vector<uint32_t> pl_baseline_a;
-					if (is_ad_field && (codec_id == 3 || codec_id == 4))
-					{
-						uint64_t bs = 0;
-					if (!decode_vint(in_off, bs))
-					{
-						logger->error("FMT AD codec_id={} missing block_size", (int)codec_id);
+						if (is_ad_field && (codec_id == 3 || codec_id == 4 || codec_id == 5))
+						{
+							uint64_t bs = 0;
+						if (!decode_vint(in_off, bs))
+						{
+							logger->error("FMT AD codec_id={} missing block_size", (int)codec_id);
 						return false;
 					}
 					if (bs == 0 || bs > 1'000'000)
@@ -921,25 +923,25 @@ bool DecompressionReader::decompress_other_fileds(SPackage *pck)
 						logger->error("FMT AD codec_id={} invalid block_size={}", (int)codec_id, (uint64_t)bs);
 						return false;
 					}
-						ad_block_size = (uint32_t)bs;
-						ad_baseline_ref.assign(n_samples_u32, 0);
-				}
-					if (is_pl_field && codec_id == 4)
-					{
-						uint64_t bs = 0;
-						if (!decode_vint(in_off, bs))
-						{
-							logger->error("FMT PL codec_id=4 missing block_size");
-							return false;
-						}
-						if (bs == 0 || bs > 1'000'000)
-						{
-							logger->error("FMT PL codec_id=4 invalid block_size={}", (uint64_t)bs);
-							return false;
-						}
-						pl_block_size = (uint32_t)bs;
-						pl_baseline_a.assign(n_samples_u32, 0);
+							ad_block_size = (uint32_t)bs;
+							ad_baseline_ref.assign(n_samples_u32, 0);
 					}
+						if (is_pl_field && (codec_id == 4 || codec_id == 5 || codec_id == 6))
+						{
+							uint64_t bs = 0;
+							if (!decode_vint(in_off, bs))
+							{
+								logger->error("FMT PL codec_id={} missing block_size", (int)codec_id);
+								return false;
+							}
+							if (bs == 0 || bs > 1'000'000)
+							{
+								logger->error("FMT PL codec_id={} invalid block_size={}", (int)codec_id, (uint64_t)bs);
+								return false;
+							}
+							pl_block_size = (uint32_t)bs;
+							pl_baseline_a.assign(n_samples_u32, 0);
+						}
 			size_t out_off = 0;
 
 			for (size_t rec_idx = 0; rec_idx < pck->v_size.size(); ++rec_idx)
@@ -971,11 +973,11 @@ bool DecompressionReader::decompress_other_fileds(SPackage *pck)
 							}
 						}
 					}
-						if (is_ad_field && codec_id == 4)
-						{
-							// Block boundary: read baselines (sum(AD)) for all samples.
-							if ((rec_idx % ad_block_size) == 0)
+							if (is_ad_field && (codec_id == 4 || codec_id == 5))
 							{
+								// Block boundary: read baselines (sum(AD)) for all samples.
+								if ((rec_idx % ad_block_size) == 0)
+								{
 							for (uint32_t s = 0; s < n_samples_u32; ++s)
 							{
 								uint64_t b = 0;
@@ -988,23 +990,23 @@ bool DecompressionReader::decompress_other_fileds(SPackage *pck)
 							}
 							}
 						}
-						if (is_pl_field && codec_id == 4)
-						{
-							// Block boundary: read baselines (a) for all samples.
-							if ((rec_idx % pl_block_size) == 0)
+							if (is_pl_field && (codec_id == 4 || codec_id == 5 || codec_id == 6))
 							{
-								for (uint32_t s = 0; s < n_samples_u32; ++s)
+								// Block boundary: read baselines (a) for all samples.
+								if ((rec_idx % pl_block_size) == 0)
+								{
+									for (uint32_t s = 0; s < n_samples_u32; ++s)
 								{
 									uint64_t b = 0;
-									if (!decode_vint(in_off, b))
-									{
-										logger->error("FMT PL codec_id=4 truncated baseline");
-										return false;
+										if (!decode_vint(in_off, b))
+										{
+											logger->error("FMT PL codec_id={} truncated baseline", (int)codec_id);
+											return false;
+										}
+										pl_baseline_a[s] = (uint32_t)b;
 									}
-									pl_baseline_a[s] = (uint32_t)b;
 								}
 							}
-						}
 
 					if (in_off + tip_bytes > v_tmp.size())
 					{
@@ -1014,13 +1016,14 @@ bool DecompressionReader::decompress_other_fileds(SPackage *pck)
 				const uint8_t *tips = v_tmp.data() + in_off;
 				in_off += tip_bytes;
 
-					size_t ad_payload_end = 0;
-					if (is_ad_field && (codec_id == 3 || codec_id == 4))
-					{
-						uint64_t payload_len = 0;
-						if (!decode_vint(in_off, payload_len))
+						size_t ad_payload_end = 0;
+						// codec_id=3/4/5 (AD): record-wise payload length.
+						if (is_ad_field && (codec_id == 3 || codec_id == 4 || codec_id == 5))
 						{
-							logger->error("FMT AD codec_id={} missing payload_len (rec_idx={})", (int)codec_id, rec_idx);
+							uint64_t payload_len = 0;
+							if (!decode_vint(in_off, payload_len))
+							{
+								logger->error("FMT AD codec_id={} missing payload_len (rec_idx={})", (int)codec_id, rec_idx);
 							return false;
 						}
 						ad_payload_end = in_off + (size_t)payload_len;
@@ -1032,18 +1035,18 @@ bool DecompressionReader::decompress_other_fileds(SPackage *pck)
 						}
 					}
 
-					// codec_id=3/4 (PL): optional per-record permutation data.
-					uint8_t perm_mode = 0;
-					const uint8_t *perm_present = nullptr;
-					const uint8_t *perm_vals = nullptr;
-					uint32_t perm_cnt = 0;
-					size_t perm_val_bytes = 0;
-					if (is_pl_field && (codec_id == 3 || codec_id == 4))
-					{
-						if (in_off >= v_tmp.size())
+						// codec_id=3/4/5/6 (PL): optional per-record permutation data.
+						uint8_t perm_mode = 0;
+						const uint8_t *perm_present = nullptr;
+						const uint8_t *perm_vals = nullptr;
+						uint32_t perm_cnt = 0;
+						size_t perm_val_bytes = 0;
+						if (is_pl_field && (codec_id == 3 || codec_id == 4 || codec_id == 5 || codec_id == 6))
 						{
-							logger->error("FMT PL codec_id={} payload truncated in perm_mode", (int)codec_id);
-							return false;
+							if (in_off >= v_tmp.size())
+							{
+								logger->error("FMT PL codec_id={} payload truncated in perm_mode", (int)codec_id);
+								return false;
 						}
 						perm_mode = v_tmp[in_off++];
 						if (perm_mode != 0)
@@ -1071,43 +1074,161 @@ bool DecompressionReader::decompress_other_fileds(SPackage *pck)
 							perm_vals = v_tmp.data() + in_off;
 							in_off += perm_val_bytes;
 						}
-					}
-
-					size_t pl_payload_end = 0;
-					if (is_pl_field && codec_id == 4)
-					{
-						uint64_t payload_len = 0;
-						if (!decode_vint(in_off, payload_len))
-						{
-							logger->error("FMT PL codec_id=4 missing payload_len (rec_idx={})", rec_idx);
-							return false;
 						}
-						pl_payload_end = in_off + (size_t)payload_len;
-						if (pl_payload_end > v_tmp.size())
-						{
-							logger->error("FMT PL codec_id=4 payload_len out of bounds (rec_idx={}, len={}, in_off={}, tmp_size={})",
-							              rec_idx, (uint64_t)payload_len, in_off, v_tmp.size());
-							return false;
-						}
-					}
 
-				uint32_t perm_idx = 0;
-				auto get_perm_for_sample = [&](uint32_t s) -> uint8_t {
-					if (!perm_present)
-						return 0;
+						// codec_id=5 (PL): 12-bit packed Tip10 values, length derived from tips.
+						const uint8_t *pl_packed_tip10 = nullptr;
+						size_t pl_packed_tip10_bytes = 0;
+						uint32_t pl_tip10_cnt = 0;
+						if (is_pl_field && codec_id == 5)
+						{
+							for (uint32_t s = 0; s < n_samples_u32; ++s)
+							{
+								const uint8_t t0 = get_bit(tips, (size_t)s * 2);
+								const uint8_t t1 = get_bit(tips, (size_t)s * 2 + 1);
+								if (t0 == 1 && t1 == 0)
+									++pl_tip10_cnt;
+							}
+							pl_packed_tip10_bytes = (((size_t)pl_tip10_cnt * 12u) + 7u) / 8u;
+							if (in_off + pl_packed_tip10_bytes > v_tmp.size())
+							{
+								logger->error("FMT PL codec_id=5 payload truncated in packed_tip10 (rec_idx={}, need_bytes={}, in_off={}, tmp_size={})",
+								              rec_idx, pl_packed_tip10_bytes, in_off, v_tmp.size());
+								return false;
+							}
+							pl_packed_tip10 = v_tmp.data() + in_off;
+							in_off += pl_packed_tip10_bytes;
+						}
+
+						size_t pl_payload_end = 0;
+						if (is_pl_field && (codec_id == 4 || codec_id == 5 || codec_id == 6))
+						{
+							uint64_t payload_len = 0;
+							if (!decode_vint(in_off, payload_len))
+							{
+								logger->error("FMT PL codec_id={} missing payload_len (rec_idx={})", (int)codec_id, rec_idx);
+								return false;
+							}
+							pl_payload_end = in_off + (size_t)payload_len;
+							if (pl_payload_end > v_tmp.size())
+							{
+								logger->error("FMT PL codec_id={} payload_len out of bounds (rec_idx={}, len={}, in_off={}, tmp_size={})",
+								              (int)codec_id, rec_idx, (uint64_t)payload_len, in_off, v_tmp.size());
+								return false;
+							}
+						}
+
+						// codec_id=5 (AD): payload starts with a delta substream length:
+						//   [len_delta][delta_zz...][fallback(tag/raw/dict)...]
+						const uint8_t *ad5_delta = nullptr;
+						size_t ad5_delta_len = 0;
+						size_t ad5_delta_off = 0;
+						if (is_ad_field && codec_id == 5)
+						{
+							uint64_t l = 0;
+							if (!decode_vint(in_off, l))
+							{
+								logger->error("FMT AD codec_id=5 missing delta_len (rec_idx={})", rec_idx);
+								return false;
+							}
+							ad5_delta_len = (size_t)l;
+							if (in_off + ad5_delta_len > ad_payload_end)
+							{
+								logger->error("FMT AD codec_id=5 delta_len out of bounds (rec_idx={}, len={}, in_off={}, payload_end={})",
+								              rec_idx, ad5_delta_len, in_off, ad_payload_end);
+								return false;
+							}
+							ad5_delta = v_tmp.data() + in_off;
+							in_off += ad5_delta_len; // advance to fallback region
+						}
+
+						// codec_id=6 (PL): split payload into substreams inside payload:
+						//   [len_type2][len_t10_delta][len_t10_residual][type2...][t10_delta...][t10_residual...][fallback...]
+						const uint8_t *pl6_type2 = nullptr;
+						size_t pl6_type2_len = 0, pl6_type2_off = 0;
+						const uint8_t *pl6_t10_delta = nullptr;
+						size_t pl6_t10_delta_len = 0, pl6_t10_delta_off = 0;
+						const uint8_t *pl6_t10_res = nullptr;
+						size_t pl6_t10_res_len = 0, pl6_t10_res_off = 0;
+						if (is_pl_field && codec_id == 6)
+						{
+							uint64_t l2 = 0, ld = 0, lr = 0;
+							if (!decode_vint(in_off, l2) || !decode_vint(in_off, ld) || !decode_vint(in_off, lr))
+								return false;
+							pl6_type2_len = (size_t)l2;
+							pl6_t10_delta_len = (size_t)ld;
+							pl6_t10_res_len = (size_t)lr;
+							const size_t need = pl6_type2_len + pl6_t10_delta_len + pl6_t10_res_len;
+							if (in_off + need > pl_payload_end)
+							{
+								logger->error("FMT PL codec_id=6 substreams out of bounds (rec_idx={}, in_off={}, need={}, payload_end={})",
+								              rec_idx, in_off, need, pl_payload_end);
+								return false;
+							}
+							pl6_type2 = v_tmp.data() + in_off;
+							in_off += pl6_type2_len;
+							pl6_t10_delta = v_tmp.data() + in_off;
+							in_off += pl6_t10_delta_len;
+							pl6_t10_res = v_tmp.data() + in_off;
+							in_off += pl6_t10_res_len;
+						}
+
+					uint32_t perm_idx = 0;
+					auto get_perm_for_sample = [&](uint32_t s) -> uint8_t {
+						if (!perm_present)
+							return 0;
 					if (!get_bit(perm_present, s))
 						return 0;
 					const size_t bit0 = (size_t)perm_idx * 2;
 					const uint8_t b0 = get_bit(perm_vals, bit0);
 					const uint8_t b1 = get_bit(perm_vals, bit0 + 1);
 					++perm_idx;
-					return (uint8_t)(b0 | (b1 << 1));
-				};
+						return (uint8_t)(b0 | (b1 << 1));
+					};
 
-				int32_t *out = reinterpret_cast<int32_t *>(pck->v_data.data() + out_off);
-				for (uint32_t s = 0; s < n_samples_u32; ++s)
-				{
-					const uint8_t tip0 = get_bit(tips, (size_t)s * 2);
+					// codec_id=5 (PL): record-scope bit reader for packed Tip10 values.
+					size_t pl_packed_off = 0;
+					uint32_t pl_packed_bitbuf = 0;
+					uint32_t pl_packed_bitcnt = 0;
+					uint32_t pl_packed_values_read = 0;
+					auto read_pl_packed12 = [&](uint16_t &out) -> bool {
+						while (pl_packed_bitcnt < 12)
+						{
+							if (!pl_packed_tip10 || pl_packed_off >= pl_packed_tip10_bytes)
+								return false;
+							pl_packed_bitbuf |= (uint32_t)pl_packed_tip10[pl_packed_off++] << pl_packed_bitcnt;
+							pl_packed_bitcnt += 8;
+						}
+						out = (uint16_t)(pl_packed_bitbuf & 0x0FFFu);
+						pl_packed_bitbuf >>= 12;
+						pl_packed_bitcnt -= 12;
+						return true;
+					};
+
+					auto decode_pl6_vint = [&](const uint8_t *base, size_t len, size_t &off, uint64_t &val) -> bool {
+						if (!base || off >= len)
+							return false;
+						uint8_t l = fmt_compress::VintCodec::decode(base + off, val);
+						if (l == 0 || off + l > len)
+							return false;
+						off += l;
+						return true;
+					};
+
+					auto decode_ad5_vint = [&](uint64_t &val) -> bool {
+						if (!ad5_delta || ad5_delta_off >= ad5_delta_len)
+							return false;
+						uint8_t l = fmt_compress::VintCodec::decode(ad5_delta + ad5_delta_off, val);
+						if (l == 0 || ad5_delta_off + l > ad5_delta_len)
+							return false;
+						ad5_delta_off += l;
+						return true;
+					};
+
+					int32_t *out = reinterpret_cast<int32_t *>(pck->v_data.data() + out_off);
+					for (uint32_t s = 0; s < n_samples_u32; ++s)
+					{
+						const uint8_t tip0 = get_bit(tips, (size_t)s * 2);
 					const uint8_t tip1 = get_bit(tips, (size_t)s * 2 + 1);
 					int32_t *sv = out + (size_t)s * per_sample;
 
@@ -1220,11 +1341,11 @@ bool DecompressionReader::decompress_other_fileds(SPackage *pck)
 									}
 								}
 							}
-							else if (codec_id == 4)
-							{
-								// codec_id=4: baseline+delta on sum(AD) for common biallelic patterns.
-								if (tip0 == 0 && tip1 == 0)
+								else if (codec_id == 4)
 								{
+									// codec_id=4: baseline+delta on sum(AD) for common biallelic patterns.
+									if (tip0 == 0 && tip1 == 0)
+									{
 									for (uint32_t j = 0; j < per_sample; ++j) sv[j] = 0;
 									ad_baseline_ref[s] = 0;
 								}
@@ -1394,13 +1515,190 @@ bool DecompressionReader::decompress_other_fileds(SPackage *pck)
 										}
 										if (ok_sum)
 											ad_baseline_ref[s] = (uint32_t)std::min<uint64_t>(sum64, (uint64_t)UINT32_MAX);
+										}
 									}
 								}
+								else if (codec_id == 5)
+								{
+									// codec_id=5: like codec_id=4, but the ref/alt-only delta stream is separated from the fallback stream.
+									if (tip0 == 0 && tip1 == 0)
+									{
+										for (uint32_t j = 0; j < per_sample; ++j) sv[j] = 0;
+										ad_baseline_ref[s] = 0;
+									}
+									else if (tip0 == 0 && tip1 == 1)
+									{
+										// ref-only: sum == AD[0]
+										uint64_t zz = 0;
+										if (!decode_ad5_vint(zz))
+										{
+											logger->error("FMT AD codec_id=5 truncated delta in delta_stream (rec_idx={}, sample={})", rec_idx, s);
+											return false;
+										}
+										const int64_t diff = ((int64_t)(zz >> 1)) ^ (-(int64_t)(zz & 1u));
+										const uint32_t base_sum = ad_baseline_ref[s];
+										const int64_t sum = (int64_t)base_sum + diff;
+										if (sum < 0 || sum > (int64_t)UINT32_MAX)
+										{
+											logger->error("FMT AD codec_id=5 delta out of range (rec_idx={}, sample={}, base_sum={}, zz={}, diff={}, sum={})",
+											              rec_idx, s, base_sum, (uint64_t)zz, diff, sum);
+											return false;
+										}
+										if (per_sample > 0) assign_u32_bits(sv[0], (uint32_t)sum);
+										for (uint32_t j = 1; j < per_sample; ++j) sv[j] = 0;
+										ad_baseline_ref[s] = (uint32_t)sum;
+									}
+									else if (tip0 == 1 && tip1 == 0)
+									{
+										// alt-only: biallelic only (AD[1] == sum)
+										if (per_sample < 2)
+										{
+											logger->error("FMT AD codec_id=5 alt-only requires per_sample>=2 (rec_idx={}, sample={}, per_sample={})",
+											              rec_idx, s, per_sample);
+											return false;
+										}
+										uint64_t zz = 0;
+										if (!decode_ad5_vint(zz))
+										{
+											logger->error("FMT AD codec_id=5 truncated delta in delta_stream (rec_idx={}, sample={})", rec_idx, s);
+											return false;
+										}
+										const int64_t diff = ((int64_t)(zz >> 1)) ^ (-(int64_t)(zz & 1u));
+										const uint32_t base_sum = ad_baseline_ref[s];
+										const int64_t sum = (int64_t)base_sum + diff;
+										if (sum < 0 || sum > (int64_t)UINT32_MAX)
+										{
+											logger->error("FMT AD codec_id=5 delta out of range (rec_idx={}, sample={}, base_sum={}, zz={}, diff={}, sum={})",
+											              rec_idx, s, base_sum, (uint64_t)zz, diff, sum);
+											return false;
+										}
+										if (per_sample > 0) sv[0] = 0;
+										assign_u32_bits(sv[1], (uint32_t)sum);
+										for (uint32_t j = 2; j < per_sample; ++j) sv[j] = 0;
+										ad_baseline_ref[s] = (uint32_t)sum;
+									}
+									else
+									{
+										// tip11: tag-based (raw / sum+alt / dict) in fallback stream (global in_off)
+										uint64_t tag = 0;
+										if (!decode_vint(in_off, tag))
+										{
+											logger->error("FMT AD codec_id=5 truncated tag (rec_idx={}, sample={})", rec_idx, s);
+											return false;
+										}
+										if (tag == 0)
+										{
+											bool ok_sum = true;
+											uint64_t sum64 = 0;
+											for (uint32_t j = 0; j < per_sample; ++j)
+											{
+												uint64_t v = 0;
+												if (!decode_vint(in_off, v))
+												{
+													logger->error("FMT AD codec_id=5 truncated raw cell (rec_idx={}, sample={}, j={})", rec_idx, s, j);
+													return false;
+												}
+												assign_u32_bits(sv[j], (uint32_t)v);
+												const int32_t vv = sv[j];
+												if (vv == bcf_int32_missing || vv == bcf_int32_vector_end || vv < 0)
+													ok_sum = false;
+												else
+													sum64 += (uint64_t)(uint32_t)vv;
+											}
+											if (ok_sum)
+												ad_baseline_ref[s] = (uint32_t)std::min<uint64_t>(sum64, (uint64_t)UINT32_MAX);
+										}
+										else if (tag == 1)
+										{
+											// sum+alt encoding (biallelic)
+											if (per_sample < 2)
+											{
+												logger->error("FMT AD codec_id=5 tag=1 requires per_sample>=2 (rec_idx={}, sample={}, per_sample={})",
+												              rec_idx, s, per_sample);
+												return false;
+											}
+											uint64_t zz = 0;
+											if (!decode_vint(in_off, zz))
+											{
+												logger->error("FMT AD codec_id=5 truncated delta (rec_idx={}, sample={})", rec_idx, s);
+												return false;
+											}
+											uint64_t alt = 0;
+											if (!decode_vint(in_off, alt))
+											{
+												logger->error("FMT AD codec_id=5 truncated alt (rec_idx={}, sample={})", rec_idx, s);
+												return false;
+											}
+											const int64_t diff = ((int64_t)(zz >> 1)) ^ (-(int64_t)(zz & 1u));
+											const uint32_t base_sum = ad_baseline_ref[s];
+											const int64_t sum = (int64_t)base_sum + diff;
+											if (sum < 0 || sum > (int64_t)UINT32_MAX)
+											{
+												logger->error("FMT AD codec_id=5 delta out of range (rec_idx={}, sample={}, base_sum={}, zz={}, diff={}, sum={})",
+												              rec_idx, s, base_sum, (uint64_t)zz, diff, sum);
+												return false;
+											}
+											if (alt > (uint64_t)sum)
+											{
+												logger->error("FMT AD codec_id=5 alt>sum (rec_idx={}, sample={}, alt={}, sum={})", rec_idx, s, alt, sum);
+												return false;
+											}
+											const uint32_t ref = (uint32_t)((uint64_t)sum - alt);
+											assign_u32_bits(sv[0], ref);
+											assign_u32_bits(sv[1], (uint32_t)alt);
+											for (uint32_t j = 2; j < per_sample; ++j) sv[j] = 0;
+											ad_baseline_ref[s] = (uint32_t)sum;
+										}
+										else
+										{
+											if (!fmt_dictionaries_)
+											{
+												logger->error("FMT AD codec_id=5 requires dictionaries for tag>=2");
+												return false;
+											}
+											const uint32_t id = (uint32_t)(tag - 2);
+											const uint8_t *ptr = fmt_dictionaries_->getADItemPtr(id);
+											if (!ptr)
+											{
+												logger->error("FMT AD dict id={} not found", id);
+												return false;
+											}
+											const uint8_t item_total = (uint8_t)(ptr[0] + 1);
+											const uint8_t type = ptr[1];
+											const uint8_t *data = ptr + 2;
+											const uint32_t bytes_per = (type == 0) ? 1u : (type == 1) ? 2u : 4u;
+											if (2u + per_sample * bytes_per > item_total)
+											{
+												logger->error("FMT AD dict item too short (need {}, have {})", 2u + per_sample * bytes_per, (uint32_t)item_total);
+												return false;
+											}
+											uint64_t sum64 = 0;
+											bool ok_sum = true;
+											for (uint32_t j = 0; j < per_sample; ++j)
+											{
+												uint32_t u = 0;
+												if (type == 0)
+													u = data[j];
+												else if (type == 1)
+													u = reinterpret_cast<const uint16_t *>(data)[j];
+												else
+													u = reinterpret_cast<const uint32_t *>(data)[j];
+												assign_u32_bits(sv[j], u);
+												const int32_t vv = sv[j];
+												if (vv == bcf_int32_missing || vv == bcf_int32_vector_end || vv < 0)
+													ok_sum = false;
+												else
+													sum64 += (uint64_t)u;
+											}
+											if (ok_sum)
+												ad_baseline_ref[s] = (uint32_t)std::min<uint64_t>(sum64, (uint64_t)UINT32_MAX);
+										}
+									}
+								}
+								else if (tip0 == 0 && tip1 == 0)
+								{
+									for (uint32_t j = 0; j < per_sample; ++j) sv[j] = 0;
 							}
-							else if (tip0 == 0 && tip1 == 0)
-							{
-								for (uint32_t j = 0; j < per_sample; ++j) sv[j] = 0;
-						}
 						else if (tip0 == 0 && tip1 == 1)
 						{
 							if (per_sample > 0) sv[0] = 2;
@@ -1475,28 +1773,36 @@ bool DecompressionReader::decompress_other_fileds(SPackage *pck)
 								}
 							}
 						}
-							else
-							{
-								if (codec_id == 4)
+								else
 								{
-									// PL codec_id=4: baseline(a) + delta_a + residual(b-11*a) for biallelic len==3.
-									auto zigzag_decode = [](uint64_t zz) -> int64_t {
-										return ((int64_t)(zz >> 1)) ^ (-(int64_t)(zz & 1u));
-									};
-
-									if (tip0 == 0 && tip1 == 0)
+									if (codec_id == 4 || codec_id == 5 || codec_id == 6)
 									{
-										for (uint32_t j = 0; j < per_sample; ++j) sv[j] = 0;
+										// PL codec_id=4/5/6: baseline(a) + delta_a + residual(b-11*a) for biallelic len==3.
+										auto zigzag_decode = [](uint64_t zz) -> int64_t {
+											return ((int64_t)(zz >> 1)) ^ (-(int64_t)(zz & 1u));
+										};
+
+										if (tip0 == 0 && tip1 == 0)
+										{
+											for (uint32_t j = 0; j < per_sample; ++j) sv[j] = 0;
 										if (per_sample == 3) pl_baseline_a[s] = 0;
 									}
-									else if (tip0 == 0 && tip1 == 1)
-									{
-										// Type2: b = 15*a, store delta_a
-										uint64_t zz_a = 0;
-										if (!decode_vint(in_off, zz_a)) return false;
-										const int64_t delta_a = zigzag_decode(zz_a);
-										const int64_t a64 = (int64_t)pl_baseline_a[s] + delta_a;
-										if (a64 < 0 || a64 > (int64_t)UINT32_MAX) return false;
+										else if (tip0 == 0 && tip1 == 1)
+										{
+											// Type2: b = 15*a, store delta_a
+											uint64_t zz_a = 0;
+											if (codec_id == 6)
+											{
+												if (!decode_pl6_vint(pl6_type2, pl6_type2_len, pl6_type2_off, zz_a))
+													return false;
+											}
+											else
+											{
+												if (!decode_vint(in_off, zz_a)) return false;
+											}
+											const int64_t delta_a = zigzag_decode(zz_a);
+											const int64_t a64 = (int64_t)pl_baseline_a[s] + delta_a;
+											if (a64 < 0 || a64 > (int64_t)UINT32_MAX) return false;
 										const uint32_t a = (uint32_t)a64;
 										const uint64_t b64 = 15ull * (uint64_t)a;
 										if (b64 > (uint64_t)UINT32_MAX) return false;
@@ -1514,19 +1820,55 @@ bool DecompressionReader::decompress_other_fileds(SPackage *pck)
 											++b_count;
 										}
 										pl_baseline_a[s] = a;
-									}
-									else if (tip0 == 1 && tip1 == 0)
-									{
-										// Type1 ratio: store delta_a + residual (only defined for len==3)
-										if (per_sample != 3) return false;
-										uint64_t zz_a = 0, zz_r = 0;
-										if (!decode_vint(in_off, zz_a) || !decode_vint(in_off, zz_r)) return false;
-										const int64_t delta_a = zigzag_decode(zz_a);
-										const int64_t residual = zigzag_decode(zz_r);
-										const int64_t a64 = (int64_t)pl_baseline_a[s] + delta_a;
-										const int64_t b64 = 11ll * a64 + residual;
-										if (a64 < 0 || a64 > (int64_t)UINT32_MAX) return false;
-										if (b64 < 0 || b64 > (int64_t)UINT32_MAX) return false;
+										}
+										else if (tip0 == 1 && tip1 == 0)
+										{
+											// Type1 ratio: store delta_a + residual (only defined for len==3)
+											if (per_sample != 3) return false;
+											int64_t delta_a = 0;
+											int64_t residual = 0;
+											if (codec_id == 5)
+											{
+												uint16_t v12 = 0;
+												if (!read_pl_packed12(v12))
+													return false;
+												++pl_packed_values_read;
+												if (v12 == 0x0FFFu)
+												{
+													uint64_t zz_a = 0, zz_r = 0;
+													if (!decode_vint(in_off, zz_a) || !decode_vint(in_off, zz_r))
+														return false;
+													delta_a = zigzag_decode(zz_a);
+													residual = zigzag_decode(zz_r);
+												}
+												else
+												{
+													const uint8_t zz_a6 = (uint8_t)((v12 >> 6) & 0x3Fu);
+													const uint8_t zz_r6 = (uint8_t)(v12 & 0x3Fu);
+													delta_a = ((int64_t)(zz_a6 >> 1)) ^ (-(int64_t)(zz_a6 & 1u));
+													residual = ((int64_t)(zz_r6 >> 1)) ^ (-(int64_t)(zz_r6 & 1u));
+												}
+											}
+											else if (codec_id == 6)
+											{
+												uint64_t zz_a = 0, zz_r = 0;
+												if (!decode_pl6_vint(pl6_t10_delta, pl6_t10_delta_len, pl6_t10_delta_off, zz_a) ||
+												    !decode_pl6_vint(pl6_t10_res, pl6_t10_res_len, pl6_t10_res_off, zz_r))
+													return false;
+												delta_a = zigzag_decode(zz_a);
+												residual = zigzag_decode(zz_r);
+											}
+											else
+											{
+												uint64_t zz_a = 0, zz_r = 0;
+												if (!decode_vint(in_off, zz_a) || !decode_vint(in_off, zz_r)) return false;
+												delta_a = zigzag_decode(zz_a);
+												residual = zigzag_decode(zz_r);
+											}
+											const int64_t a64 = (int64_t)pl_baseline_a[s] + delta_a;
+											const int64_t b64 = 11ll * a64 + residual;
+											if (a64 < 0 || a64 > (int64_t)UINT32_MAX) return false;
+											if (b64 < 0 || b64 > (int64_t)UINT32_MAX) return false;
 										const uint32_t a = (uint32_t)a64;
 										const uint32_t b = (uint32_t)b64;
 										sv[0] = 0;
@@ -1706,12 +2048,12 @@ bool DecompressionReader::decompress_other_fileds(SPackage *pck)
 								}
 							}
 
-							// Undo codec_id=3/4 normalization for PL len==3: move the 0 back to its original index.
-							if (is_pl_field && (codec_id == 3 || codec_id == 4))
-							{
-								const uint8_t perm = get_perm_for_sample(s);
-								if (perm != 0 && per_sample == 3)
+								// Undo codec_id=3/4/5/6 normalization for PL len==3: move the 0 back to its original index.
+								if (is_pl_field && (codec_id == 3 || codec_id == 4 || codec_id == 5 || codec_id == 6))
 								{
+									const uint8_t perm = get_perm_for_sample(s);
+									if (perm != 0 && per_sample == 3)
+									{
 								const int32_t v0 = sv[0];
 								const int32_t v1 = sv[1];
 								const int32_t v2 = sv[2];
@@ -1729,24 +2071,69 @@ bool DecompressionReader::decompress_other_fileds(SPackage *pck)
 						}
 					}
 
-						if (is_ad_field && (codec_id == 3 || codec_id == 4))
-						{
-							if (in_off != ad_payload_end)
+							if (is_ad_field && (codec_id == 3 || codec_id == 4 || codec_id == 5))
 							{
-								logger->error("FMT AD codec_id={} record payload mismatch (rec_idx={}, in_off={}, payload_end={})",
-								              (int)codec_id, rec_idx, in_off, ad_payload_end);
-								return false;
-							}
-						}
-						if (is_pl_field && codec_id == 4)
-						{
-							if (in_off != pl_payload_end)
+								if (codec_id == 5 && ad5_delta_off != ad5_delta_len)
+								{
+									logger->error("FMT AD codec_id=5 delta stream mismatch (rec_idx={}, off={}, len={})",
+									              rec_idx, ad5_delta_off, ad5_delta_len);
+									return false;
+								}
+								if (in_off != ad_payload_end)
+								{
+									logger->error("FMT AD codec_id={} record payload mismatch (rec_idx={}, in_off={}, payload_end={})",
+									              (int)codec_id, rec_idx, in_off, ad_payload_end);
+									return false;
+								}
+								}
+							if (is_pl_field && codec_id == 4)
 							{
-								logger->error("FMT PL codec_id=4 record payload mismatch (rec_idx={}, in_off={}, payload_end={})",
-								              rec_idx, in_off, pl_payload_end);
-								return false;
+								if (in_off != pl_payload_end)
+								{
+									logger->error("FMT PL codec_id=4 record payload mismatch (rec_idx={}, in_off={}, payload_end={})",
+									              rec_idx, in_off, pl_payload_end);
+									return false;
+								}
 							}
-						}
+							if (is_pl_field && codec_id == 5)
+							{
+									if (pl_packed_values_read != pl_tip10_cnt)
+									{
+										logger->error("FMT PL codec_id=5 packed Tip10 mismatch (rec_idx={}, read={}, expected={})",
+										              rec_idx, pl_packed_values_read, pl_tip10_cnt);
+										return false;
+									}
+									if (pl_packed_off != pl_packed_tip10_bytes)
+									{
+										logger->error("FMT PL codec_id=5 packed bytes mismatch (rec_idx={}, off={}, bytes={})",
+										              rec_idx, pl_packed_off, pl_packed_tip10_bytes);
+										return false;
+									}
+									if (in_off != pl_payload_end)
+									{
+										logger->error("FMT PL codec_id=5 record payload mismatch (rec_idx={}, in_off={}, payload_end={})",
+										              rec_idx, in_off, pl_payload_end);
+									return false;
+								}
+							}
+							if (is_pl_field && codec_id == 6)
+							{
+								if (pl6_type2_off != pl6_type2_len || pl6_t10_delta_off != pl6_t10_delta_len || pl6_t10_res_off != pl6_t10_res_len)
+								{
+									logger->error("FMT PL codec_id=6 substream mismatch (rec_idx={}, t2_off/len={}/{}, d_off/len={}/{}, r_off/len={}/{})",
+									              rec_idx,
+									              pl6_type2_off, pl6_type2_len,
+									              pl6_t10_delta_off, pl6_t10_delta_len,
+									              pl6_t10_res_off, pl6_t10_res_len);
+									return false;
+								}
+								if (in_off != pl_payload_end)
+								{
+									logger->error("FMT PL codec_id=6 record payload mismatch (rec_idx={}, in_off={}, payload_end={})",
+									              rec_idx, in_off, pl_payload_end);
+									return false;
+								}
+							}
 
 					out_off += (size_t)total * 4;
 				}
