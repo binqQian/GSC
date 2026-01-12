@@ -106,7 +106,6 @@ Subset Top 5: (4,0): 5.45%  (5,0): 5.41%  (3,0): 5.35%  (6,0): 5.24%  (0,0): 5.2
 
 ```bash
 GSC_LOG_LEVEL=debug ./build/gsc compress --in toy/final_subset.vcf.gz --out tmp/adpl_review_bsc.gsc --compressor bsc
-GSC_LOG_LEVEL=debug ./build/gsc compress --in toy/final_subset.vcf.gz --out tmp/adpl_review_brotli.gsc --compressor brotli
 ```
 
 在 `toy/final_subset.vcf.gz`（500 samples, 1300 variants）上：Brotli 总体更小（约 923KB vs 1008KB），且 PL 仍占主要比例（约 71-72%）。
@@ -250,30 +249,9 @@ BWT 的块排序、MTF 转换等开销
 
 ## 3. 当前编码现状评估
 
-### 3.1 AD 编码 (codec_id=4)
+### 3.1 AD 编码（当前版本内置 codec_id=5）
 
-**当前策略（与代码实现对齐）**：
-
-```cpp
-// 代码位置（以当前 mainline 为准）:
-// - 编码: src/compressor.cpp（FMT AD special codec_id=4）
-// - 解码: src/decompression_reader.cpp（FMT AD codec_id=4）
-//
-// stream layout（codec_id=4, codec marker 后）:
-//   [block_size_vint]              // getenv("GSC_AD_BASELINE_BLOCK"), 默认 16384
-//   for each record:
-//     if (rec_idx % block_size == 0): [baseline_sum[s] vint] * n_samples
-//     [tip_bytes][payload_len_vint][payload...]
-//
-// Tips（2-bit）:
-//   00: all_zero                      -> no payload; baseline_sum=0
-//   01: ref_only (AD[1..]=0)          -> zigzag(delta_sum)               (sum vs baseline_sum)
-//   10: alt_only (biallelic, AD[0]=0) -> zigzag(delta_sum)               (sum vs baseline_sum)
-//   11: tag-based:
-//         tag=0: raw u32 bits (vint)
-//         tag=1: biallelic both non-zero -> [zigzag(delta_sum)][alt]      (lossless)
-//         tag>=2: dict_id = tag - 2      -> AD dictionary item (lossless)
-```
+实现细节见 3.1.1。
 
 **效果评估**：
 
@@ -296,8 +274,7 @@ BWT 的块排序、MTF 转换等开销
 // - 编码: src/compressor.cpp（FMT AD special codec_id=5）
 // - 解码: src/decompression_reader.cpp（FMT AD codec_id=5）
 //
-// 启用:
-//   GSC_AD_CODEC_ID=5
+// 当前版本内置（无需环境变量）
 //
 // stream layout（codec_id=5, codec marker 后）:
 //   [block_size_vint]
@@ -311,32 +288,7 @@ BWT 的块排序、MTF 转换等开销
 //   - fallback_stream: Tip 11 的 tag+payload（raw / sum+alt / dict），以及含缺失/特殊值的 raw
 ```
 
-### 3.2 PL 编码 (codec_id=4)
-
-**当前策略（与代码实现对齐）**：
-
-```cpp
-// 代码位置（以当前 mainline 为准）:
-// - 编码: src/compressor.cpp（FMT PL special codec_id=4）
-// - 解码: src/decompression_reader.cpp（FMT PL codec_id=4）
-//
-// stream layout（codec_id=4, codec marker 后）:
-//   [block_size_vint]              // getenv("GSC_PL_BLOCK_SIZE"), 默认 16384
-//   for each record:
-//     if (rec_idx % block_size == 0): [baseline_a[s] vint] * n_samples   // 仅 len==3 时有意义
-//     [tip_bytes]
-//     [perm_flag][perm_present?][perm_vals?]                             // len==3 && PL[0]!=0 时的 min-pos 归一化
-//     [payload_len_vint][payload...]
-//
-// Tips（2-bit）:
-//   00: all_zero
-//   01: Type2 (b=15*a)                   -> zigzag(delta_a)
-//   10: Type1 (len==3 且 |Δa|,|res|<=63)  -> zigzag(delta_a) + zigzag(residual)   // residual = b - 11*a
-//   11: tag-based:
-//         tag=0: raw u32 bits (vint)
-//         tag=1: pattern1 (a,b) fallback (超阈值时回退)
-//         tag>=2: dict_id = tag - 2
-```
+### 3.2 PL 编码（当前版本内置 codec_id=6）
 
 **效果评估**：
 
@@ -359,8 +311,7 @@ BWT 的块排序、MTF 转换等开销
 // - 编码: src/compressor.cpp（FMT PL special codec_id=6）
 // - 解码: src/decompression_reader.cpp（FMT PL codec_id=6）
 //
-// 启用:
-//   GSC_PL_CODEC_ID=6
+// 当前版本内置（无需环境变量）
 //
 // stream layout（codec_id=6, codec marker 后）:
 //   [block_size_vint]
@@ -382,14 +333,14 @@ BWT 的块排序、MTF 转换等开销
 
 ## 4. 优化方案
 
-### 4.1 PL 优化（已实现）：子流拆分 (codec_id=6)
+### 4.1 PL 优化（内置）：子流拆分 (codec_id=6)
 
 **结论（实测）**：相比 codec_id=4，codec_id=6 在 LC 数据集（BSC）上能显著降低 PL 字节数，并且总大小也更小；这是目前优先推荐的无损优化路径。
 
-**启用方式**：
+**启用方式（当前版本已内置，无需设置 codec 选择环境变量）**：
 
 ```bash
-GSC_PL_CODEC_ID=6 GSC_LOG_LEVEL=debug ./build/gsc compress --in $VCF --out $OUT --compressor bsc
+GSC_LOG_LEVEL=debug ./build/gsc compress --in $VCF --out $OUT --compressor bsc
 ```
 
 **实现要点**：将 Type2 的 `zigzag(Δa)`、Tip10 的 `zigzag(Δa)`、`zigzag(residual)` 拆成独立子流（见 3.2.1），把“高频小 varint”聚到一起，降低交错熵。
@@ -405,14 +356,14 @@ GSC_PL_CODEC_ID=6 GSC_LOG_LEVEL=debug ./build/gsc compress --in $VCF --out $OUT 
 
 `codec_id=5`（12-bit packed Tip10）在进入后端压缩前确实更紧凑，但在 LC 这类高熵数据上，bit-level 打包会破坏字节级重复结构，使 BSC/Brotli 更难压，实测整体会变差；因此不建议作为主路径（保留为对照/实验）。
 
-### 4.2 AD 优化（已实现）：Δsum 子流拆分 (codec_id=5)；候选：biallelic 杂合 `alt` 小值打包（无损）
+### 4.2 AD 优化（内置）：Δsum 子流拆分 (codec_id=5)
 
 #### 4.2.1 已实现：codec_id=5（Δsum 子流拆分）
 
-**启用方式**：
+**启用方式（当前版本已内置，无需设置 codec 选择环境变量）**：
 
 ```bash
-GSC_AD_CODEC_ID=5 GSC_LOG_LEVEL=debug ./build/gsc compress --in $VCF --out $OUT --compressor bsc
+GSC_LOG_LEVEL=debug ./build/gsc compress --in $VCF --out $OUT --compressor bsc
 ```
 
 **LC（46601×2560, BSC）对比（在 PL6 的前提下）**：
@@ -555,34 +506,27 @@ double estimateEntropy(const vector<uint8_t>& data) {
 
 ```bash
 # 压缩
-./build/gsc compress --in toy/final_subset.vcf.gz --out /tmp/test.gsc --compressor brotli
+./build/gsc compress --in toy/final_subset.vcf.gz --out tmp/test.gsc --compressor bsc
 
 # 解压
-./build/gsc decompress --in /tmp/test.gsc --out /tmp/test.vcf
+./build/gsc decompress --in tmp/test.gsc --out tmp/test.vcf
 
 # MD5 校验
 zcat toy/final_subset.vcf.gz | md5sum
-md5sum /tmp/test.vcf
+md5sum tmp/test.vcf
 # 必须一致
 ```
 
 ### 7.2 压缩率验证
 
 ```bash
-# 对比（LC 推荐先看 BSC）
-# Baseline: PL4 + AD4
-GSC_LOG_LEVEL=debug GSC_PL_CODEC_ID=4 GSC_AD_CODEC_ID=4 ./build/gsc compress \
-    --in /home/binq/data/1000GPi/lc_bams.first50000.vcf.gz \
-    --out /tmp/lc_pl4_ad4.gsc \
-    --compressor bsc
-
-# Optimized: PL6 + AD5
-GSC_LOG_LEVEL=debug GSC_PL_CODEC_ID=6 GSC_AD_CODEC_ID=5 ./build/gsc compress \
+# 当前版本已内置：PL6 + AD5（无损）
+GSC_LOG_LEVEL=debug ./build/gsc compress \
     --in /home/binq/data/1000GPi/lc_bams.first50000.vcf.gz \
     --out /tmp/lc_pl6_ad5.gsc \
     --compressor bsc
 
-# 查看 Field Compression Statistics
+# 查看 Field Compression Statistics（日志里会打印）
 ```
 
 ### 7.3 不同后端对比
@@ -591,10 +535,6 @@ GSC_LOG_LEVEL=debug GSC_PL_CODEC_ID=6 GSC_AD_CODEC_ID=5 ./build/gsc compress \
 # BSC
 ./build/gsc compress --in $VCF --out /tmp/test_bsc.gsc --compressor bsc
 ls -la /tmp/test_bsc.gsc
-
-# Brotli
-./build/gsc compress --in $VCF --out /tmp/test_brotli.gsc --compressor brotli
-ls -la /tmp/test_brotli.gsc
 ```
 
 ---
@@ -612,11 +552,11 @@ ls -la /tmp/test_brotli.gsc
 
 ### 8.2 优化路线图
 
-1. **已完成 (P0)**：PL 子流拆分（`GSC_PL_CODEC_ID=6`），对 LC/BSC 实测有效
-2. **已完成 (P1)**：AD Δsum 子流拆分（`GSC_AD_CODEC_ID=5`），在 PL6 基础上进一步降低 AD/TOTAL
+1. **已完成 (P0)**：PL 子流拆分（内置 codec_id=6），对 LC/BSC 实测有效
+2. **已完成 (P1)**：AD Δsum 子流拆分（内置 codec_id=5），在 PL6 基础上进一步降低 AD/TOTAL
 3. **后续 (P2)**：统计 AD 二等位杂合 `alt` 分布，评估 `alt` 小值打包（无损）
 4. **后续 (P4)**：自适应后端选择（数据依赖）
 
 ---
 
-*文档版本: 2026-01-11 (codec6+ad5 update)*
+*文档版本: 2026-01-12 (single built-in codec path)*
