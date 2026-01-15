@@ -1260,8 +1260,19 @@ void Compressor::compress_other_fileds(SPackage &pck, vector<uint8_t> &v_compres
 			            // - If encoding fails, emit codec_id=0 and store legacy transposed bytes.
 			            vector<uint8_t> ad_compressed;
 			            uint8_t vint_buf[16];
-			            // Built-in lossless AD codec: codec_id=5 (Δsum substream split).
-			            const uint8_t codec_id = 5;
+			            // Built-in lossless AD codec:
+			            // - codec_id=5: Δsum substream split (legacy)
+			            // - codec_id=7: Δsum substream split + packed alt values for biallelic sum+alt
+			            uint8_t ad_codec = 7;
+			            if (const char* env = std::getenv("GSC_AD_CODEC"))
+			            {
+			                char* endp = nullptr;
+			                long x = std::strtol(env, &endp, 10);
+			                if (endp && *endp == '\0' && (x == 5 || x == 7))
+			                    ad_codec = (uint8_t)x;
+			            }
+			            const uint8_t codec_id = ad_codec;
+			            const bool use_alt_pack = (codec_id == 7);
 			            const uint32_t block_size = 16384;
 
 	            bool ok = true;
@@ -1283,6 +1294,29 @@ void Compressor::compress_other_fileds(SPackage &pck, vector<uint8_t> &v_compres
 	                uint32_t u = 0;
 	                memcpy(&u, &v, sizeof(u));
 	                append_vint_u64((uint64_t)u, out);
+	            };
+	            auto append_alt_nibble = [&](uint8_t nib, std::vector<uint8_t>& out, uint32_t &count) {
+	                const uint32_t idx = count++;
+	                if ((idx & 1u) == 0)
+	                {
+	                    out.push_back((uint8_t)(nib & 0x0Fu));
+	                }
+	                else
+	                {
+	                    out.back() |= (uint8_t)((nib & 0x0Fu) << 4);
+	                }
+	            };
+	            auto append_alt_packed = [&](uint32_t alt, std::vector<uint8_t>& nibbles,
+	                                        std::vector<uint8_t>& escape, uint32_t &count) {
+	                if (alt < 15u)
+	                {
+	                    append_alt_nibble((uint8_t)alt, nibbles, count);
+	                }
+	                else
+	                {
+	                    append_alt_nibble(15u, nibbles, count);
+	                    append_vint_u32(alt, escape);
+	                }
 	            };
 		            auto try_build_ad_item = [&](const int32_t* sv, uint32_t cnt, fmt_compress::ADItem& item) -> bool {
 		                if (cnt == 0)
@@ -1377,10 +1411,18 @@ void Compressor::compress_other_fileds(SPackage &pck, vector<uint8_t> &v_compres
 		                tips.reserve((size_t)n_samples * 2);
 		                vector<uint8_t> payload;
 		                payload.reserve((size_t)total_elems);
-			                std::vector<uint8_t> ad5_delta;
-			                std::vector<uint8_t> ad5_fallback;
-			                ad5_delta.reserve(n_samples);
-			                ad5_fallback.reserve((size_t)total_elems / 8);
+		                std::vector<uint8_t> ad5_delta;
+		                std::vector<uint8_t> ad5_fallback;
+		                std::vector<uint8_t> ad5_alt_nibbles;
+		                std::vector<uint8_t> ad5_alt_escape;
+		                uint32_t ad5_alt_nibble_count = 0;
+		                ad5_delta.reserve(n_samples);
+		                ad5_fallback.reserve((size_t)total_elems / 8);
+		                if (use_alt_pack)
+		                {
+		                    ad5_alt_nibbles.reserve(n_samples / 2);
+		                    ad5_alt_escape.reserve(n_samples / 8);
+		                }
 
 		                for (uint32_t s = 0; s < n_samples; ++s)
 		                {
@@ -1460,7 +1502,15 @@ void Compressor::compress_other_fileds(SPackage &pck, vector<uint8_t> &v_compres
 				                            append_vint_u64(1, outp);
 				                            const int64_t diff = (int64_t)sum - (int64_t)baseline_sum[s];
 				                            append_zigzag_i64(diff, outp);
-				                            append_vint_u32((uint32_t)sv[1], outp);
+				                            if (use_alt_pack)
+				                            {
+				                                append_alt_packed((uint32_t)sv[1], ad5_alt_nibbles,
+				                                                  ad5_alt_escape, ad5_alt_nibble_count);
+				                            }
+				                            else
+				                            {
+				                                append_vint_u32((uint32_t)sv[1], outp);
+				                            }
 				                            baseline_sum[s] = sum;
 				                        }
 			                        else
@@ -1503,10 +1553,25 @@ void Compressor::compress_other_fileds(SPackage &pck, vector<uint8_t> &v_compres
 
 			                {
 			                    vector<uint8_t> ad5_payload;
-			                    ad5_payload.reserve(ad5_delta.size() + ad5_fallback.size() + 16);
-			                    append_vint_u32((uint32_t)ad5_delta.size(), ad5_payload);
-			                    ad5_payload.insert(ad5_payload.end(), ad5_delta.begin(), ad5_delta.end());
-			                    ad5_payload.insert(ad5_payload.end(), ad5_fallback.begin(), ad5_fallback.end());
+			                    if (use_alt_pack)
+			                    {
+			                        ad5_payload.reserve(ad5_delta.size() + ad5_alt_nibbles.size() +
+			                                            ad5_alt_escape.size() + ad5_fallback.size() + 24);
+			                        append_vint_u32((uint32_t)ad5_delta.size(), ad5_payload);
+			                        append_vint_u32((uint32_t)ad5_alt_nibbles.size(), ad5_payload);
+			                        append_vint_u32((uint32_t)ad5_alt_escape.size(), ad5_payload);
+			                        ad5_payload.insert(ad5_payload.end(), ad5_delta.begin(), ad5_delta.end());
+			                        ad5_payload.insert(ad5_payload.end(), ad5_alt_nibbles.begin(), ad5_alt_nibbles.end());
+			                        ad5_payload.insert(ad5_payload.end(), ad5_alt_escape.begin(), ad5_alt_escape.end());
+			                        ad5_payload.insert(ad5_payload.end(), ad5_fallback.begin(), ad5_fallback.end());
+			                    }
+			                    else
+			                    {
+			                        ad5_payload.reserve(ad5_delta.size() + ad5_fallback.size() + 16);
+			                        append_vint_u32((uint32_t)ad5_delta.size(), ad5_payload);
+			                        ad5_payload.insert(ad5_payload.end(), ad5_delta.begin(), ad5_delta.end());
+			                        ad5_payload.insert(ad5_payload.end(), ad5_fallback.begin(), ad5_fallback.end());
+			                    }
 			                    payload.swap(ad5_payload);
 			                }
 

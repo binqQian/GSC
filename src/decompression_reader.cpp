@@ -883,9 +883,9 @@ bool DecompressionReader::decompress_other_fileds(SPackage *pck)
 				// Keep a single built-in lossless codec per field.
 				if (is_ad_field)
 				{
-					if (codec_id != 5)
+					if (codec_id != 5 && codec_id != 7)
 					{
-						logger->error("Unsupported codec_id={} for FMT AD (INT); expected built-in codec_id=5", (int)codec_id);
+						logger->error("Unsupported codec_id={} for FMT AD (INT); expected built-in codec_id=5/7", (int)codec_id);
 						return false;
 					}
 				}
@@ -1094,11 +1094,17 @@ bool DecompressionReader::decompress_other_fileds(SPackage *pck)
 							}
 						}
 
-						// codec_id=5 (AD): payload starts with a delta substream length:
-						//   [len_delta][delta_zz...][fallback(tag/raw/dict)...]
+						// codec_id=5 (AD): [len_delta][delta_zz...][fallback(tag/raw/dict)...]
+						// codec_id=7 (AD): [len_delta][len_nibbles][len_escape][delta_zz...][alt_nibbles][alt_escape][fallback...]
 						const uint8_t *ad5_delta = nullptr;
 						size_t ad5_delta_len = 0;
 						size_t ad5_delta_off = 0;
+						const uint8_t *ad7_alt_nibbles = nullptr;
+						size_t ad7_alt_nibbles_len = 0;
+						size_t ad7_alt_nibble_off = 0;
+						const uint8_t *ad7_alt_escape = nullptr;
+						size_t ad7_alt_escape_len = 0;
+						size_t ad7_alt_escape_off = 0;
 						if (is_ad_field)
 						{
 							uint64_t l = 0;
@@ -1108,14 +1114,42 @@ bool DecompressionReader::decompress_other_fileds(SPackage *pck)
 								return false;
 							}
 							ad5_delta_len = (size_t)l;
-							if (in_off + ad5_delta_len > ad_payload_end)
+							if (codec_id == 7)
 							{
-								logger->error("FMT AD codec_id=5 delta_len out of bounds (rec_idx={}, len={}, in_off={}, payload_end={})",
-								              rec_idx, ad5_delta_len, in_off, ad_payload_end);
-								return false;
+								uint64_t ln = 0;
+								uint64_t le = 0;
+								if (!decode_vint(in_off, ln) || !decode_vint(in_off, le))
+								{
+									logger->error("FMT AD codec_id=7 missing alt stream lens (rec_idx={})", rec_idx);
+									return false;
+								}
+								ad7_alt_nibbles_len = (size_t)ln;
+								ad7_alt_escape_len = (size_t)le;
+								const size_t need = ad5_delta_len + ad7_alt_nibbles_len + ad7_alt_escape_len;
+								if (in_off + need > ad_payload_end)
+								{
+									logger->error("FMT AD codec_id=7 streams out of bounds (rec_idx={}, delta={}, nibbles={}, escape={}, in_off={}, payload_end={})",
+									              rec_idx, ad5_delta_len, ad7_alt_nibbles_len, ad7_alt_escape_len, in_off, ad_payload_end);
+									return false;
+								}
+								ad5_delta = v_tmp.data() + in_off;
+								in_off += ad5_delta_len;
+								ad7_alt_nibbles = v_tmp.data() + in_off;
+								in_off += ad7_alt_nibbles_len;
+								ad7_alt_escape = v_tmp.data() + in_off;
+								in_off += ad7_alt_escape_len;
 							}
-							ad5_delta = v_tmp.data() + in_off;
-							in_off += ad5_delta_len; // advance to fallback region
+							else
+							{
+								if (in_off + ad5_delta_len > ad_payload_end)
+								{
+									logger->error("FMT AD codec_id=5 delta_len out of bounds (rec_idx={}, len={}, in_off={}, payload_end={})",
+									              rec_idx, ad5_delta_len, in_off, ad_payload_end);
+									return false;
+								}
+								ad5_delta = v_tmp.data() + in_off;
+								in_off += ad5_delta_len; // advance to fallback region
+							}
 						}
 
 						// codec_id=6 (PL): split payload into substreams inside payload:
@@ -1179,6 +1213,26 @@ bool DecompressionReader::decompress_other_fileds(SPackage *pck)
 						if (l == 0 || ad5_delta_off + l > ad5_delta_len)
 							return false;
 						ad5_delta_off += l;
+						return true;
+					};
+					auto decode_ad7_nibble = [&](uint8_t &val) -> bool {
+						if (!ad7_alt_nibbles)
+							return false;
+						const size_t byte_off = ad7_alt_nibble_off / 2;
+						if (byte_off >= ad7_alt_nibbles_len)
+							return false;
+						const uint8_t b = ad7_alt_nibbles[byte_off];
+						val = (uint8_t)((ad7_alt_nibble_off & 1u) ? ((b >> 4) & 0x0Fu) : (b & 0x0Fu));
+						++ad7_alt_nibble_off;
+						return true;
+					};
+					auto decode_ad7_escape_vint = [&](uint64_t &val) -> bool {
+						if (!ad7_alt_escape || ad7_alt_escape_off >= ad7_alt_escape_len)
+							return false;
+						uint8_t l = fmt_compress::VintCodec::decode(ad7_alt_escape + ad7_alt_escape_off, val);
+						if (l == 0 || ad7_alt_escape_off + l > ad7_alt_escape_len)
+							return false;
+						ad7_alt_escape_off += l;
 						return true;
 					};
 
@@ -1475,7 +1529,7 @@ bool DecompressionReader::decompress_other_fileds(SPackage *pck)
 										}
 									}
 								}
-								else if (codec_id == 5)
+								else if (codec_id == 5 || codec_id == 7)
 								{
 									// codec_id=5: like codec_id=4, but the ref/alt-only delta stream is separated from the fallback stream.
 									if (tip0 == 0 && tip1 == 0)
@@ -1581,10 +1635,34 @@ bool DecompressionReader::decompress_other_fileds(SPackage *pck)
 												return false;
 											}
 											uint64_t alt = 0;
-											if (!decode_vint(in_off, alt))
+											if (codec_id == 7)
 											{
-												logger->error("FMT AD codec_id=5 truncated alt (rec_idx={}, sample={})", rec_idx, s);
-												return false;
+												uint8_t nib = 0;
+												if (!decode_ad7_nibble(nib))
+												{
+													logger->error("FMT AD codec_id=7 truncated alt nibble (rec_idx={}, sample={})", rec_idx, s);
+													return false;
+												}
+												if (nib == 15u)
+												{
+													if (!decode_ad7_escape_vint(alt))
+													{
+														logger->error("FMT AD codec_id=7 truncated alt escape (rec_idx={}, sample={})", rec_idx, s);
+														return false;
+													}
+												}
+												else
+												{
+													alt = nib;
+												}
+											}
+											else
+											{
+												if (!decode_vint(in_off, alt))
+												{
+													logger->error("FMT AD codec_id=5 truncated alt (rec_idx={}, sample={})", rec_idx, s);
+													return false;
+												}
 											}
 											const int64_t diff = ((int64_t)(zz >> 1)) ^ (-(int64_t)(zz & 1u));
 											const uint32_t base_sum = ad_baseline_ref[s];
@@ -1989,12 +2067,28 @@ bool DecompressionReader::decompress_other_fileds(SPackage *pck)
 
 										if (is_ad_field)
 										{
-											if (codec_id == 5 && ad5_delta_off != ad5_delta_len)
+											if ((codec_id == 5 || codec_id == 7) && ad5_delta_off != ad5_delta_len)
 											{
-												logger->error("FMT AD codec_id=5 delta stream mismatch (rec_idx={}, off={}, len={})",
-											              rec_idx, ad5_delta_off, ad5_delta_len);
+												logger->error("FMT AD codec_id={} delta stream mismatch (rec_idx={}, off={}, len={})",
+											              (int)codec_id, rec_idx, ad5_delta_off, ad5_delta_len);
 											return false;
 										}
+											if (codec_id == 7)
+											{
+												const size_t used_bytes = (ad7_alt_nibble_off + 1) / 2;
+												if (ad7_alt_nibble_off > ad7_alt_nibbles_len * 2 || used_bytes != ad7_alt_nibbles_len)
+												{
+													logger->error("FMT AD codec_id=7 alt nibble stream mismatch (rec_idx={}, used_nibbles={}, bytes={}, len={})",
+													              rec_idx, ad7_alt_nibble_off, used_bytes, ad7_alt_nibbles_len);
+													return false;
+												}
+												if (ad7_alt_escape_off != ad7_alt_escape_len)
+												{
+													logger->error("FMT AD codec_id=7 alt escape stream mismatch (rec_idx={}, off={}, len={})",
+													              rec_idx, ad7_alt_escape_off, ad7_alt_escape_len);
+													return false;
+												}
+											}
 										if (in_off != ad_payload_end)
 										{
 											logger->error("FMT AD codec_id={} record payload mismatch (rec_idx={}, in_off={}, payload_end={})",
