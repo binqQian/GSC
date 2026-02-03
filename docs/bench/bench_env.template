@@ -1,0 +1,12 @@
+#!/usr/bin/env bash
+# Copy to bench_env.sh and fill in paths before running benchmarks.
+
+export GSC_BIN=./build/gsc
+export SMALL_DATA=toy/final_subset.vcf.gz
+export MEDIUM_DATA=/path/to/medium.vcf.gz
+export LARGE_DATA=/path/to/large.vcf.gz
+
+# Optional knobs
+export THREADS=10
+export COMPRESSOR=bsc
+export OUT_DIR=tmp/bench_$(date +%Y%m%d_%H%M%S)

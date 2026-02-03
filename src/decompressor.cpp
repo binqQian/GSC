@@ -61,6 +61,10 @@ std::string vcf_write_mode(const std::string &path, char compression_level) {
     return mode;
 }
 
+bool use_bgzf_threads(const std::string& vcf_mode, uint32_t threads) {
+    return threads > 1 && vcf_mode.rfind("wz", 0) == 0;
+}
+
 void append_u64(std::string& out, uint64_t value) {
     char buf[32];
     auto result = std::to_chars(buf, buf + sizeof(buf), value);
@@ -4222,6 +4226,12 @@ bool Decompressor::splitFileWriting(int file_num){
             else
             {
                 hts_set_opt(split_files[i], HTS_OPT_CACHE_SIZE, 32000000);
+                if (out_type == file_type::VCF_File) {
+                    const std::string vcf_mode = vcf_write_mode(out_file_name, compression_level);
+                    if (use_bgzf_threads(vcf_mode, params.no_threads)) {
+                        hts_set_threads(split_files[i], params.no_threads);
+                    }
+                }
                 rec = bcf_init();
             }
         }
@@ -4247,6 +4257,8 @@ bool Decompressor::OpenForWriting()
         {
             const std::string vcf_mode = vcf_write_mode(out_file_name, compression_level);
             out_file = hts_open(out_file_name.c_str(), vcf_mode.c_str());
+            if (out_file && use_bgzf_threads(vcf_mode, params.no_threads))
+                hts_set_threads(out_file, params.no_threads);
         }
         else if(out_type == file_type::BCF_File)
         {
@@ -4313,6 +4325,8 @@ bool Decompressor::OpenForWriting()
         {
             const std::string vcf_mode = vcf_write_mode(out_file_name, compression_level);
             out_file = hts_open("-", vcf_mode.c_str());
+            if (out_file && use_bgzf_threads(vcf_mode, params.no_threads))
+                hts_set_threads(out_file, params.no_threads);
         }
         else if(out_type == file_type::BCF_File)
         {

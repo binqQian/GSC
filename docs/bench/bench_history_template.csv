@@ -1,0 +1,2 @@
+date,git,host,cpu,threads,compressor,dataset,mode,step,variants,elapsed_s,rss_kb,throughput_vps,metric_a,metric_b,notes
+YYYY-MM-DD,gitsha,host,model,10,bsc,small,lossless,compress,VARIANTS,ELAPSED_S,RSS_KB,THR_VPS,COMP_BYTES,COMP_RATIO,example
