@@ -1,6 +1,7 @@
 #include "decompression_reader.h"
 #include "logger.h"
 #include "fmt_compress/fmt_utils.h"
+#include <atomic>
 #include <algorithm>
 #include <chrono>
 #include <limits>
@@ -431,12 +432,12 @@ bool DecompressionReader::OpenReadingPart2(const string &in_file_name, bool star
 	if (stream_id < 0)
 	{
 		logger->error("Corrupted part2!");
-		exit(0);
+		return false;
 	}
 	if (!file_handle2->GetPart(stream_id, part2_params_data))
 	{
 		logger->error("Corrupted part2!");
-		exit(0);
+		return false;
 	}
 	if (part2_params_data.empty())
 	{
@@ -581,6 +582,13 @@ void DecompressionReader::close()
 		decomp_part_queue->Complete();
 		for (auto &t : part_decompress_thread)
 			t.join();
+	}
+
+	if (file_handle2)
+	{
+		file_handle2->Close();
+		delete file_handle2;
+		file_handle2 = nullptr;
 	}
 
 	if (temp_file2_owned && !temp_file2_fname.empty())
@@ -3280,135 +3288,164 @@ bool DecompressionReader::DecoderByRange(vector<block_t> &v_blocks, vector<vecto
 		return false;
 	}
 
-	// Reuse gt_codec_backend for fixed fields (same backend)
-	auto &codec = gt_codec_backend;
 	const uint32_t row_block_variants = max_block_rows ? max_block_rows : total_haplotypes;
 	const uint32_t block_size = useLegacyPath ? (n_samples * static_cast<uint32_t>(ploidy)) : row_block_variants;
 	uint32_t global_block_start = 0;
 	if (!useLegacyPath && cur_chunk_id < chunk_block_offsets.size())
 		global_block_start = chunk_block_offsets[cur_chunk_id];
 
-	for (uint32_t rb = first_rb; rb <= last_rb; ++rb)
+	struct RowBlockDecoded
 	{
-		const auto &dir = fixed_fields_rb_dir[rb];
-		const uint32_t vcount = dir.meta.variant_count;
-		if (!vcount)
-			continue;
-
-		// Decompress fixed fields for this row_block (directly from pointer, no memcpy)
-		std::vector<uint8_t> out_chrom, out_id, out_alt, out_qual, out_pos, out_ref;
-		const uint8_t *base_ptr = buf + fixed_fields_chunk_start;
-
-		codec->DecompressFromPtr(base_ptr + dir.chrom_off, dir.chrom_size, out_chrom);
-		codec->DecompressFromPtr(base_ptr + dir.id_off, dir.id_size, out_id);
-		codec->DecompressFromPtr(base_ptr + dir.alt_off, dir.alt_size, out_alt);
-		codec->DecompressFromPtr(base_ptr + dir.qual_off, dir.qual_size, out_qual);
-		codec->DecompressFromPtr(base_ptr + dir.pos_off, dir.pos_size, out_pos);
-		codec->DecompressFromPtr(base_ptr + dir.ref_off, dir.ref_size, out_ref);
-
-		std::vector<variant_desc_t> fixed_desc;
+		bool valid = false;
 		std::vector<variant_desc_t> sort_desc;
-		fixed_desc.resize(vcount);
-		sort_desc.resize(vcount);
+		std::vector<std::vector<uint32_t>> row_perm;
+	};
 
-		size_t p_chrom_l = 0, p_id_l = 0, p_alt_l = 0, p_qual_l = 0;
-		for (uint32_t i = 0; i < vcount; ++i)
-		{
-			read_str(out_chrom, p_chrom_l, fixed_desc[i].chrom);
-			read_str(out_id, p_id_l, fixed_desc[i].id);
-			read_str(out_alt, p_alt_l, fixed_desc[i].alt);
-			read_str(out_qual, p_qual_l, fixed_desc[i].qual);
-		}
+	const uint32_t total_rbs = last_rb - first_rb + 1;
+	std::vector<RowBlockDecoded> decoded(total_rbs);
+	std::atomic<uint32_t> next_rb(first_rb);
+	const uint32_t max_decode_threads = 4;
+	uint32_t decode_threads = std::max<uint32_t>(1, no_threads);
+	if (decode_threads > max_decode_threads)
+		decode_threads = max_decode_threads;
+	if (decode_threads > total_rbs)
+		decode_threads = total_rbs;
 
-		size_t p_pos_l = 0, p_ref_l = 0;
-		int64_t prev_pos_local = 0;
-		for (uint32_t i = 0; i < vcount; ++i)
-		{
-			int64_t delta = 0;
-			read(out_pos, p_pos_l, delta);
-			delta += prev_pos_local;
-			prev_pos_local = delta;
-			sort_desc[i].pos = static_cast<uint64_t>(delta);
-			read_str(out_ref, p_ref_l, sort_desc[i].ref);
-			sort_desc[i].filter = ".";
-			sort_desc[i].info = ".";
-		}
-
-		// Permutations
-		if (useLegacyPath)
-		{
-			std::vector<uint32_t> perm(block_size, 0);
-			if (vcount == block_size)
+	std::vector<std::thread> workers;
+	workers.reserve(decode_threads);
+	for (uint32_t t = 0; t < decode_threads; ++t)
+	{
+		workers.emplace_back([&] {
+			auto local_codec = MakeCompressionStrategy(backend, p_bsc_fixed_fields);
+			const uint8_t *base_ptr = buf + fixed_fields_chunk_start;
+			while (true)
 			{
-				out_perm(perm, sort_desc);
-				vector<vector<uint32_t>> row_perm;
-				row_perm.emplace_back(perm);
-				s_perm.emplace_back(row_perm);
-			}
-			else
-			{
-				auto it = vint_last_perm.find(cur_chunk_id);
-				if (it == vint_last_perm.end())
+				uint32_t rb = next_rb.fetch_add(1);
+				if (rb > last_rb)
+					break;
+				const auto &dir = fixed_fields_rb_dir[rb];
+				const uint32_t vcount = dir.meta.variant_count;
+				if (!vcount)
+					continue;
+
+				std::vector<uint8_t> out_chrom, out_id, out_alt, out_qual, out_pos, out_ref;
+				local_codec->DecompressFromPtr(base_ptr + dir.chrom_off, dir.chrom_size, out_chrom);
+				local_codec->DecompressFromPtr(base_ptr + dir.id_off, dir.id_size, out_id);
+				local_codec->DecompressFromPtr(base_ptr + dir.alt_off, dir.alt_size, out_alt);
+				local_codec->DecompressFromPtr(base_ptr + dir.qual_off, dir.qual_size, out_qual);
+				local_codec->DecompressFromPtr(base_ptr + dir.pos_off, dir.pos_size, out_pos);
+				local_codec->DecompressFromPtr(base_ptr + dir.ref_off, dir.ref_size, out_ref);
+
+				std::vector<variant_desc_t> fixed_desc(vcount);
+				std::vector<variant_desc_t> sort_desc(vcount);
+
+				size_t p_chrom_l = 0, p_id_l = 0, p_alt_l = 0, p_qual_l = 0;
+				for (uint32_t i = 0; i < vcount; ++i)
 				{
-					perm.resize(block_size);
-					for (size_t i_p = 0; i_p < perm.size(); ++i_p)
-						perm[i_p] = static_cast<uint32_t>(i_p);
+					read_str(out_chrom, p_chrom_l, fixed_desc[i].chrom);
+					read_str(out_id, p_id_l, fixed_desc[i].id);
+					read_str(out_alt, p_alt_l, fixed_desc[i].alt);
+					read_str(out_qual, p_qual_l, fixed_desc[i].qual);
+				}
+
+				size_t p_pos_l = 0, p_ref_l = 0;
+				int64_t prev_pos_local = 0;
+				for (uint32_t i = 0; i < vcount; ++i)
+				{
+					int64_t delta = 0;
+					read(out_pos, p_pos_l, delta);
+					delta += prev_pos_local;
+					prev_pos_local = delta;
+					sort_desc[i].pos = static_cast<uint64_t>(delta);
+					read_str(out_ref, p_ref_l, sort_desc[i].ref);
+					sort_desc[i].filter = ".";
+					sort_desc[i].info = ".";
+				}
+
+				std::vector<std::vector<uint32_t>> row_perm;
+				if (useLegacyPath)
+				{
+					std::vector<uint32_t> perm(block_size, 0);
+					if (vcount == block_size)
+					{
+						out_perm(perm, sort_desc);
+					}
+					else
+					{
+						auto it = vint_last_perm.find(cur_chunk_id);
+						if (it == vint_last_perm.end())
+						{
+							for (size_t i_p = 0; i_p < perm.size(); ++i_p)
+								perm[i_p] = static_cast<uint32_t>(i_p);
+						}
+						else
+						{
+							perm = vint_code::DecodeArray(it->second);
+						}
+
+						for (size_t i_p = 0; i_p < sort_desc.size(); i_p++)
+						{
+							if (atoi(sort_desc[i_p].ref.c_str()))
+							{
+								sort_desc[i_p].ref = sort_desc[i_p].ref.substr(to_string(atoi(sort_desc[i_p].ref.c_str())).length());
+							}
+						}
+					}
+					row_perm.emplace_back(std::move(perm));
 				}
 				else
 				{
-					perm = vint_code::DecodeArray(it->second);
-				}
-				vector<vector<uint32_t>> row_perm;
-				row_perm.emplace_back(perm);
-				s_perm.emplace_back(row_perm);
-
-				for (size_t i_p = 0; i_p < sort_desc.size(); i_p++)
-				{
-					if (atoi(sort_desc[i_p].ref.c_str()))
+					row_perm.resize(n_col_blocks);
+					for (uint32_t cb = 0; cb < n_col_blocks; ++cb)
 					{
-						sort_desc[i_p].ref = sort_desc[i_p].ref.substr(to_string(atoi(sort_desc[i_p].ref.c_str())).length());
+						auto it = vint_last_perm_2d.find(make_pair(global_block_start + rb, cb));
+						if (it == vint_last_perm_2d.end())
+						{
+							row_perm[cb].resize(col_block_ranges[cb].second);
+							for (size_t i_p = 0; i_p < row_perm[cb].size(); ++i_p)
+								row_perm[cb][i_p] = static_cast<uint32_t>(i_p);
+						}
+						else
+						{
+							row_perm[cb] = vint_code::DecodeArray(it->second);
+						}
+					}
+
+					for (size_t i_p = 0; i_p < sort_desc.size(); i_p++)
+					{
+						if (atoi(sort_desc[i_p].ref.c_str()))
+						{
+							sort_desc[i_p].ref = sort_desc[i_p].ref.substr(to_string(atoi(sort_desc[i_p].ref.c_str())).length());
+						}
 					}
 				}
-			}
-		}
-		else
-		{
-			vector<vector<uint32_t>> row_perm(n_col_blocks);
-			for (uint32_t cb = 0; cb < n_col_blocks; ++cb)
-			{
-				auto it = vint_last_perm_2d.find(make_pair(global_block_start + rb, cb));
-				if (it == vint_last_perm_2d.end())
-				{
-					row_perm[cb].resize(col_block_ranges[cb].second);
-					for (size_t i_p = 0; i_p < row_perm[cb].size(); ++i_p)
-						row_perm[cb][i_p] = static_cast<uint32_t>(i_p);
-				}
-				else
-				{
-					row_perm[cb] = vint_code::DecodeArray(it->second);
-				}
-			}
-			s_perm.emplace_back(row_perm);
 
-			for (size_t i_p = 0; i_p < sort_desc.size(); i_p++)
-			{
-				if (atoi(sort_desc[i_p].ref.c_str()))
+				for (uint32_t i = 0; i < vcount; ++i)
 				{
-					sort_desc[i_p].ref = sort_desc[i_p].ref.substr(to_string(atoi(sort_desc[i_p].ref.c_str())).length());
+					sort_desc[i].chrom = std::move(fixed_desc[i].chrom);
+					sort_desc[i].id = std::move(fixed_desc[i].id);
+					sort_desc[i].alt = std::move(fixed_desc[i].alt);
+					sort_desc[i].qual = std::move(fixed_desc[i].qual);
 				}
+
+				auto &slot = decoded[rb - first_rb];
+				slot.valid = true;
+				slot.sort_desc = std::move(sort_desc);
+				slot.row_perm = std::move(row_perm);
 			}
-		}
+		});
+	}
 
-		// Merge fixed fields into sort_desc (file order must already match sort fields)
-		for (uint32_t i = 0; i < vcount; ++i)
-		{
-			sort_desc[i].chrom = std::move(fixed_desc[i].chrom);
-			sort_desc[i].id = std::move(fixed_desc[i].id);
-			sort_desc[i].alt = std::move(fixed_desc[i].alt);
-			sort_desc[i].qual = std::move(fixed_desc[i].qual);
-		}
+	for (auto &t : workers)
+		t.join();
 
-		v_blocks.emplace_back(sort_desc);
+	for (uint32_t rb = first_rb; rb <= last_rb; ++rb)
+	{
+		auto &slot = decoded[rb - first_rb];
+		if (!slot.valid)
+			continue;
+		s_perm.emplace_back(std::move(slot.row_perm));
+		v_blocks.emplace_back(std::move(slot.sort_desc));
 	}
 
 	return true;

@@ -83,6 +83,14 @@ std::vector<uint8_t> EncodeArray(const std::vector<uint32_t>& arr)
 
     return buffer;
 }
+
+void EncodeArray(const std::vector<uint32_t>& arr, std::vector<uint8_t>& out)
+{
+    out.clear();
+    out.reserve(arr.size() * 4);
+    for (const auto& value : arr)
+        WriteVint(value, out);
+}
 std::vector<uint32_t> DecodeArray(std::vector<uint8_t> &buffer)
 {
     size_t size = buffer.size();

@@ -49,6 +49,7 @@ class Decompressor {
 
 	    
     DecompressionReader decompression_reader;
+    static constexpr size_t kPrefetchDepth = 2;
 
     GSC_Params params;
 
@@ -194,6 +195,9 @@ class Decompressor {
     // string genotype;
     vector<uint8_t> genotype;
     string record;
+    vector<int8_t> gt_arr_i8;
+    vector<uint8_t> gt_arr_u8;
+    vector<int> gt_arr_i32;
     variant_desc_t temp_desc;
     vector<field_desc> temp_fields;
     int count = 0;
@@ -300,6 +304,8 @@ class Decompressor {
     std::deque<uint64_t> stored_unique;
 
     uint64_t max_stored_unique = 0;
+
+    void ClearUniqueCache();
 
     sdsl::rrr_vector<>::rank_1_type rrr_rank_zeros_bit_vector[2];
 

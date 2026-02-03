@@ -122,9 +122,13 @@ private:
     std::thread writer_thread_;
     std::atomic<uint64_t> next_write_seq_;
     std::atomic<uint64_t> total_written_;
+    std::mutex pool_mutex_;
+    std::vector<bcf1_t*> record_pool_;
+    size_t max_pool_size_;
 
     // Writer thread function
     void WriterThread();
+    void ReleaseRecord(bcf1_t* rec);
 
 public:
     /**
@@ -160,6 +164,12 @@ public:
      * @return true on success, false on failure
      */
     bool WriteRecord(bcf1_t* rec);
+
+    /**
+     * @brief Acquire a reusable record for parallel writing.
+     * @return bcf1_t* record ready for bcf_copy(), or nullptr on failure.
+     */
+    bcf1_t* AcquireRecord();
 
     /**
      * @brief Get total number of written variants

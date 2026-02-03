@@ -7,9 +7,9 @@ namespace vint_code {
     size_t WriteVint(uint32_t value, std::vector<uint8_t>& buffer);
     
     std::vector<uint8_t> EncodeArray(const std::vector<uint32_t>& arr);
+    void EncodeArray(const std::vector<uint32_t>& arr, std::vector<uint8_t>& out);
     std::vector<uint32_t> DecodeArray(std::vector<uint8_t>& buffer);
 
     uint32_t ReadVint(const uint8_t* buffer, size_t size, size_t& pos);
     void DecodeArray(const uint8_t* buffer, size_t size, std::vector<uint32_t>& out);
 };
-

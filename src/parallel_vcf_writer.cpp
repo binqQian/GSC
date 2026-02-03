@@ -11,6 +11,7 @@ ParallelVCFWriter::ParallelVCFWriter()
     , write_queue_(VCF_WRITE_QUEUE_SIZE)
     , next_write_seq_(0)
     , total_written_(0)
+    , max_pool_size_(VCF_WRITE_QUEUE_SIZE * 2)
 {
 }
 
@@ -133,8 +134,8 @@ void ParallelVCFWriter::WriterThread()
             total_written_++;
         }
 
-        // Free the record
-        bcf_destroy(rec);
+        // Recycle the record
+        ReleaseRecord(rec);
 
         // Log progress periodically
         if (total_written_ % 100000 == 0) {
@@ -146,6 +147,33 @@ void ParallelVCFWriter::WriterThread()
 
     LogManager::Instance().Logger()->debug("Writer thread finished, total written: {}",
                                            total_written_.load());
+}
+
+bcf1_t* ParallelVCFWriter::AcquireRecord()
+{
+    std::lock_guard<std::mutex> lock(pool_mutex_);
+    if (!record_pool_.empty())
+    {
+        bcf1_t* rec = record_pool_.back();
+        record_pool_.pop_back();
+        bcf_clear(rec);
+        return rec;
+    }
+    return bcf_init();
+}
+
+void ParallelVCFWriter::ReleaseRecord(bcf1_t* rec)
+{
+    if (!rec)
+        return;
+    std::lock_guard<std::mutex> lock(pool_mutex_);
+    if (record_pool_.size() >= max_pool_size_)
+    {
+        bcf_destroy(rec);
+        return;
+    }
+    bcf_clear(rec);
+    record_pool_.push_back(rec);
 }
 
 bool ParallelVCFWriter::WriteRecord(bcf1_t* rec)
@@ -171,11 +199,11 @@ bool ParallelVCFWriter::WriteRecord(bcf1_t* rec)
         if (bcf_write1(fp_out_, hdr_, rec) < 0) {
             LogManager::Instance().Logger()->error(
                 "Failed to write variant at position {}", rec->pos);
-            bcf_destroy(rec);
+            ReleaseRecord(rec);
             return false;
         }
         total_written_++;
-        bcf_destroy(rec);
+        ReleaseRecord(rec);
     }
 
     return true;
@@ -205,6 +233,14 @@ void ParallelVCFWriter::Finalize()
     if (hdr_) {
         bcf_hdr_destroy(hdr_);
         hdr_ = nullptr;
+    }
+
+    // Clean up pooled records
+    {
+        std::lock_guard<std::mutex> lock(pool_mutex_);
+        for (auto *rec : record_pool_)
+            bcf_destroy(rec);
+        record_pool_.clear();
     }
 
     initialized_ = false;

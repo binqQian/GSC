@@ -48,6 +48,7 @@ class CompressionReader {
     // Tiled mode: per-column-block buffers and counters
     vector<CBitMemory> col_bv_buffers;   // One buffer per column block
     vector<uint32_t> col_vec_read_in_block;  // Vectors read in current block for each column
+    bool col_buffers_initialized = false;
 
     vector<string> samples_list;
     vector<variant_desc_t> v_vcf_data_compress;
@@ -68,14 +69,18 @@ class CompressionReader {
     VarBlockQueue<fixed_field_block>* Var_queue = nullptr;
 
 
-    void *dst_int = nullptr;
-    void *dst_real = nullptr;
-    void *dst_str = nullptr;
-    void *dst_flag = nullptr;
-    int  ndst_int = 0;
-    int  ndst_real = 0;
-    int  ndst_str = 0;
-    int  ndst_flag = 0;
+    void *dst_info_int = nullptr;
+    void *dst_info_real = nullptr;
+    void *dst_info_str = nullptr;
+    void *dst_fmt_int = nullptr;
+    void *dst_fmt_real = nullptr;
+    void *dst_fmt_str = nullptr;
+    int  ndst_info_int = 0;
+    int  ndst_info_real = 0;
+    int  ndst_info_str = 0;
+    int  ndst_fmt_int = 0;
+    int  ndst_fmt_real = 0;
+    int  ndst_fmt_str = 0;
     int *fmt_gt_arr_ = nullptr;
     int  nfmt_gt_arr_ = 0;
     std::vector<int> FilterIdToFieldId;
@@ -124,6 +129,8 @@ class CompressionReader {
 	bool SetVariantOtherFields(vector<field_desc> &fields);
     vector<int> topoSort(unordered_map<int, unordered_set<int>>& graph);
     vector<int> topo_sort(unordered_map<int, unordered_set<int>> &graph,unordered_map<int, int> inDegree);
+    bool CreateGtBuffer(CBitMemory &bm, int64_t size);
+    void ReleaseUnusedBuffer(CBitMemory &bm, int64_t size);
 
 
     
@@ -185,6 +192,12 @@ public:
         delete parallel_reader_;
         parallel_reader_ = nullptr;
     }
+    if (dst_info_int) { std::free(dst_info_int); dst_info_int = nullptr; }
+    if (dst_info_real) { std::free(dst_info_real); dst_info_real = nullptr; }
+    if (dst_info_str) { std::free(dst_info_str); dst_info_str = nullptr; }
+    if (dst_fmt_int) { std::free(dst_fmt_int); dst_fmt_int = nullptr; }
+    if (dst_fmt_real) { std::free(dst_fmt_real); dst_fmt_real = nullptr; }
+    if (dst_fmt_str) { std::free(dst_fmt_str); dst_fmt_str = nullptr; }
         // test.close();
     //    var_out.close();
     }
@@ -207,13 +220,14 @@ public:
     void InitVarinats(File_Handle_2 *_file_handle2);
 	bool ProcessInVCF();
 	uint32_t setNoVecBlock(GSC_Params & params);
-    void initializeColumnBlocks();
+    void initializeColumnBlocks(bool create_buffers);
 	void GetWhereChrom(vector<pair<std::string,uint32_t>> &_where_chrom,vector<int64_t> &chunks_min_pos);
     uint32_t GetOtherFieldsBlockSum();
     void GetOtherField(vector<key_desc> &_keys,uint32_t &_no_keys,int &_key_gt_id);
     vector<uint32_t> GetActualVariants();
     void UpdateKeys(vector<key_desc> &_keys);
     void CloseFiles();
+    void ReleasePendingGtBuffers();
 
     // Get column block tiling information
     uint32_t GetNumColumnBlocks() const { return n_col_blocks; }

@@ -155,8 +155,10 @@ class BlockProcess
     std::vector<uint64_t> best_new_xor_buf_;
     std::vector<uint8_t> old_vec_storage_;
     std::vector<uint32_t> copy_from_buf_;
+    std::vector<uint64_t> perm_pos_buf_;
+    std::vector<std::string> perm_ref_buf_;
     void permute_range_vec(uint64_t id_start, uint64_t id_stop, vector<uint32_t> &v_perm,vector<bool> &zeros, vector<bool> &copies, vector<uint32_t> &origin_of_copy, vector<uint8_t> &samples_indexes);
-    inline void get_perm(vector<uint32_t> perm, int n,vector<variant_desc_t> &v_vcf_data_compress);
+    inline void get_perm(const vector<uint32_t> &perm, int n, vector<variant_desc_t> &v_vcf_data_compress);
     mutex mtx_v_part1;
 	condition_variable cv_v_part1;
 

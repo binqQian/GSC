@@ -11,6 +11,7 @@
 #include <tuple>
 #include <set>
 #include <functional>
+#include <unordered_map>
 #include "variant.h"
 #include "defs.h"
 
@@ -19,6 +20,52 @@ using namespace std;
 // ********************************************************************************
 #include <atomic>
 #include <vector>
+
+class GtBufferPool
+{
+public:
+    unsigned char *Acquire(size_t size)
+    {
+        if (size == 0)
+            return nullptr;
+        std::lock_guard<std::mutex> guard(mutex_);
+        auto &bucket = free_buffers_[size];
+        if (!bucket.empty())
+        {
+            unsigned char *ptr = bucket.back();
+            bucket.pop_back();
+            return ptr;
+        }
+        return new unsigned char[size];
+    }
+
+    void Release(unsigned char *data, size_t size)
+    {
+        if (!data || size == 0)
+            return;
+        std::lock_guard<std::mutex> guard(mutex_);
+        free_buffers_[size].push_back(data);
+    }
+
+    ~GtBufferPool()
+    {
+        Clear();
+    }
+
+private:
+    void Clear()
+    {
+        for (auto &kv : free_buffers_)
+        {
+            for (auto *ptr : kv.second)
+                delete[] ptr;
+        }
+        free_buffers_.clear();
+    }
+
+    std::mutex mutex_;
+    std::unordered_map<size_t, std::vector<unsigned char *>> free_buffers_;
+};
 
 
 // class GtBlockQueue
@@ -113,14 +160,24 @@ public:
             auto &blk = g_blocks.front();
             if (blk && blk->data)
             {
-                delete[] blk->data;
+                buffer_pool.Release(blk->data, blk->data_size);
                 blk->data = nullptr;
             }
             g_blocks.pop_front();
         }
     }
 
-    void Push(int id_block, uint32_t col_block_id, unsigned char *data, size_t num_rows, std::vector<variant_desc_t> &v_vcf_data_compress)
+    unsigned char *AcquireBuffer(size_t size)
+    {
+        return buffer_pool.Acquire(size);
+    }
+
+    void ReleaseBuffer(unsigned char *data, size_t size)
+    {
+        buffer_pool.Release(data, size);
+    }
+
+    void Push(int id_block, uint32_t col_block_id, unsigned char *data, size_t data_size, size_t num_rows, std::vector<variant_desc_t> &v_vcf_data_compress)
     {
         {
             std::unique_lock<std::mutex> lck(m_mutex);
@@ -128,16 +185,16 @@ public:
             if (flag)
             {
                 if (data)
-                    delete[] data;
+                    buffer_pool.Release(data, data_size);
                 return;
             }
-            g_blocks.push_back(std::make_unique<genotype_block_t>(id_block, col_block_id, data, num_rows, std::move(v_vcf_data_compress)));
+            g_blocks.push_back(std::make_unique<genotype_block_t>(id_block, col_block_id, data, data_size, num_rows, std::move(v_vcf_data_compress)));
         }
 
         cv_pop.notify_one();
     }
 
-    bool Pop(int &id_block, uint32_t &col_block_id, unsigned char *&data, size_t &num_rows, std::vector<variant_desc_t> &v_vcf_data_compress)
+    bool Pop(int &id_block, uint32_t &col_block_id, unsigned char *&data, size_t &data_size, size_t &num_rows, std::vector<variant_desc_t> &v_vcf_data_compress)
     {
         std::unique_ptr<genotype_block_t> block;
 
@@ -157,6 +214,7 @@ public:
         id_block = block->block_id;
         col_block_id = block->col_block_id;
         data = block->data;
+        data_size = block->data_size;
         num_rows = block->num_rows;
         v_vcf_data_compress = std::move(block->v_vcf_data_compress);
 
@@ -179,11 +237,12 @@ private:
         int block_id;
         uint32_t col_block_id;  // NEW: column block ID for tiling support
         unsigned char *data;
+        size_t data_size;
         size_t num_rows;
         std::vector<variant_desc_t> v_vcf_data_compress;
 
-        genotype_block_t(int _block_id, uint32_t _col_block_id, unsigned char *_data, size_t _num_rows, std::vector<variant_desc_t> &&_v_vcf_data_compress)
-            : block_id(_block_id), col_block_id(_col_block_id), data(_data), num_rows(_num_rows), v_vcf_data_compress(std::move(_v_vcf_data_compress)) {}
+        genotype_block_t(int _block_id, uint32_t _col_block_id, unsigned char *_data, size_t _data_size, size_t _num_rows, std::vector<variant_desc_t> &&_v_vcf_data_compress)
+            : block_id(_block_id), col_block_id(_col_block_id), data(_data), data_size(_data_size), num_rows(_num_rows), v_vcf_data_compress(std::move(_v_vcf_data_compress)) {}
     };
 
     std::deque<std::unique_ptr<genotype_block_t>> g_blocks;
@@ -191,6 +250,7 @@ private:
     size_t capacity;
     std::mutex m_mutex;
     std::condition_variable cv_pop, cv_push;
+    GtBufferPool buffer_pool;
 };
 // class GtBlockQueue
 // {  

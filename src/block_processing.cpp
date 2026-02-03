@@ -432,7 +432,7 @@ void BlockProcess::permute_range_vec(uint64_t id_start, uint64_t id_stop, vector
     
     origin_of_copy.assign(comp_pos_copy_buf_.begin(), comp_pos_copy_buf_.begin() + no_copy);
    
-    samples_indexes = vint_code::EncodeArray(sparse_matrix_cols_buf_);
+    vint_code::EncodeArray(sparse_matrix_cols_buf_, samples_indexes);
     sparse_matrix_cols_buf_.clear();
 
     // samples_indexes.resize(no_samples_index);
@@ -558,7 +558,7 @@ void BlockProcess::ProcessLastBlock(vector<bool> &zeros, vector<bool> &copies, v
 
     origin_of_copy.assign(comp_pos_copy_buf_.begin(), comp_pos_copy_buf_.begin() + no_copy);
 
-    samples_indexes = vint_code::EncodeArray(sparse_matrix_cols_buf_);
+    vint_code::EncodeArray(sparse_matrix_cols_buf_, samples_indexes);
     sparse_matrix_cols_buf_.clear();
     // samples_indexes.resize(no_samples_index); 
 
@@ -582,26 +582,26 @@ void BlockProcess::ProcessVariant(vector<uint32_t> &perm, vector<variant_desc_t>
         get_perm(perm, perm.size(), v_vcf_data_io);
     }
 }
-inline void BlockProcess::get_perm(vector<uint32_t> perm, int n,vector<variant_desc_t> &v_vcf_data_compress)
+inline void BlockProcess::get_perm(const vector<uint32_t> &perm, int n, vector<variant_desc_t> &v_vcf_data_compress)
 {
+    if (n <= 0)
+        return;
+    if (perm_pos_buf_.size() < static_cast<size_t>(n))
+        perm_pos_buf_.resize(n);
+    if (perm_ref_buf_.size() < static_cast<size_t>(n))
+        perm_ref_buf_.resize(n);
 
-    vector<int> temp(n);
-    // vector<string> str_alt(n);
-    vector<string> str_ref(n);
     for (int j = 0; j < n; j++)
     {
         int i = perm[j];
-        temp[i] = v_vcf_data_compress[j].pos;
-        // str_alt[j] = v_vcf_data_compress[i].alt;
-        str_ref[i] = v_vcf_data_compress[j].ref;
+        perm_pos_buf_[i] = v_vcf_data_compress[j].pos;
+        perm_ref_buf_[i] = std::move(v_vcf_data_compress[j].ref);
     }
 
     for (int j = 0; j < n; j++)
     {
-        v_vcf_data_compress[j].pos = temp[j];
-        // v_vcf_data_compress[j].alt = str_alt[j];
-        v_vcf_data_compress[j].ref = str_ref[j];
-        // cout << v_vcf_data_compress[j].pos << " " << v_vcf_data_compress[j].ref << endl;
+        v_vcf_data_compress[j].pos = perm_pos_buf_[j];
+        v_vcf_data_compress[j].ref = std::move(perm_ref_buf_[j]);
     }
 }
 void BlockProcess::AddGtBlock(fixed_field_block &_fixed_field_block_io, vector<bool> &_all_zeros, vector<bool> &_all_copies, vector<uint32_t> &_comp_pos_copy,
@@ -616,6 +616,8 @@ void BlockProcess::AddGtBlock(fixed_field_block &_fixed_field_block_io, vector<b
     _all_zeros.insert(_all_zeros.end(), _zeros_only.begin(), _zeros_only.end());
     _all_copies.insert(_all_copies.end(), _copies.begin(), _copies.end());
     _comp_pos_copy.insert(_comp_pos_copy.end(), _origin_of_copy.begin(), _origin_of_copy.end());
+    if (!_samples_indexes.empty())
+        _fixed_field_block_io.gt_block.reserve(_fixed_field_block_io.gt_block.size() + _samples_indexes.size());
     _fixed_field_block_io.gt_block.insert(_fixed_field_block_io.gt_block.end(), _samples_indexes.begin(), _samples_indexes.end());
 }
 
@@ -630,16 +632,17 @@ void BlockProcess::AddGtIndexBlock(std::vector<uint8_t> &gt_block, vector<bool> 
     _all_zeros.insert(_all_zeros.end(), _zeros_only.begin(), _zeros_only.end());
     _all_copies.insert(_all_copies.end(), _copies.begin(), _copies.end());
     _comp_pos_copy.insert(_comp_pos_copy.end(), _origin_of_copy.begin(), _origin_of_copy.end());
+    if (!_samples_indexes.empty())
+        gt_block.reserve(gt_block.size() + _samples_indexes.size());
     gt_block.insert(gt_block.end(), _samples_indexes.begin(), _samples_indexes.end());
 }
 
 void BlockProcess::addFixedFieldsBlock(fixed_field_block &_fixed_field_block_io, vector<variant_desc_t> &_v_vcf_data_io, int64_t &prev_pos)
 {
     _fixed_field_block_io.no_variants += static_cast<uint32_t>(_v_vcf_data_io.size());
-    variant_desc_t desc;
     for (size_t i = 0; i < _v_vcf_data_io.size(); ++i)
     {
-        desc = _v_vcf_data_io[i];
+        const variant_desc_t &desc = _v_vcf_data_io[i];
         append_str(_fixed_field_block_io.chrom, desc.chrom);
         append_str(_fixed_field_block_io.id, desc.id);
         append_str(_fixed_field_block_io.alt, desc.alt);

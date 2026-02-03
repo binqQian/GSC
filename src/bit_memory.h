@@ -47,6 +47,7 @@ public:
     
     bool Open(uint8_t *p, int64_t size, bool force_open = false);
     bool Create(int64_t size = 1);
+    bool CreateFromBuffer(uint8_t *buffer, int64_t size, bool take_ownership = false);
     bool Complete();
     bool Close();
     bool Restart();

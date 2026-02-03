@@ -2,6 +2,7 @@
 #include "logger.h"
 #include <atomic>
 #include <bitset>
+#include <charconv>
 #include <chrono>
 #include <condition_variable>
 #include <deque>
@@ -58,6 +59,58 @@ std::string vcf_write_mode(const std::string &path, char compression_level) {
     if (compression_level >= '0' && compression_level <= '9')
         mode.push_back(compression_level);
     return mode;
+}
+
+void append_u64(std::string& out, uint64_t value) {
+    char buf[32];
+    auto result = std::to_chars(buf, buf + sizeof(buf), value);
+    if (result.ec == std::errc()) {
+        out.append(buf, static_cast<size_t>(result.ptr - buf));
+    }
+}
+
+void append_first_alt(std::string& out, const std::string& alt) {
+    size_t comma_pos = alt.find(',');
+    if (comma_pos == std::string::npos)
+        out.append(alt);
+    else
+        out.append(alt.data(), comma_pos);
+}
+
+void build_bim_line(std::string& out, const variant_desc_t& desc, const std::string& genetic_distance) {
+    out.clear();
+    out.reserve(desc.chrom.size() + desc.id.size() + desc.ref.size() + desc.alt.size() +
+                genetic_distance.size() + 32);
+    out.append(desc.chrom);
+    out.push_back('\t');
+    out.append(desc.id);
+    out.push_back('\t');
+    out.append(genetic_distance);
+    out.push_back('\t');
+    append_u64(out, desc.pos);
+    out.push_back('\t');
+    append_first_alt(out, desc.alt);
+    out.push_back('\t');
+    out.append(desc.ref);
+    out.push_back('\n');
+}
+
+void build_pvar_line(std::string& out, const variant_desc_t& desc) {
+    out.clear();
+    out.reserve(desc.chrom.size() + desc.id.size() + desc.ref.size() + desc.alt.size() + 32);
+    out.append(desc.chrom);
+    out.push_back('\t');
+    append_u64(out, desc.pos);
+    out.push_back('\t');
+    if (desc.id.empty())
+        out.push_back('.');
+    else
+        out.append(desc.id);
+    out.push_back('\t');
+    out.append(desc.ref);
+    out.push_back('\t');
+    out.append(desc.alt);
+    out.push_back('\n');
 }
 
 bool patch_u32_le_at(const std::string& path, long offset, uint32_t value) {
@@ -285,7 +338,22 @@ bool Decompressor::initDecompression(DecompressionReader &decompression_reader){
     haplotype_count = decompression_reader.n_samples * (uint32_t)decompression_reader.ploidy;
     row_block_size = decompression_reader.max_block_rows ? decompression_reader.max_block_rows : haplotype_count;
     standard_block_size = row_block_size;
-    max_stored_unique = standard_block_size * 2;
+    if (!params.MB_memory)
+    {
+        max_stored_unique = 0;
+    }
+    else if (params.max_MB_memory)
+    {
+        if (decompression_reader.vec_len)
+            max_stored_unique = (static_cast<uint64_t>(params.max_MB_memory) * 1000000ull) /
+                                static_cast<uint64_t>(decompression_reader.vec_len);
+        else
+            max_stored_unique = 0;
+    }
+    else
+    {
+        max_stored_unique = standard_block_size * 2;
+    }
 
     logger->debug("initDecompression: haplotype_count={}, row_block_size={}, useLegacyPath={}, vec_len={}",
                  haplotype_count, row_block_size, decompression_reader.useLegacyPath, decompression_reader.vec_len);
@@ -508,7 +576,7 @@ bool Decompressor::decompressProcess()
     // - consumer thread: initalIndex + output (VCF/BCF/BED/PGEN/BGEN)
     //
     // This replaces the fragile 3-way barrier synchronization and avoids deadlocks on early-exit paths.
-    const size_t pipeline_depth = 2;
+    const size_t pipeline_depth = kPrefetchDepth;
     BoundedQueue<std::unique_ptr<DecompressedChunk>> free_q(pipeline_depth);
     BoundedQueue<std::unique_ptr<DecompressedChunk>> ready_q(pipeline_depth);
 
@@ -691,6 +759,8 @@ bool Decompressor::decompressProcess()
             if (!free_q.Push(std::move(buf)))
                 break;
 
+            ClearUniqueCache();
+
             if (!chunk_ok)
             {
                 abort.store(true, std::memory_order_relaxed);
@@ -705,6 +775,19 @@ bool Decompressor::decompressProcess()
     process_thread.join();
     decompress_thread.join();
     return ok.load(std::memory_order_relaxed);
+}
+
+void Decompressor::ClearUniqueCache()
+{
+    if (done_unique.empty())
+    {
+        stored_unique.clear();
+        return;
+    }
+    for (auto &it : done_unique)
+        delete[] it.second;
+    done_unique.clear();
+    stored_unique.clear();
 }
 
 void Decompressor::finalizePgen()
@@ -1073,8 +1156,23 @@ void Decompressor::appendVCF(variant_desc_t &_desc, vector<uint8_t> &_my_str, si
 {
 
     bcf_clear(rec);
-    string record;
-    record = _desc.chrom + "\t0\t" + _desc.id + "\t" + _desc.ref + "\t" + _desc.alt + "\t" + _desc.qual + "\t" + _desc.filter + "\t" + _desc.info;
+    record.clear();
+    record.reserve(_desc.chrom.size() + _desc.id.size() + _desc.ref.size() +
+                   _desc.alt.size() + _desc.qual.size() + _desc.filter.size() +
+                   _desc.info.size() + 16);
+    record.append(_desc.chrom);
+    record.append("\t0\t");
+    record.append(_desc.id);
+    record.push_back('\t');
+    record.append(_desc.ref);
+    record.push_back('\t');
+    record.append(_desc.alt);
+    record.push_back('\t');
+    record.append(_desc.qual);
+    record.push_back('\t');
+    record.append(_desc.filter);
+    record.push_back('\t');
+    record.append(_desc.info);
     kstring_t s;
     s.s = (char *)record.c_str();
     s.m = record.length();
@@ -1085,20 +1183,20 @@ void Decompressor::appendVCF(variant_desc_t &_desc, vector<uint8_t> &_my_str, si
     if (out_genotypes)
     {
         if(count <= INT8_MAX && count > INT8_MIN+1){
-            vector<int8_t> gt_arr(_no_haplotypes);
+            gt_arr_i8.resize(_no_haplotypes);
 
             int t = 0;
             for (auto cur_genotype : _my_str)
             {
                 if (cur_genotype == '.')
-                    gt_arr[t++] = bcf_gt_missing;
+                    gt_arr_i8[t++] = bcf_gt_missing;
                 else
-                    gt_arr[t++] = bcf_gt_phased(int(cur_genotype - '0'));
+                    gt_arr_i8[t++] = bcf_gt_phased(int(cur_genotype - '0'));
 
             }
             
             str.l = 3;
-            memcpy(str.s + str.l, gt_arr.data(), _no_haplotypes * sizeof(int8_t));
+            memcpy(str.s + str.l, gt_arr_i8.data(), _no_haplotypes * sizeof(int8_t));
             str.l += _no_haplotypes;
             str.s[str.l] = 0;
             // for(int i=0;i<str.l;i++)
@@ -1109,18 +1207,18 @@ void Decompressor::appendVCF(variant_desc_t &_desc, vector<uint8_t> &_my_str, si
         }
         else{
 
-            vector<int> gt_arr(_no_haplotypes);
+            gt_arr_i32.resize(_no_haplotypes);
 
             int t = 0;
             for (auto cur_genotype : _my_str)
             {
                 if (cur_genotype == '.')
-                    gt_arr[t++] = bcf_gt_missing;
+                    gt_arr_i32[t++] = bcf_gt_missing;
                 else
-                    gt_arr[t++] = bcf_gt_phased(int(cur_genotype - '0'));
+                    gt_arr_i32[t++] = bcf_gt_phased(int(cur_genotype - '0'));
 
             }
-            bcf_update_genotypes(out_hdr, rec, gt_arr.data(), _no_haplotypes);
+            bcf_update_genotypes(out_hdr, rec, gt_arr_i32.data(), _no_haplotypes);
         }
     }
     if(params.split_flag){
@@ -1142,8 +1240,12 @@ void Decompressor::appendVCF(variant_desc_t &_desc, vector<uint8_t> &_my_str, si
     }else {
         // Use parallel writer if enabled
         if (use_parallel_writing_ && parallel_writer_) {
-            // Duplicate record for parallel writing (writer takes ownership)
-            bcf1_t* rec_copy = bcf_dup(rec);
+            // Reuse pooled record for parallel writing (writer takes ownership)
+            bcf1_t* rec_copy = parallel_writer_->AcquireRecord();
+            if (!rec_copy)
+                rec_copy = bcf_dup(rec);
+            else
+                bcf_copy(rec_copy, rec);
             parallel_writer_->WriteRecord(rec_copy);
         } else {
             bcf_write1(out_file, out_hdr, rec);
@@ -1166,7 +1268,19 @@ void Decompressor::appendVCFToRec(variant_desc_t &_desc, vector<uint8_t> &_genot
         logger->error("appendVCFToRec: _fields.size()={} != _keys.size()={}", _fields.size(), _keys.size());
     }
     bcf_clear(rec);
-    record = _desc.chrom + "\t0\t" + _desc.id + "\t" + _desc.ref + "\t" + _desc.alt + "\t" + _desc.qual + "\t" + "." + "\t" + ".";
+    record.clear();
+    record.reserve(_desc.chrom.size() + _desc.id.size() + _desc.ref.size() +
+                   _desc.alt.size() + _desc.qual.size() + 16);
+    record.append(_desc.chrom);
+    record.append("\t0\t");
+    record.append(_desc.id);
+    record.push_back('\t');
+    record.append(_desc.ref);
+    record.push_back('\t');
+    record.append(_desc.alt);
+    record.push_back('\t');
+    record.append(_desc.qual);
+    record.append("\t.\t.");
     kstring_t s;
     s.s = (char *)record.c_str();
     s.m = record.length();
@@ -1257,15 +1371,15 @@ void Decompressor::appendVCFToRec(variant_desc_t &_desc, vector<uint8_t> &_genot
                 }
             if(count <= INT8_MAX && count > INT8_MIN+1&&!GT_NULL_flag){
 
-                vector<uint8_t> gt_arr(_standard_block_size);
+                gt_arr_u8.resize(_standard_block_size);
                 uint32_t t = 0;
                 int cur_gt = 0;
                 for(uint32_t i = 0; i < actual_samples; i++){
                     cur_gt = i*decompression_reader.ploidy;
                     if(_genotype[cur_gt] == '.')
-                        gt_arr[cur_gt] = bcf_gt_missing;
+                        gt_arr_u8[cur_gt] = bcf_gt_missing;
                     else
-                        gt_arr[cur_gt] = bcf_gt_unphased((int)(_genotype[cur_gt]-'0'));
+                        gt_arr_u8[cur_gt] = bcf_gt_unphased((int)(_genotype[cur_gt]-'0'));
                     for(uint32_t j = 1;j< (uint32_t)decompression_reader.ploidy;j++){
                         cur_gt++;
                         // In sample subset mode, use phase info from the original sample
@@ -1274,16 +1388,16 @@ void Decompressor::appendVCFToRec(variant_desc_t &_desc, vector<uint8_t> &_genot
                         char phase_char = (phase_idx < _fields[id].data_size) ? _fields[id].data[phase_idx] : '|';
                         if(phase_char == '/'){
                             if(_genotype[cur_gt] == '.')
-                                    gt_arr[cur_gt] = bcf_gt_missing;
+                                    gt_arr_u8[cur_gt] = bcf_gt_missing;
                                 else
-                                    gt_arr[cur_gt] = bcf_gt_unphased((int)(_genotype[cur_gt]-'0'));
+                                    gt_arr_u8[cur_gt] = bcf_gt_unphased((int)(_genotype[cur_gt]-'0'));
 
                         }
                         else if(phase_char == '|'){
                             if(_genotype[cur_gt] == '.')
-                                gt_arr[cur_gt] = bcf_next_gt_missing;
+                                gt_arr_u8[cur_gt] = bcf_next_gt_missing;
                             else
-                                gt_arr[cur_gt] = bcf_gt_phased((int)(_genotype[cur_gt]-'0'));
+                                gt_arr_u8[cur_gt] = bcf_gt_phased((int)(_genotype[cur_gt]-'0'));
                         }
                         if (!is_sample_subset)
                             t++;
@@ -1293,7 +1407,7 @@ void Decompressor::appendVCFToRec(variant_desc_t &_desc, vector<uint8_t> &_genot
 
                 str.l = 3;
 
-                memcpy(str.s + str.l, gt_arr.data(), _standard_block_size * sizeof(uint8_t));
+                memcpy(str.s + str.l, gt_arr_u8.data(), _standard_block_size * sizeof(uint8_t));
                 str.l += _standard_block_size;
                 str.s[str.l] = 0;
 
@@ -1301,15 +1415,15 @@ void Decompressor::appendVCFToRec(variant_desc_t &_desc, vector<uint8_t> &_genot
             }
             else{
 
-                vector<int> gt_arr(_standard_block_size);
+                gt_arr_i32.resize(_standard_block_size);
                 uint32_t t = 0;
                 int cur_gt = 0;
                 for(uint32_t i = 0; i < actual_samples; i++){
                     cur_gt = i*decompression_reader.ploidy;
                     if(_genotype[cur_gt] == '.')
-                        gt_arr[cur_gt] = bcf_gt_missing;
+                        gt_arr_i32[cur_gt] = bcf_gt_missing;
                     else
-                        gt_arr[cur_gt] = bcf_gt_unphased(_genotype[cur_gt]-'0');
+                        gt_arr_i32[cur_gt] = bcf_gt_unphased(_genotype[cur_gt]-'0');
                     for(uint32_t j = 1;j< (uint32_t)decompression_reader.ploidy;j++){
                         cur_gt++;
                         // In sample subset mode, use phase info from the original sample
@@ -1318,25 +1432,25 @@ void Decompressor::appendVCFToRec(variant_desc_t &_desc, vector<uint8_t> &_genot
                         char phase_char = (phase_idx < _fields[id].data_size) ? _fields[id].data[phase_idx] : '|';
                         if(phase_char == '/'){
                         if(_genotype[cur_gt] == '.')
-                                gt_arr[cur_gt] = bcf_gt_missing;
+                                gt_arr_i32[cur_gt] = bcf_gt_missing;
                             else
-                                gt_arr[cur_gt] = bcf_gt_unphased(_genotype[cur_gt]-'0');
+                                gt_arr_i32[cur_gt] = bcf_gt_unphased(_genotype[cur_gt]-'0');
 
                         }
                         else if(phase_char == '|'){
                             if(_genotype[cur_gt] == '.')
-                                gt_arr[cur_gt] = bcf_next_gt_missing;
+                                gt_arr_i32[cur_gt] = bcf_next_gt_missing;
                             else
-                                gt_arr[cur_gt] = bcf_gt_phased(_genotype[cur_gt]-'0');
+                                gt_arr_i32[cur_gt] = bcf_gt_phased(_genotype[cur_gt]-'0');
                         }
                         else{
-                            gt_arr[cur_gt] =  GT_NOT_CALL;
+                            gt_arr_i32[cur_gt] =  GT_NOT_CALL;
                         }
                         if (!is_sample_subset)
                             t++;
                     }
                 }
-                bcf_update_genotypes(out_hdr, rec, gt_arr.data(), _standard_block_size);
+                bcf_update_genotypes(out_hdr, rec, gt_arr_i32.data(), _standard_block_size);
             }
             continue;
         }
@@ -1412,8 +1526,12 @@ void Decompressor::appendVCFToRec(variant_desc_t &_desc, vector<uint8_t> &_genot
     }else {
         // Use parallel writer if enabled
         if (use_parallel_writing_ && parallel_writer_) {
-            // Duplicate record for parallel writing (writer takes ownership)
-            bcf1_t* rec_copy = bcf_dup(rec);
+            // Reuse pooled record for parallel writing (writer takes ownership)
+            bcf1_t* rec_copy = parallel_writer_->AcquireRecord();
+            if (!rec_copy)
+                rec_copy = bcf_dup(rec);
+            else
+                bcf_copy(rec_copy, rec);
             parallel_writer_->WriteRecord(rec_copy);
         } else {
             bcf_write1(out_file, out_hdr, rec);
@@ -1537,6 +1655,7 @@ int Decompressor::BedFormatDecompress(){
     int vec1_start,vec2_start = decompression_reader.vec_len;
     // fields_pos  = 0;
     vector<uint8_t> my_str(standard_block_size);
+    std::string bim_line;
     // vector<uint32_t> rev_perm(standard_block_size);  //2024.1.16注释
     
     uint64_t curr_non_copy_vec_id_offset = start_chunk_actual_pos * 2 - rrr_rank_zeros_bit_vector[0](start_chunk_actual_pos) - 
@@ -1581,11 +1700,7 @@ int Decompressor::BedFormatDecompress(){
 
 
             variant_desc_t desc = fixed_variants_chunk_io[cur_block_id].data_compress[i];
-            string desc_pos = to_string(desc.pos);
-            size_t comma_pos = desc.alt.find(",");
-            string desc_alt = comma_pos == string::npos ? desc.alt : desc.alt.substr(0, comma_pos);
-            string bim_line = desc.chrom + "\t" + desc.id + "\t" + genetic_distance + "\t" + desc_pos + "\t" + desc_alt + "\t" + desc.ref + "\n";
-            
+            build_bim_line(bim_line, desc, genetic_distance);
             out_bim.Write(bim_line.c_str(), bim_line.size());
             for(int i = 0; i < (int)standard_block_size; i += 2){
                 char first = my_str[i];
@@ -1652,10 +1767,7 @@ int Decompressor::BedFormatDecompress(){
             c_out_line = cur_var % standard_block_size;
 
             variant_desc_t desc = fixed_variants_chunk_io[cur_block_id].data_compress[c_out_line];
-
-            string desc_pos = to_string(desc.pos);
-            string desc_alt = desc.alt.find(",") == string::npos ? desc.alt : desc.alt.substr(0,desc.alt.find(","));
-            string bim_line = desc.chrom + "\t" + desc.id + "\t" + genetic_distance + "\t" + desc_pos + "\t" + desc_alt + "\t" + desc.ref + "\n";
+            build_bim_line(bim_line, desc, genetic_distance);
             out_bim.Write(bim_line.c_str(), bim_line.size());
             for(int i = 0; i < (int)standard_block_size; i += 2){
                 char first = my_str[i];
@@ -1733,6 +1845,7 @@ int Decompressor::BedFormatDecompressTiled()
     }
 
     vector<uint8_t> my_str(haplotype_count);
+    std::string bim_line;
 
     uint64_t start_pair_id = static_cast<uint64_t>(start_chunk_actual_pos) * n_col_blocks;
     uint64_t gt_index_base_pair_id = start_pair_id;
@@ -1821,10 +1934,7 @@ int Decompressor::BedFormatDecompressTiled()
                 memcpy(my_str.data() + (full_byte_count << 3), gt_lookup_table[decomp_data[vec1_start]][decomp_data[vec2_start]], trailing_bits);
 
             // Write BIM line
-            string desc_pos = to_string(desc.pos);
-            size_t comma_pos = desc.alt.find(",");
-            string desc_alt = comma_pos == string::npos ? desc.alt : desc.alt.substr(0, comma_pos);
-            string bim_line = desc.chrom + "\t" + desc.id + "\t" + genetic_distance + "\t" + desc_pos + "\t" + desc_alt + "\t" + desc.ref + "\n";
+            build_bim_line(bim_line, desc, genetic_distance);
             out_bim.Write(bim_line.c_str(), bim_line.size());
 
             // Write BED data
@@ -1921,6 +2031,7 @@ int Decompressor::PgenFormatDecompressTiled()
     }
     vector<uint8_t> col_decomp_perm(max_col_vec_len * 2);
     vector<uint8_t> col_decomp(max_col_vec_len * 2);
+    std::string pvar_line;
 
     uint64_t pair_base = start_pair_id + static_cast<uint64_t>(chunk_variant_offset_io) * n_col_blocks;
 
@@ -1961,8 +2072,7 @@ int Decompressor::PgenFormatDecompressTiled()
             }
 
             // Write PVAR row
-            const std::string id = desc.id.empty() ? "." : desc.id;
-            std::string pvar_line = desc.chrom + "\t" + std::to_string(desc.pos) + "\t" + id + "\t" + desc.ref + "\t" + desc.alt + "\n";
+            build_pvar_line(pvar_line, desc);
             out_pvar.Write(pvar_line.c_str(), pvar_line.size());
 
             // Write packed hardcalls to PGEN (4 samples per byte)

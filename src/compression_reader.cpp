@@ -2,6 +2,7 @@
 #include "logger.h"
 #include "fmt_compress/fmt_utils.h"
 #include "fmt_compress/vint_codec.h"
+#include <cstdlib>
 #include <iostream>
 #include <fstream>
 #include <sstream>
@@ -172,7 +173,7 @@ bool CompressionReader::setBitVector()
     vec_len = (no_samples * ploidy) / 8 + (((no_samples * ploidy) % 8) ? 1 : 0);
     block_max_size = vec_len * no_vec_in_block + 1;
     // phased_block_max_size = ((no_samples *  (ploidy-1)) / 8 + (((no_samples *  (ploidy-1)) % 8)?1:0))*no_vec_in_block/2;
-    bv.Create(block_max_size);
+    CreateGtBuffer(bv, block_max_size);
 
     vec_read_fixed_fields = 0;
     fixed_fields_id = 0;
@@ -180,62 +181,88 @@ bool CompressionReader::setBitVector()
     vec_read_in_block = 0;
 
     // Initialize column block tiling after vec_len is calculated
-    initializeColumnBlocks();
+    initializeColumnBlocks(true);
 
     return true;
 }
 // ***************************************************************************************************************************************
-void CompressionReader::initializeColumnBlocks()
+bool CompressionReader::CreateGtBuffer(CBitMemory &bm, int64_t size)
+{
+    if (Gt_queue)
+    {
+        unsigned char *buffer = Gt_queue->AcquireBuffer(static_cast<size_t>(size));
+        return bm.CreateFromBuffer(buffer, size, false);
+    }
+    return bm.Create(size);
+}
+// ***************************************************************************************************************************************
+void CompressionReader::ReleaseUnusedBuffer(CBitMemory &bm, int64_t size)
+{
+    if (!bm.mem_buffer)
+        return;
+    const bool pooled = (Gt_queue && !bm.mem_buffer_ownership);
+    unsigned char *buffer = pooled ? bm.mem_buffer : nullptr;
+    bm.Close();
+    if (pooled && buffer)
+        Gt_queue->ReleaseBuffer(buffer, static_cast<size_t>(size));
+}
+// ***************************************************************************************************************************************
+void CompressionReader::initializeColumnBlocks(bool create_buffers)
 {
     auto logger = LogManager::Instance().Logger();
 
-    // Guard against double initialization
-    if (!col_block_sizes.empty() || !col_block_vec_lens.empty())
+    if (col_block_sizes.empty() || col_block_vec_lens.empty())
     {
-        logger->debug("Column blocks already initialized, skipping");
-        return;
+        total_haplotypes = no_samples * ploidy;
+
+        // Check if column tiling should be enabled
+        if (max_block_cols == 0 || max_block_cols >= total_haplotypes)
+        {
+            // Legacy single-column-block mode
+            n_col_blocks = 1;
+            col_block_sizes.push_back(total_haplotypes);
+            col_block_vec_lens.push_back(vec_len);
+            logger->debug("Column tiling: LEGACY mode (n_col_blocks=1, total_haplotypes={})", total_haplotypes);
+            if (create_buffers)
+                col_buffers_initialized = true;
+            return;
+        }
+
+        // Tiled mode: calculate number of column blocks
+        n_col_blocks = (total_haplotypes + max_block_cols - 1) / max_block_cols;
+        col_block_sizes.reserve(n_col_blocks);
+        col_block_vec_lens.reserve(n_col_blocks);
+
+        logger->debug("Column tiling: TILED mode (n_col_blocks={}, total_haplotypes={}, max_block_cols={}, no_vec_in_block={})",
+                      n_col_blocks, total_haplotypes, max_block_cols, no_vec_in_block);
+
+        for (uint32_t cb = 0; cb < n_col_blocks; ++cb)
+        {
+            uint32_t start_hap = cb * max_block_cols;
+            uint32_t end_hap = std::min(start_hap + max_block_cols, total_haplotypes);
+            uint32_t block_size = end_hap - start_hap;
+
+            col_block_sizes.push_back(block_size);
+            // Calculate vec_len for this column block: ceil(block_size / 8)
+            uint64_t block_vec_len = (block_size + 7) / 8;
+            col_block_vec_lens.push_back(block_vec_len);
+        }
     }
 
-    total_haplotypes = no_samples * ploidy;
-
-    // Check if column tiling should be enabled
-    if (max_block_cols == 0 || max_block_cols >= total_haplotypes)
-    {
-        // Legacy single-column-block mode
-        n_col_blocks = 1;
-        col_block_sizes.push_back(total_haplotypes);
-        col_block_vec_lens.push_back(vec_len);
-        logger->debug("Column tiling: LEGACY mode (n_col_blocks=1, total_haplotypes={})", total_haplotypes);
+    if (!create_buffers || col_buffers_initialized || n_col_blocks <= 1)
         return;
-    }
 
-    // Tiled mode: calculate number of column blocks
-    n_col_blocks = (total_haplotypes + max_block_cols - 1) / max_block_cols;
-    col_block_sizes.reserve(n_col_blocks);
-    col_block_vec_lens.reserve(n_col_blocks);
     col_bv_buffers.resize(n_col_blocks);
-    col_vec_read_in_block.resize(n_col_blocks, 0);
-
-    logger->debug("Column tiling: TILED mode (n_col_blocks={}, total_haplotypes={}, max_block_cols={}, no_vec_in_block={})",
-                  n_col_blocks, total_haplotypes, max_block_cols, no_vec_in_block);
+    col_vec_read_in_block.assign(n_col_blocks, 0);
 
     for (uint32_t cb = 0; cb < n_col_blocks; ++cb)
     {
-        uint32_t start_hap = cb * max_block_cols;
-        uint32_t end_hap = std::min(start_hap + max_block_cols, total_haplotypes);
-        uint32_t block_size = end_hap - start_hap;
-
-        col_block_sizes.push_back(block_size);
-        // Calculate vec_len for this column block: ceil(block_size / 8)
-        uint64_t block_vec_len = (block_size + 7) / 8;
-        col_block_vec_lens.push_back(block_vec_len);
-
-        // Initialize buffer for this column block
-        uint64_t col_block_max_size = block_vec_len * no_vec_in_block + 1;
+        uint64_t col_block_max_size = col_block_vec_lens[cb] * no_vec_in_block + 1;
         logger->debug("  Column block {}: haplotypes={}, vec_len={}, buffer_size={}",
-                      cb, block_size, block_vec_len, col_block_max_size);
-        col_bv_buffers[cb].Create(col_block_max_size);
+                      cb, col_block_sizes[cb], col_block_vec_lens[cb], col_block_max_size);
+        CreateGtBuffer(col_bv_buffers[cb], col_block_max_size);
     }
+    col_buffers_initialized = true;
 }
 // ***************************************************************************************************************************************
 void CompressionReader::GetOtherField(vector<key_desc> &_keys, uint32_t &_no_keys, int &_key_gt_id)
@@ -406,6 +433,23 @@ inline void EnsureFieldCapacity(field_desc &f, uint32_t bytes)
     }
     f.data_size = bytes;
 }
+
+inline bool EnsureHtsBuffer(void **dst, int *ndst, size_t want_elems, size_t elem_size)
+{
+    if (want_elems == 0)
+        return true;
+    if (*ndst >= 0 && want_elems <= static_cast<size_t>(*ndst))
+        return true;
+    size_t new_elems = want_elems;
+    if (*ndst > 0)
+        new_elems = std::max(new_elems, static_cast<size_t>(*ndst) * 2);
+    void *p = std::realloc(*dst, new_elems * elem_size);
+    if (!p)
+        return false;
+    *dst = p;
+    *ndst = static_cast<int>(new_elems);
+    return true;
+}
 } // namespace
 
 bool CompressionReader::GetVariantFromRec(bcf1_t *rec, vector<field_desc> &fields)
@@ -451,19 +495,22 @@ bool CompressionReader::GetVariantFromRec(bcf1_t *rec, vector<field_desc> &field
             switch (type)
             {
             case BCF_HT_INT:
-
-                curr_size = bcf_get_info_values(vcf_hdr, rec, vcf_hdr->id[BCF_DT_ID][z->key].key, &dst_int, &ndst_int, type);
+                if (!EnsureHtsBuffer(&dst_info_int, &ndst_info_int, z->len > 0 ? static_cast<size_t>(z->len) : 0u, sizeof(int32_t)))
+                    return false;
+                curr_size = bcf_get_info_values(vcf_hdr, rec, vcf_hdr->id[BCF_DT_ID][z->key].key, &dst_info_int, &ndst_info_int, type);
                 break;
             case BCF_HT_REAL:
-
-                curr_size = bcf_get_info_values(vcf_hdr, rec, vcf_hdr->id[BCF_DT_ID][z->key].key, &dst_real, &ndst_real, type);
+                if (!EnsureHtsBuffer(&dst_info_real, &ndst_info_real, z->len > 0 ? static_cast<size_t>(z->len) : 0u, sizeof(float)))
+                    return false;
+                curr_size = bcf_get_info_values(vcf_hdr, rec, vcf_hdr->id[BCF_DT_ID][z->key].key, &dst_info_real, &ndst_info_real, type);
                 break;
             case BCF_HT_STR:
-
-                curr_size = bcf_get_info_values(vcf_hdr, rec, vcf_hdr->id[BCF_DT_ID][z->key].key, &dst_str, &ndst_str, type);
+                if (!EnsureHtsBuffer(&dst_info_str, &ndst_info_str, z->vptr_len, 1))
+                    return false;
+                curr_size = bcf_get_info_values(vcf_hdr, rec, vcf_hdr->id[BCF_DT_ID][z->key].key, &dst_info_str, &ndst_info_str, type);
                 break;
             case BCF_HT_FLAG:
-                curr_size = bcf_get_info_values(vcf_hdr, rec, vcf_hdr->id[BCF_DT_ID][z->key].key, &dst_flag, &ndst_flag, type);
+                curr_size = 1;
                 break;
             }
 
@@ -473,15 +520,15 @@ bool CompressionReader::GetVariantFromRec(bcf1_t *rec, vector<field_desc> &field
                 {
                 case BCF_HT_INT:
                     EnsureFieldCapacity(cur_field, (uint32_t)curr_size * 4);
-                    memcpy(cur_field.data, (char *)dst_int, cur_field.data_size);
+                    memcpy(cur_field.data, (char *)dst_info_int, cur_field.data_size);
                     break;
                 case BCF_HT_REAL:
                     EnsureFieldCapacity(cur_field, (uint32_t)curr_size * 4);
-                    memcpy(cur_field.data, (char *)dst_real, cur_field.data_size);
+                    memcpy(cur_field.data, (char *)dst_info_real, cur_field.data_size);
                     break;
                 case BCF_HT_STR:
                     EnsureFieldCapacity(cur_field, (uint32_t)curr_size);
-                    memcpy(cur_field.data, (char *)dst_str, cur_field.data_size);
+                    memcpy(cur_field.data, (char *)dst_info_str, cur_field.data_size);
                     break;
                 case BCF_HT_FLAG:
                     cur_field.data = nullptr;
@@ -551,16 +598,22 @@ bool CompressionReader::GetVariantFromRec(bcf1_t *rec, vector<field_desc> &field
                     switch (bcf_ht_type)
                     {
                     case BCF_HT_INT:
-                        curr_size = bcf_get_format_values(vcf_hdr, rec, vcf_hdr_key, &dst_int, &ndst_int, bcf_ht_type);
+                        if (!EnsureHtsBuffer(&dst_fmt_int, &ndst_fmt_int, fmt[i].n > 0 ? static_cast<size_t>(fmt[i].n) * rec->n_sample : 0u, sizeof(int32_t)))
+                            return false;
+                        curr_size = bcf_get_format_values(vcf_hdr, rec, vcf_hdr_key, &dst_fmt_int, &ndst_fmt_int, bcf_ht_type);
                         break;
                     case BCF_HT_REAL:
-                        curr_size = bcf_get_format_values(vcf_hdr, rec, vcf_hdr_key, &dst_real, &ndst_real, bcf_ht_type);
+                        if (!EnsureHtsBuffer(&dst_fmt_real, &ndst_fmt_real, fmt[i].n > 0 ? static_cast<size_t>(fmt[i].n) * rec->n_sample : 0u, sizeof(float)))
+                            return false;
+                        curr_size = bcf_get_format_values(vcf_hdr, rec, vcf_hdr_key, &dst_fmt_real, &ndst_fmt_real, bcf_ht_type);
                         break;
                     case BCF_HT_STR:
-                        curr_size = bcf_get_format_values(vcf_hdr, rec, vcf_hdr_key, &dst_str, &ndst_str, bcf_ht_type);
+                        if (!EnsureHtsBuffer(&dst_fmt_str, &ndst_fmt_str, fmt[i].size > 0 ? static_cast<size_t>(fmt[i].size) * rec->n_sample : 0u, 1))
+                            return false;
+                        curr_size = bcf_get_format_values(vcf_hdr, rec, vcf_hdr_key, &dst_fmt_str, &ndst_fmt_str, bcf_ht_type);
                         break;
                     case BCF_HT_FLAG:
-                        curr_size = bcf_get_format_values(vcf_hdr, rec, vcf_hdr_key, &dst_flag, &ndst_flag, bcf_ht_type);
+                        curr_size = 0;
                         break;
                     }
                 }
@@ -575,17 +628,17 @@ bool CompressionReader::GetVariantFromRec(bcf1_t *rec, vector<field_desc> &field
 
                         if (bcf_ht_type == BCF_HT_INT)
                         {
-                            memcpy(cur_field.data, dst_int, cur_field.data_size);
+                            memcpy(cur_field.data, dst_fmt_int, cur_field.data_size);
                         }
                         else if (bcf_ht_type == BCF_HT_REAL)
-                            memcpy(cur_field.data, dst_real, cur_field.data_size);
+                            memcpy(cur_field.data, dst_fmt_real, cur_field.data_size);
                         // else if (bcf_ht_type == BCF_HT_STR)
                         //     memcpy(cur_field.data, dst_int, curr_size * 4); // GTs are ints!
                     }
                     else if (bcf_ht_type == BCF_HT_STR)
                     {
                         EnsureFieldCapacity(cur_field, (uint32_t)curr_size);
-                        memcpy(cur_field.data, dst_str, cur_field.data_size);
+                        memcpy(cur_field.data, dst_fmt_str, cur_field.data_size);
                     }
                     else
                         assert(0);
@@ -1430,13 +1483,13 @@ void CompressionReader::addVariant(int *gt_data, int ngt_data, variant_desc_t &d
 
                 bv.TakeOwnership();
 
-                Gt_queue->Push(block_id, 0, bv.mem_buffer, vec_read_in_block, v_vcf_data_compress);
+                Gt_queue->Push(block_id, 0, bv.mem_buffer, static_cast<size_t>(block_max_size), vec_read_in_block, v_vcf_data_compress);
                 v_vcf_data_compress.clear();
                 no_chrom_num++;
                 no_vec = no_vec + vec_read_in_block;
                 block_id++;
                 bv.Close();
-                bv.Create(block_max_size);
+                CreateGtBuffer(bv, block_max_size);
                 vec_read_in_block = 0;
             }
         }
@@ -1502,6 +1555,7 @@ void CompressionReader::addVariant(int *gt_data, int ngt_data, variant_desc_t &d
                 {
                     CBitMemory &col_bv = col_bv_buffers[col_block_id];
                     col_bv.TakeOwnership();
+                    const uint64_t col_block_max_size = col_block_vec_lens[col_block_id] * no_vec_in_block + 1;
 
                     logger->debug("  Pushing col_block {}: block_id={}, num_rows={}, buffer_size={}",
                                   col_block_id, block_id, no_vec_in_block, col_bv.mem_buffer_pos);
@@ -1511,20 +1565,19 @@ void CompressionReader::addVariant(int *gt_data, int ngt_data, variant_desc_t &d
                     if (col_block_id < n_col_blocks - 1)
                     {
                         vector<variant_desc_t> empty_v;
-                        Gt_queue->Push(block_id, col_block_id, col_bv.mem_buffer, no_vec_in_block, empty_v);
+                        Gt_queue->Push(block_id, col_block_id, col_bv.mem_buffer, static_cast<size_t>(col_block_max_size), no_vec_in_block, empty_v);
                     }
                     else
                     {
                         // Last column block carries the actual variant descriptors
-                        Gt_queue->Push(block_id, col_block_id, col_bv.mem_buffer, no_vec_in_block, v_vcf_data_compress);
+                        Gt_queue->Push(block_id, col_block_id, col_bv.mem_buffer, static_cast<size_t>(col_block_max_size), no_vec_in_block, v_vcf_data_compress);
                     }
 
                     no_chrom_num++;
                     no_vec += no_vec_in_block;
 
                     col_bv.Close();
-                    uint64_t col_block_max_size = col_block_vec_lens[col_block_id] * no_vec_in_block + 1;
-                    col_bv.Create(col_block_max_size);
+                    CreateGtBuffer(col_bv, col_block_max_size);
                     col_vec_read_in_block[col_block_id] = 0;
                 }
 
@@ -1552,13 +1605,13 @@ void CompressionReader::addVariant(int *gt_data, int ngt_data, variant_desc_t &d
         {
 
             bv.TakeOwnership();
-            Gt_queue->Push(block_id, 0, bv.mem_buffer, vec_read_in_block, v_vcf_data_compress);
+            Gt_queue->Push(block_id, 0, bv.mem_buffer, static_cast<size_t>(block_max_size), vec_read_in_block, v_vcf_data_compress);
             v_vcf_data_compress.clear();
             no_chrom_num++;
             no_vec = no_vec + vec_read_in_block;
             block_id++;
             bv.Close();
-            bv.Create(block_max_size);
+            CreateGtBuffer(bv, block_max_size);
             vec_read_in_block = 0;
         }
 
@@ -1646,24 +1699,24 @@ void CompressionReader::addVariant(int *gt_data, int ngt_data, variant_desc_t &d
                 {
                     CBitMemory &col_bv = col_bv_buffers[col_block_id];
                     col_bv.TakeOwnership();
+                    const uint64_t col_block_max_size = col_block_vec_lens[col_block_id] * no_vec_in_block + 1;
 
                     // Only the last column block carries the variant descriptors
                     if (col_block_id < n_col_blocks - 1)
                     {
                         vector<variant_desc_t> empty_v;
-                        Gt_queue->Push(block_id, col_block_id, col_bv.mem_buffer, no_vec_in_block, empty_v);
+                        Gt_queue->Push(block_id, col_block_id, col_bv.mem_buffer, static_cast<size_t>(col_block_max_size), no_vec_in_block, empty_v);
                     }
                     else
                     {
-                        Gt_queue->Push(block_id, col_block_id, col_bv.mem_buffer, no_vec_in_block, v_vcf_data_compress);
+                        Gt_queue->Push(block_id, col_block_id, col_bv.mem_buffer, static_cast<size_t>(col_block_max_size), no_vec_in_block, v_vcf_data_compress);
                     }
 
                     no_chrom_num++;
                     no_vec += no_vec_in_block;
 
                     col_bv.Close();
-                    uint64_t col_block_max_size = col_block_vec_lens[col_block_id] * no_vec_in_block + 1;
-                    col_bv.Create(col_block_max_size);
+                    CreateGtBuffer(col_bv, col_block_max_size);
                     col_vec_read_in_block[col_block_id] = 0;
                 }
 
@@ -1724,7 +1777,7 @@ uint32_t CompressionReader::setNoVecBlock(GSC_Params &params)
         vec_len = (no_samples * ploidy) / 8 + (((no_samples * ploidy) % 8) ? 1 : 0);
 
         // Initialize column blocks now that we have all required metadata
-        initializeColumnBlocks();
+        initializeColumnBlocks(false);
     }
     return 0;
 }
@@ -1745,12 +1798,16 @@ void CompressionReader::CloseFiles()
         if (vec_read_in_block)
         {
             bv.TakeOwnership();
-            Gt_queue->Push(block_id, 0, bv.mem_buffer, vec_read_in_block, v_vcf_data_compress);
+            Gt_queue->Push(block_id, 0, bv.mem_buffer, static_cast<size_t>(block_max_size), vec_read_in_block, v_vcf_data_compress);
             no_chrom_num++;
             block_id++;
             no_vec = no_vec + vec_read_in_block;
             vec_read_in_block = 0;
             bv.Close();
+        }
+        else
+        {
+            ReleaseUnusedBuffer(bv, block_max_size);
         }
     }
     else
@@ -1775,17 +1832,18 @@ void CompressionReader::CloseFiles()
                 flushed_data = true;
                 CBitMemory &col_bv = col_bv_buffers[col_block_id];
                 col_bv.TakeOwnership();
+                const uint64_t col_block_max_size = col_block_vec_lens[col_block_id] * no_vec_in_block + 1;
 
                 // Only pass v_vcf_data_compress on the last column block
                 // For other blocks, pass an empty temporary vector
                 if ((int)col_block_id == last_nonempty_col_block)
                 {
-                    Gt_queue->Push(block_id, col_block_id, col_bv.mem_buffer, col_vec_read_in_block[col_block_id], v_vcf_data_compress);
+                    Gt_queue->Push(block_id, col_block_id, col_bv.mem_buffer, static_cast<size_t>(col_block_max_size), col_vec_read_in_block[col_block_id], v_vcf_data_compress);
                 }
                 else
                 {
                     std::vector<variant_desc_t> empty_vec;
-                    Gt_queue->Push(block_id, col_block_id, col_bv.mem_buffer, col_vec_read_in_block[col_block_id], empty_vec);
+                    Gt_queue->Push(block_id, col_block_id, col_bv.mem_buffer, static_cast<size_t>(col_block_max_size), col_vec_read_in_block[col_block_id], empty_vec);
                 }
 
                 no_chrom_num++;
@@ -1801,8 +1859,10 @@ void CompressionReader::CloseFiles()
         }
     }
 
+    ReleasePendingGtBuffers();
+
     v_vcf_data_compress.emplace_back(variant_desc_t());
-    Gt_queue->Push(block_id, 0, nullptr, 0, v_vcf_data_compress);
+    Gt_queue->Push(block_id, 0, nullptr, 0, 0, v_vcf_data_compress);
 
     block_id = 0;
     Gt_queue->Complete();
@@ -1828,6 +1888,25 @@ void CompressionReader::CloseFiles()
         part_queue->Complete();
     }
     // file_handle2->Close();
+}
+// ***************************************************************************************************************************************
+void CompressionReader::ReleasePendingGtBuffers()
+{
+    if (bv.mem_buffer)
+        ReleaseUnusedBuffer(bv, block_max_size);
+
+    if (n_col_blocks > 1)
+    {
+        for (uint32_t col_block_id = 0; col_block_id < n_col_blocks; ++col_block_id)
+        {
+            CBitMemory &col_bv = col_bv_buffers[col_block_id];
+            if (col_bv.mem_buffer)
+            {
+                uint64_t col_block_max_size = col_block_vec_lens[col_block_id] * no_vec_in_block + 1;
+                ReleaseUnusedBuffer(col_bv, col_block_max_size);
+            }
+        }
+    }
 }
 // ***************************************************************************************************************************************
 vector<int> CompressionReader::topo_sort(unordered_map<int, unordered_set<int>> &graph, unordered_map<int, int> inDegree)

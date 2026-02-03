@@ -143,6 +143,29 @@ bool CBitMemory::Create(int64_t size)
     return mode == mode_mem_write;
 }
 // ********************************************************************************************
+bool CBitMemory::CreateFromBuffer(uint8_t *buffer, int64_t size, bool take_ownership)
+{
+    if (mode != mode_none)
+        return false;
+
+    if (mem_buffer && mem_buffer_ownership)
+        delete[] mem_buffer;
+
+    if (!size)
+        size = 1;
+    mem_buffer_size = size;
+    mem_buffer = buffer;
+    mem_buffer_ownership = take_ownership;
+
+    mode = mode_mem_write;
+    mem_buffer_pos = 0;
+    word_buffer_size = 32;
+    word_buffer = 0;
+    word_buffer_pos = 0;
+
+    return mode == mode_mem_write;
+}
+// ********************************************************************************************
 bool CBitMemory::Close()
 {
     if(mode != mode_mem_write && mode != mode_mem_read)

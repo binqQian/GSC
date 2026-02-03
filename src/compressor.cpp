@@ -871,6 +871,54 @@ bool Compressor::CompressProcess()
         std::vector<bool> copies;
         std::vector<uint32_t> origin_of_copy;
         std::vector<uint8_t> samples_indexes;
+
+        void Reset()
+        {
+            block_id = 0;
+            col_block_id = 0;
+            num_rows = 0;
+            v_vcf_data_io.clear();
+            perm.clear();
+            zeros_only.clear();
+            copies.clear();
+            origin_of_copy.clear();
+            samples_indexes.clear();
+        }
+    };
+
+    using GtProcessResultPtr = std::unique_ptr<GtProcessResult>;
+
+    class GtResultPool
+    {
+        std::mutex mtx_;
+        std::vector<GtProcessResultPtr> pool_;
+        size_t max_size_ = 0;
+
+    public:
+        explicit GtResultPool(size_t max_size) : max_size_(max_size) {}
+
+        GtProcessResultPtr Acquire()
+        {
+            std::lock_guard<std::mutex> lock(mtx_);
+            if (!pool_.empty())
+            {
+                auto ptr = std::move(pool_.back());
+                pool_.pop_back();
+                return ptr;
+            }
+            return std::make_unique<GtProcessResult>();
+        }
+
+        void Release(GtProcessResultPtr ptr)
+        {
+            if (!ptr)
+                return;
+            ptr->Reset();
+            std::lock_guard<std::mutex> lock(mtx_);
+            if (pool_.size() >= max_size_)
+                return;
+            pool_.push_back(std::move(ptr));
+        }
     };
 
     class GtResultQueue
@@ -878,7 +926,7 @@ bool Compressor::CompressProcess()
         std::mutex mtx_;
         std::condition_variable cv_pop_;
         std::condition_variable cv_push_;
-        std::deque<GtProcessResult> q_;
+        std::deque<GtProcessResultPtr> q_;
         size_t max_size_ = 0;
         bool done_ = false;
 
@@ -893,7 +941,7 @@ bool Compressor::CompressProcess()
             cv_push_.notify_all();
         }
 
-        bool Push(GtProcessResult &&r)
+        bool Push(GtProcessResultPtr &r)
         {
             std::unique_lock<std::mutex> lock(mtx_);
             cv_push_.wait(lock, [&] { return done_ || q_.size() < max_size_; });
@@ -904,7 +952,7 @@ bool Compressor::CompressProcess()
             return true;
         }
 
-        bool Pop(GtProcessResult &out)
+        bool Pop(GtProcessResultPtr &out)
         {
             std::unique_lock<std::mutex> lock(mtx_);
             cv_pop_.wait(lock, [&] { return done_ || !q_.empty(); });
@@ -918,6 +966,7 @@ bool Compressor::CompressProcess()
     };
 
     GtResultQueue gt_result_queue(max((int)(params.no_blocks * params.no_gt_threads), 8));
+    GtResultPool gt_result_pool(max((int)(params.no_blocks * params.no_gt_threads), 8));
 
     // Aggregator thread: commits GT results in strict (block_id, col_block_id) order, but workers never block on it.
     unique_ptr<thread> gt_agg_thread(new thread([&]()
@@ -930,7 +979,7 @@ bool Compressor::CompressProcess()
                                                         return (static_cast<uint64_t>(static_cast<uint32_t>(b)) << 32) | static_cast<uint64_t>(c);
                                                     };
 
-                                                    std::unordered_map<uint64_t, GtProcessResult> pending;
+                                                    std::unordered_map<uint64_t, GtProcessResultPtr> pending;
                                                     pending.reserve(params.no_gt_threads * 4);
 
                                                     int expected_block_id = 0;
@@ -1032,10 +1081,12 @@ bool Compressor::CompressProcess()
                                                         }
                                                     };
 
-                                                    GtProcessResult r;
+                                                    GtProcessResultPtr r;
                                                     while (gt_result_queue.Pop(r))
                                                     {
-                                                        pending.emplace(make_key(r.block_id, r.col_block_id), std::move(r));
+                                                        if (!r)
+                                                            continue;
+                                                        pending.emplace(make_key(r->block_id, r->col_block_id), std::move(r));
 
                                                         while (true)
                                                         {
@@ -1043,11 +1094,12 @@ bool Compressor::CompressProcess()
                                                             if (it == pending.end())
                                                                 break;
 
-                                                            GtProcessResult cur = std::move(it->second);
+                                                            GtProcessResultPtr cur = std::move(it->second);
                                                             pending.erase(it);
 
-                                                            const bool is_terminator = (cur.num_rows == 0);
-                                                            commit_result(cur);
+                                                            const bool is_terminator = (cur->num_rows == 0);
+                                                            commit_result(*cur);
+                                                            gt_result_pool.Release(std::move(cur));
 
                                                             if (is_terminator)
                                                             {
@@ -1104,31 +1156,44 @@ bool Compressor::CompressProcess()
                                                      uint32_t col_block_id = 0; // NEW: column block ID
                                                      unsigned long num_rows;
                                                      unsigned char *data = nullptr;
+                                                     size_t data_size = 0;
                                                      vector<variant_desc_t> v_vcf_data_io;
-                                                     vector<uint32_t> origin_of_copy;
-                                                     origin_of_copy.reserve(no_variants_in_buf);
-                                                     vector<uint8_t> samples_indexes; // Index of the location where the block storing 1 is stored.
-                                                     vector<uint32_t> perm;
                                                      BlockProcess block_process(params);
+                                                     struct GtBufferOwner
+                                                     {
+                                                         GtBlockQueue *queue;
+                                                         unsigned char *data;
+                                                         size_t size;
+                                                         void Release()
+                                                         {
+                                                             if (queue && data)
+                                                             {
+                                                                 queue->ReleaseBuffer(data, size);
+                                                                 data = nullptr;
+                                                             }
+                                                         }
+                                                         ~GtBufferOwner() { Release(); }
+                                                     };
 
                                                      while (true)
                                                      {
-                                                         if (!inGtBlockQueue.Pop(block_id, col_block_id, data, num_rows, v_vcf_data_io))
+                                                         if (!inGtBlockQueue.Pop(block_id, col_block_id, data, data_size, num_rows, v_vcf_data_io))
                                                          {
                                                              break;
                                                          }
 
-                                                         std::unique_ptr<unsigned char[]> data_owner(data);
+                                                         GtBufferOwner data_owner{&inGtBlockQueue, data, data_size};
                                                          data = nullptr;
 
-                                                         // Reset per-block outputs to avoid cross-iteration contamination
-                                                         origin_of_copy.clear();
-                                                         samples_indexes.clear();
-                                                         perm.clear();
-
-                                                         vector<bool> zeros_only(num_rows, false);
-                                                         vector<bool> copies(num_rows, false);
-                                                         block_process.SetCurBlock(num_rows, reinterpret_cast<uint8_t *>(data_owner.get()));
+                                                         auto res = gt_result_pool.Acquire();
+                                                         res->Reset();
+                                                         res->block_id = block_id;
+                                                         res->col_block_id = col_block_id;
+                                                         res->num_rows = num_rows;
+                                                         res->v_vcf_data_io = std::move(v_vcf_data_io);
+                                                         res->zeros_only.assign(num_rows, false);
+                                                         res->copies.assign(num_rows, false);
+                                                         block_process.SetCurBlock(num_rows, reinterpret_cast<uint8_t *>(data_owner.data));
                                                          // Gets the sparse encoding for each block
 
                                                         if (num_rows && !gt_worker_error.load(std::memory_order_relaxed))
@@ -1157,36 +1222,27 @@ bool Compressor::CompressProcess()
                                                                                   block_id, col_block_id, num_rows, col_block_size, col_vec_len);
 
                                                                     // Prepare permutation buffer for this column block
-                                                                    perm.resize(col_block_size);
-                                                                    for (size_t i_p = 0; i_p < perm.size(); i_p++)
-                                                                        perm[i_p] = static_cast<uint32_t>(i_p);
+                                                                    res->perm.resize(col_block_size);
+                                                                    for (size_t i_p = 0; i_p < res->perm.size(); i_p++)
+                                                                        res->perm[i_p] = static_cast<uint32_t>(i_p);
 
-                                                                    block_process.ProcessSquareBlock(col_block_size, col_vec_len, perm, zeros_only, copies, origin_of_copy, samples_indexes, true);
+                                                                    block_process.ProcessSquareBlock(col_block_size, col_vec_len, res->perm, res->zeros_only, res->copies, res->origin_of_copy, res->samples_indexes, true);
 
                                                                     if (use_legacy_perm && num_rows == block_size)
-                                                                        block_process.ProcessVariant(perm, v_vcf_data_io);
+                                                                        block_process.ProcessVariant(res->perm, res->v_vcf_data_io);
 
-                                                             logger->debug("Finished GT block: block_id={}, col_block_id={}, perm_size={}", block_id, col_block_id, perm.size());
+                                                             logger->debug("Finished GT block: block_id={}, col_block_id={}, perm_size={}", block_id, col_block_id, res->perm.size());
                                                          }
                                                      }
                                                  }
 
                                                          // Free raw GT block as early as possible (even on error) to reduce peak RSS.
-                                                         data_owner.reset();
+                                                         data_owner.Release();
                                                          // Push results to the single aggregator thread for in-order commit.
-                                                         GtProcessResult res;
-                                                         res.block_id = block_id;
-                                                         res.col_block_id = col_block_id;
-                                                         res.num_rows = num_rows;
-                                                         res.v_vcf_data_io = std::move(v_vcf_data_io);
-                                                         res.perm = std::move(perm);
-                                                         res.zeros_only = std::move(zeros_only);
-                                                         res.copies = std::move(copies);
-                                                         res.origin_of_copy = std::move(origin_of_copy);
-                                                         res.samples_indexes = std::move(samples_indexes);
-                                                         if (!gt_result_queue.Push(std::move(res)))
+                                                         if (!gt_result_queue.Push(res))
                                                          {
                                                              // Aggregator is shutting down; exit worker loop.
+                                                             gt_result_pool.Release(std::move(res));
                                                              break;
                                                          }
                                                      }
@@ -1196,6 +1252,7 @@ bool Compressor::CompressProcess()
     {
         logger->error("ProcessInVCF failed; aborting compression early");
         gt_worker_error.store(true, std::memory_order_relaxed);
+        compression_reader->ReleasePendingGtBuffers();
         inGtBlockQueue.Complete();
         gt_result_queue.Complete();
         for (uint32_t i = 0; i < params.no_gt_threads; ++i)
