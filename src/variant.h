@@ -107,26 +107,46 @@ typedef struct key_desc_tag {
 typedef struct field_desc_tag {
     bool present = false;  // true if present in description
     char *data = nullptr;
-    uint32_t data_size = 0; //current size of allocated memory
+    uint32_t data_size = 0;   // payload size in bytes (0 when absent)
+    uint32_t capacity = 0;    // allocated size in bytes (>= data_size when data!=nullptr)
 
 
     field_desc_tag() = default;
 
-    field_desc_tag(field_desc_tag& other) {
-        // cout<<"copy"<<endl;
-        if (data_size) {
-            delete[] data;
-            data = nullptr;
-        }
+    field_desc_tag(const field_desc_tag& other)
+    {
         present = other.present;
         data_size = other.data_size;
-        
-        if(data_size){
-            data = new char[data_size+1];
+        capacity = other.data_size;
+        if (data_size)
+        {
+            data = new char[data_size];
             std::memcpy(data, other.data, data_size);
-            data[data_size] = '\0';
+        }
+    }
+
+    field_desc_tag& operator=(const field_desc_tag& other)
+    {
+        if (this == &other)
+            return *this;
+
+        present = other.present;
+        data_size = other.data_size;
+
+        if (other.data_size == 0)
+        {
+            // Keep existing allocation for reuse; just reset length.
+            return *this;
         }
 
+        if (capacity < other.data_size || data == nullptr)
+        {
+            delete[] data;
+            data = new char[other.data_size];
+            capacity = other.data_size;
+        }
+        std::memcpy(data, other.data, other.data_size);
+        return *this;
     }
   
     field_desc_tag(field_desc_tag&& other) noexcept
@@ -134,9 +154,11 @@ typedef struct field_desc_tag {
         // cout<<"Move"<<endl;
         present = other.present;
         data_size = other.data_size;
+        capacity = other.capacity;
         data = other.data;
         other.present = false;
         other.data_size = 0;
+        other.capacity = 0;
         other.data = nullptr;
     }
     field_desc_tag& operator=(field_desc_tag&& other) noexcept{
@@ -146,9 +168,11 @@ typedef struct field_desc_tag {
             data = nullptr;
             present = other.present;
             data_size = other.data_size;
+            capacity = other.capacity;
             data = other.data;
             other.present = false;
             other.data_size = 0;
+            other.capacity = 0;
             other.data = nullptr;
         }
         return *this;

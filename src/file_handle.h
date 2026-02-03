@@ -17,6 +17,9 @@ private:
 	FILE* f;
 	size_t f_offset;
 	string file_name;
+	size_t range_begin = 0;
+	size_t range_end = 0;
+	bool use_range = false;
 
 	struct part_t{
 		size_t offset;
@@ -46,12 +49,14 @@ private:
 	size_t read_fixed(size_t& x, FILE* file);
 	size_t read(size_t& x, FILE* file);
 	size_t read(string& s, FILE* file);
+	bool OpenInternal(const string& file_name, bool use_range, size_t range_begin, size_t range_size);
 
 public:
 	File_Handle_2(bool _input_mode);
 	~File_Handle_2();
 
 	bool Open(const string& temp_file2_fname);
+	bool OpenRange(const string& temp_file2_fname, size_t range_begin, size_t range_size);
 	bool Close();
 
 	int RegisterStream(string stream_name);

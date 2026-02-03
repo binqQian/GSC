@@ -105,14 +105,33 @@ public:
     explicit GtBlockQueue(size_t _capacity)
         : flag(false), capacity(_capacity) {}
 
+    ~GtBlockQueue()
+    {
+        std::unique_lock<std::mutex> lck(m_mutex);
+        while (!g_blocks.empty())
+        {
+            auto &blk = g_blocks.front();
+            if (blk && blk->data)
+            {
+                delete[] blk->data;
+                blk->data = nullptr;
+            }
+            g_blocks.pop_front();
+        }
+    }
+
     void Push(int id_block, uint32_t col_block_id, unsigned char *data, size_t num_rows, std::vector<variant_desc_t> &v_vcf_data_compress)
     {
-        std::unique_ptr<genotype_block_t> block(new genotype_block_t(id_block, col_block_id, data, num_rows, std::move(v_vcf_data_compress)));
-
         {
             std::unique_lock<std::mutex> lck(m_mutex);
-            cv_push.wait(lck, [this] { return g_blocks.size() < capacity; });
-            g_blocks.push_back(std::move(block));
+            cv_push.wait(lck, [this] { return g_blocks.size() < capacity || flag; });
+            if (flag)
+            {
+                if (data)
+                    delete[] data;
+                return;
+            }
+            g_blocks.push_back(std::make_unique<genotype_block_t>(id_block, col_block_id, data, num_rows, std::move(v_vcf_data_compress)));
         }
 
         cv_pop.notify_one();
@@ -151,6 +170,7 @@ public:
             flag = true;
         }
         cv_pop.notify_all();
+        cv_push.notify_all();
     }
 
 private:
@@ -690,7 +710,9 @@ public:
     void Push(uint32_t id_block, DataType data)
     {
         unique_lock<std::mutex> lck(m_mutex);
-        cv_push.wait(lck, [this] {return var_blocks.size() < capacity;});
+        cv_push.wait(lck, [this] {return var_blocks.size() < capacity || flag;});
+        if (flag)
+            return;
 
         var_blocks.emplace(variant_block_t(id_block, std::move(data)));
         
@@ -722,6 +744,7 @@ public:
         flag = true;
         
         cv_pop.notify_all();
+        cv_push.notify_all();
     }
 private:
     typedef struct variant_block
@@ -813,9 +836,11 @@ public:
     void Push(PartType &data)
     {
         unique_lock<std::mutex> lck(m_mutex);
-        cv_push.wait(lck, [this] {return part_queue.size() < capacity;});
+        cv_push.wait(lck, [this] {return part_queue.size() < capacity || flag;});
+        if (flag)
+            return;
 
-        part_queue.emplace_back(move(data));;
+        part_queue.emplace_back(move(data));
         
         cv_pop.notify_all();
     }
@@ -878,6 +903,7 @@ public:
         flag = true;
         
         cv_pop.notify_all();
+        cv_push.notify_all();
     }
 
 private:

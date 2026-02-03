@@ -61,11 +61,12 @@ void BlockProcess::permute_range_vec(uint64_t id_start, uint64_t id_stop, vector
     uint64_t part_vec = id_stop - id_start;
     size_t max_no_vec_in_block = static_cast<size_t>(part_vec);
     
-    uint32_t* comp_pos_copy = new uint32_t[max_no_vec_in_block];
+    comp_pos_copy_buf_.assign(max_no_vec_in_block, 0);
 
     // uint8_t* comp_samples_indexes = new uint8_t[max_no_vec_in_block*max_no_vec_in_block];
-    vector<uint32_t> sparse_matrix_cols;
-    sparse_matrix_cols.reserve(max_no_vec_in_block*n_h_samples);
+    sparse_matrix_cols_buf_.clear();
+    if (sparse_matrix_cols_buf_.capacity() < max_no_vec_in_block * n_h_samples)
+        sparse_matrix_cols_buf_.reserve(max_no_vec_in_block * n_h_samples);
 
     no_copy = 0;
 
@@ -75,23 +76,26 @@ void BlockProcess::permute_range_vec(uint64_t id_start, uint64_t id_stop, vector
 
     const uint32_t MC_ARRAY_SIZE = (max_no_vec_in_block+63) / 64;          
 
-    vector<mc_vec_t> mc_vectors;
-    // vector<mc_vec_t> new_mc_vectors;
-    // mt19937 mt;
+    struct mc_span_t
+    {
+        const uint64_t *p = nullptr;
+        size_t n = 0;
+        size_t size() const { return n; }
+        const uint64_t *data() const { return p; }
+        const uint64_t &operator[](size_t i) const { return p[i]; }
+    };
 
-    // Calculate bit vectors with bits from the randomly chosen variants
+    // One contiguous matrix: [n_h_samples][MC_ARRAY_SIZE]
+    mc_vectors_buf_.assign(n_h_samples * MC_ARRAY_SIZE, 0);
+    auto mc_at = [&](size_t i, size_t j) -> uint64_t& {
+        return mc_vectors_buf_[i * MC_ARRAY_SIZE + j];
+    };
+    auto mc_row = [&](int i) -> mc_span_t {
+        return mc_span_t{mc_vectors_buf_.data() + static_cast<size_t>(i) * MC_ARRAY_SIZE, MC_ARRAY_SIZE};
+    };
+    n_ones_buf_.assign(n_h_samples, 0);
 
-    mc_vec_t empty_vec;
-
-    // empty_vec.fill(0);
-
-    empty_vec.resize(MC_ARRAY_SIZE, 0);                        
-
-    mc_vectors.resize(n_h_samples, empty_vec);
-    // new_mc_vectors.resize(n_h_samples, empty_vec);
-    vector<int> n_ones(n_h_samples, 0);
-
-    vector<int> mc_ids;
+    mc_ids_buf_.clear();
 
     for (int i = 0; i < (int)part_vec; ++i)
 
@@ -116,7 +120,7 @@ void BlockProcess::permute_range_vec(uint64_t id_start, uint64_t id_stop, vector
 
         if (!empty)
 
-            mc_ids.emplace_back(i);
+            mc_ids_buf_.emplace_back(i);
         else{
             zeros[i] = 1;
             // cout<<"zi:"<<i<<endl;
@@ -125,7 +129,7 @@ void BlockProcess::permute_range_vec(uint64_t id_start, uint64_t id_stop, vector
 
     // random_shuffle(mc_ids.begin(), mc_ids.end());
 
-    uint32_t mc_sort_size = mc_ids.size() >  max_no_vec_in_block ? max_no_vec_in_block  : mc_ids.size(); 
+    uint32_t mc_sort_size = mc_ids_buf_.size() >  max_no_vec_in_block ? max_no_vec_in_block  : mc_ids_buf_.size(); 
 
     // sort(mc_ids.begin(), mc_ids.begin() + mc_sort_size);
     // cout<<"mc_sort_size:"<<mc_sort_size<<endl;
@@ -134,7 +138,7 @@ void BlockProcess::permute_range_vec(uint64_t id_start, uint64_t id_stop, vector
 
     {
 
-        uint32_t id_cur = mc_ids[i] + id_start;
+        uint32_t id_cur = mc_ids_buf_[i] + id_start;
 
         auto cur_vec = data + id_cur * cur_vec_len;
 
@@ -144,22 +148,23 @@ void BlockProcess::permute_range_vec(uint64_t id_start, uint64_t id_stop, vector
 
         for (size_t j = 0; j < n_h_samples; ++j)
 
-        {
+	        {
 
-            if (cur_vec[j / 8] & perm_lut8[j % 8])
+	            if (cur_vec[j / 8] & perm_lut8[j % 8])
 
-            {
+	            {
 
-                mc_vectors[j][arr_id] += perm_lut64[arr_pos];
+	                mc_at(j, arr_id) |= perm_lut64[arr_pos];
 
-                ++n_ones[j];
-            }
-        }
-    }
-    mc_ids.shrink_to_fit();
+	                ++n_ones_buf_[j];
+	            }
+	        }
+	    }
+    // Keep capacity for reuse across blocks (avoids allocator churn).
     // Determine the best permutation
 
-    vector<uint32_t> perm;
+    perm_buf_.clear();
+    perm_buf_.reserve(n_h_samples + 2);
 
     uint64_t cost_perm = 0;
 
@@ -167,13 +172,13 @@ void BlockProcess::permute_range_vec(uint64_t id_start, uint64_t id_stop, vector
 
     list<pair<int, int>> density_list;
 
-    density_list.emplace_back(make_pair(0, n_ones[0]));
-    perm.emplace_back(0);
+    density_list.emplace_back(make_pair(0, n_ones_buf_[0]));
+    perm_buf_.emplace_back(0);
     auto p = density_list.begin();
 
-    for (int i = 1; i < (int)n_ones.size(); ++i)
+    for (int i = 1; i < (int)n_ones_buf_.size(); ++i)
 
-        density_list.emplace_back(make_pair(i, n_ones[i]));
+        density_list.emplace_back(make_pair(i, n_ones_buf_[i]));
 
     // Insert two guards into list
 
@@ -192,28 +197,27 @@ void BlockProcess::permute_range_vec(uint64_t id_start, uint64_t id_stop, vector
     // cout<<p->first<<":"<<p->second<<endl;
     size_t n_cur_samples = n_h_samples;
 
-    uint64_t** new_mc_vectors = new uint64_t*[n_h_samples];
+    new_mc_vectors_buf_.resize(n_h_samples * MC_ARRAY_SIZE);
+    auto new_mc_at = [&](size_t i, size_t j) -> uint64_t& {
+        return new_mc_vectors_buf_[i * MC_ARRAY_SIZE + j];
+    };
 
-    for(size_t i = 0 ;i < n_h_samples ;i++)
-        new_mc_vectors[i] = new uint64_t[MC_ARRAY_SIZE];
-
-    uint64_t* new_xor = new uint64_t[MC_ARRAY_SIZE];
-
-    uint64_t* best_new_xor = new uint64_t[MC_ARRAY_SIZE];
+    new_xor_buf_.resize(MC_ARRAY_SIZE);
+    best_new_xor_buf_.resize(MC_ARRAY_SIZE);
     
     while (n_cur_samples)
 
     {
         
-        for(size_t t = 0 ; t < MC_ARRAY_SIZE; t++)        
-        {
-            if((n_h_samples-n_cur_samples) %8 == 0)
-            
-                best_new_xor[t] = mc_vectors[p->first][t];
-            
-            new_mc_vectors[n_h_samples-n_cur_samples][t]=best_new_xor[t];
+	        for(size_t t = 0 ; t < MC_ARRAY_SIZE; t++)        
+	        {
+	            if((n_h_samples-n_cur_samples) %8 == 0)
+	            
+	                best_new_xor_buf_[t] = mc_at(static_cast<size_t>(p->first), t);
+	            
+	            new_mc_at(n_h_samples-n_cur_samples, t)=best_new_xor_buf_[t];
 
-        }     
+	        }     
 
         uint64_t best_cost = huge_val;
 
@@ -246,20 +250,20 @@ void BlockProcess::permute_range_vec(uint64_t id_start, uint64_t id_stop, vector
 
                 break;
 
-            if (dif_up < dif_down)
+	            if (dif_up < dif_down)
 
-            {
+	            {
 
-                uint64_t cost = bit_cost(mc_vectors[p->first], mc_vectors[p_up->first], best_cost,new_xor);
-                if (cost < best_cost)
+		                uint64_t cost = bit_cost(mc_row(p->first), mc_row(p_up->first), best_cost, new_xor_buf_.data());
+	                if (cost < best_cost)
 
-                {
+	                {
 
-                    best_cost = cost;
+	                    best_cost = cost;
 
                     best_p = p_up;
                    
-                    memcpy(best_new_xor,new_xor,MC_ARRAY_SIZE*sizeof(uint64_t));
+	                    memcpy(best_new_xor_buf_.data(),new_xor_buf_.data(),MC_ARRAY_SIZE*sizeof(uint64_t));
 
                     if (best_cost == 0)
 
@@ -271,19 +275,19 @@ void BlockProcess::permute_range_vec(uint64_t id_start, uint64_t id_stop, vector
                 dif_up = abs(p->second - p_up->second);
             }
 
-            else
-            {
-                uint64_t cost = bit_cost(mc_vectors[p->first], mc_vectors[p_down->first], best_cost,new_xor);
-                
-                if (cost < best_cost)
+	            else
+	            {
+		                uint64_t cost = bit_cost(mc_row(p->first), mc_row(p_down->first), best_cost, new_xor_buf_.data());
+	                
+	                if (cost < best_cost)
 
-                {
+	                {
 
                     best_cost = cost;
 
                     best_p = p_down;
 
-                    memcpy(best_new_xor,new_xor,MC_ARRAY_SIZE*sizeof(uint64_t));
+	                    memcpy(best_new_xor_buf_.data(),new_xor_buf_.data(),MC_ARRAY_SIZE*sizeof(uint64_t));
 
                     if (best_cost == 0)
 
@@ -296,7 +300,7 @@ void BlockProcess::permute_range_vec(uint64_t id_start, uint64_t id_stop, vector
             }
         }
 
-        perm.emplace_back(best_p->first);
+        perm_buf_.emplace_back(best_p->first);
 
         density_list.erase(p);
 
@@ -307,15 +311,6 @@ void BlockProcess::permute_range_vec(uint64_t id_start, uint64_t id_stop, vector
         --n_cur_samples;
     }
 
-    delete [] new_xor;
-
-    delete [] best_new_xor;
-
-    empty_vec.shrink_to_fit();
-
-    mc_vectors.shrink_to_fit();
-
-    
     v_perm.clear();
 
     v_perm.resize(n_h_samples, 0);
@@ -323,16 +318,16 @@ void BlockProcess::permute_range_vec(uint64_t id_start, uint64_t id_stop, vector
     for (size_t i = 0; i < n_h_samples; ++i)
     {
         // v_perm[perm[i]] = i;
-        v_perm[i] = perm[i];
+        v_perm[i] = perm_buf_[i];
 
     }
-    perm.shrink_to_fit();
-
-    uint8_t *old_vec = new uint8_t[cur_vec_len];
+    old_vec_storage_.resize(cur_vec_len);
+    uint8_t *old_vec = old_vec_storage_.data();
 
     size_t mc_tr=0;
 
-    map<int,int> f_copy;
+    const uint32_t NO_COPY = std::numeric_limits<uint32_t>::max();
+    copy_from_buf_.assign(static_cast<size_t>(part_vec), NO_COPY);
 
     for (int i = 0; i < (int)part_vec; ++i)
 
@@ -376,8 +371,12 @@ void BlockProcess::permute_range_vec(uint64_t id_start, uint64_t id_stop, vector
 
                     if(memcmp(old_vec,next_vec,cur_vec_len) == 0)
                     {
-                        copies[next_copy] = 1;
-                        f_copy.emplace(next_copy,i);
+                        if (!copies[next_copy])
+                        {
+                            copies[next_copy] = 1;
+                            if (copy_from_buf_[next_copy] == NO_COPY)
+                                copy_from_buf_[next_copy] = static_cast<uint32_t>(i);
+                        }
                     // comp_pos_copy[no_copy++] = i;
                     // cout<<"i:"<<i<<endl;
    
@@ -386,14 +385,14 @@ void BlockProcess::permute_range_vec(uint64_t id_start, uint64_t id_stop, vector
                 uint32_t prev_index = 0;
                 for(size_t t = 1 ; t<= n_h_samples;t++){
                 
-                    if(new_mc_vectors[t-1][cur_arr_id]&perm_lut64[cur_arr_pos]){
+	                    if(new_mc_at(t-1,cur_arr_id)&perm_lut64[cur_arr_pos]){
                         
-                        sparse_matrix_cols.emplace_back(static_cast<uint32_t>(t) - prev_index);
+                        sparse_matrix_cols_buf_.emplace_back(static_cast<uint32_t>(t) - prev_index);
                         prev_index = static_cast<uint32_t>(t) ;
 
                     }
                 }
-                sparse_matrix_cols.emplace_back(0);
+                sparse_matrix_cols_buf_.emplace_back(0);
   
                 // uint8_t first_prev_index = 0;
                 // uint8_t second_prev_index =0;
@@ -425,19 +424,16 @@ void BlockProcess::permute_range_vec(uint64_t id_start, uint64_t id_stop, vector
 
         }
     }
-    for(auto iter = f_copy.begin(); iter != f_copy.end(); ++iter){
-        comp_pos_copy[no_copy++] = iter->second;
-        // cout<<iter->second<<endl;
+    for (size_t i = 0; i < copy_from_buf_.size(); ++i)
+    {
+        if (copy_from_buf_[i] != NO_COPY)
+            comp_pos_copy_buf_[no_copy++] = copy_from_buf_[i];
     }
-
-    f_copy.clear();
     
-    origin_of_copy.resize(no_copy);
-
-    memcpy(&origin_of_copy[0], comp_pos_copy, no_copy * sizeof(uint32_t));
+    origin_of_copy.assign(comp_pos_copy_buf_.begin(), comp_pos_copy_buf_.begin() + no_copy);
    
-    samples_indexes = vint_code::EncodeArray(sparse_matrix_cols);
-    sparse_matrix_cols.clear();
+    samples_indexes = vint_code::EncodeArray(sparse_matrix_cols_buf_);
+    sparse_matrix_cols_buf_.clear();
 
     // samples_indexes.resize(no_samples_index);
 
@@ -447,27 +443,20 @@ void BlockProcess::permute_range_vec(uint64_t id_start, uint64_t id_stop, vector
 
     //_copy_num = no_copy;
 
-    for(size_t i = 0; i<n_h_samples;i++)
-
-        delete [] new_mc_vectors[i];
-
-    delete [] new_mc_vectors;
-    delete [] comp_pos_copy;
+    // new_mc_vectors and comp_pos_copy are std::vector-backed; no manual cleanup needed.
     // delete [] comp_samples_indexes;
-
-
-    delete[] old_vec;
-
 
 }
 void BlockProcess::ProcessLastBlock(vector<bool> &zeros, vector<bool> &copies, vector<uint32_t> &origin_of_copy, vector<uint8_t> &samples_indexes )
 {
-    map<int,int>f_copy;
-    uint32_t* comp_pos_copy = new uint32_t[cur_no_vec];
+    const uint32_t NO_COPY = std::numeric_limits<uint32_t>::max();
+    copy_from_buf_.assign(static_cast<size_t>(cur_no_vec), NO_COPY);
+    comp_pos_copy_buf_.assign(static_cast<size_t>(cur_no_vec), 0);
     // encode_byte_num = (uint32_t)log2(params.n_samples*2-1)/8+1;
     // uint8_t* comp_samples_indexes = new uint8_t[cur_no_vec*cur_vec_len*8*2];
-    vector<uint32_t> sparse_matrix_cols;
-    sparse_matrix_cols.reserve(cur_no_vec*cur_vec_len*8*2);
+    sparse_matrix_cols_buf_.clear();
+    if (sparse_matrix_cols_buf_.capacity() < cur_no_vec * cur_vec_len * 8 * 2)
+        sparse_matrix_cols_buf_.reserve(cur_no_vec * cur_vec_len * 8 * 2);
     no_copy = 0;
     no_samples_index = 0;
 
@@ -502,9 +491,12 @@ void BlockProcess::ProcessLastBlock(vector<bool> &zeros, vector<bool> &copies, v
 
                     if(memcmp(cur_vec,next_vec,cur_vec_len) == 0)
                     {
-                        copies[next_copy] = 1;
-
-                        f_copy.emplace(next_copy,i);
+                        if (!copies[next_copy])
+                        {
+                            copies[next_copy] = 1;
+                            if (copy_from_buf_[next_copy] == NO_COPY)
+                                copy_from_buf_[next_copy] = static_cast<uint32_t>(i);
+                        }
                     }
                 }
                 uint32_t prev_index = 0;
@@ -512,12 +504,12 @@ void BlockProcess::ProcessLastBlock(vector<bool> &zeros, vector<bool> &copies, v
                     auto cur_arr_pos = (t-1)%8;
                     if(cur_vec[(t-1)/8]&perm_lut8[cur_arr_pos]){
                          
-                        sparse_matrix_cols.emplace_back(static_cast<uint32_t>(t) - prev_index);
+                        sparse_matrix_cols_buf_.emplace_back(static_cast<uint32_t>(t) - prev_index);
                         prev_index = static_cast<uint32_t>(t) ;
 
                     }
                 }
-                sparse_matrix_cols.emplace_back(0);
+                sparse_matrix_cols_buf_.emplace_back(0);
 
             //     uint8_t first_prev_index = 0;            
             //     uint8_t second_prev_index =0;            
@@ -558,18 +550,16 @@ void BlockProcess::ProcessLastBlock(vector<bool> &zeros, vector<bool> &copies, v
         }
     }
 
-    for(auto iter = f_copy.begin(); iter != f_copy.end(); ++iter){
-        comp_pos_copy[no_copy++] = iter->second;
+    for (size_t i = 0; i < copy_from_buf_.size(); ++i)
+    {
+        if (copy_from_buf_[i] != NO_COPY)
+            comp_pos_copy_buf_[no_copy++] = copy_from_buf_[i];
     }
 
-    f_copy.clear();
+    origin_of_copy.assign(comp_pos_copy_buf_.begin(), comp_pos_copy_buf_.begin() + no_copy);
 
-    origin_of_copy.resize(no_copy);
-
-    memcpy(&origin_of_copy[0], comp_pos_copy, no_copy * sizeof(uint32_t));
-
-    samples_indexes = vint_code::EncodeArray(sparse_matrix_cols);
-    sparse_matrix_cols.clear();
+    samples_indexes = vint_code::EncodeArray(sparse_matrix_cols_buf_);
+    sparse_matrix_cols_buf_.clear();
     // samples_indexes.resize(no_samples_index); 
 
     // memcpy(&samples_indexes[0], comp_samples_indexes, no_samples_index* sizeof(uint8_t));
@@ -580,7 +570,6 @@ void BlockProcess::ProcessLastBlock(vector<bool> &zeros, vector<bool> &copies, v
     //  cout<<"samples_indexs:";
     // for(size_t i = 0;i<no_samples_index;i++)
         // cout<<block_index_size<<endl;
-    delete [] comp_pos_copy;
     // delete [] comp_samples_indexes;
    
 

@@ -89,6 +89,11 @@ class Decompressor {
     uint32_t chunk_variant_offset = 0;
     uint32_t chunk_variant_offset_io = 0;
 
+    // Snapshot of per-chunk fixed-fields directory format (set by the decoding pipeline).
+    // Needed because DecompressionReader::readFixedFields() mutates these per chunk.
+    bool has_fixed_fields_rb_dir_io = false;
+    uint32_t fixed_fields_chunk_version_io = 0;
+
     size_t chunk_size;
 
 

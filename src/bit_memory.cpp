@@ -223,10 +223,6 @@ void CBuffer::SetMaxSize(uint32_t _max_size, uint32_t _offset)
 // ********************************************************************************************
 void CBuffer::GetBuffer(vector<uint32_t>& _v_size, vector<uint8_t>& _v_data)
 {
-    
-	v_size.shrink_to_fit();
-	v_data.shrink_to_fit();
-
 	swap(_v_size, v_size);
 	swap(_v_data, v_data);
 
@@ -291,9 +287,6 @@ void CVariantsBuffer::SetMaxSize(uint32_t _max_size, uint32_t _offset)
 void CVariantsBuffer::GetBuffer(vector<uint8_t>& _v_data)
 {
     
-
-	v_data.shrink_to_fit();
-
 	swap(_v_data, v_data);
 
 	v_data.clear();

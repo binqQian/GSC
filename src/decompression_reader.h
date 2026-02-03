@@ -96,10 +96,15 @@ class DecompressionReader {
    	vector<uint8_t> all_v_header, comp_v_header;
 	vector<uint8_t> all_v_samples, comp_v_samples;
 
-	DecompressPartQueue<uint32_t> *decomp_part_queue; 
+	DecompressPartQueue<uint32_t> *decomp_part_queue = nullptr; 
 	vector<thread> part_decompress_thread;
 	File_Handle_2 * file_handle2 = nullptr;
-	string temp_file2_fname ;
+	string temp_file2_fname;
+	string part2_source_fname;
+	uint64_t part2_offset = 0;
+	uint64_t part2_size = 0;
+	bool part2_in_place = false;
+	bool temp_file2_owned = false;
 	string fname;
 
 	uint32_t no_keys;
@@ -126,6 +131,15 @@ class DecompressionReader {
     uint32_t fixed_fields_gt_off = 0;
     uint32_t fixed_fields_gt_size = 0;
     std::vector<fixed_fields_rb_dir_entry> fixed_fields_rb_dir;
+
+    // Legacy fixed-fields chunk offsets (single block)
+    struct legacy_fixed_fields_offsets
+    {
+        uint32_t no_variants = 0;
+        uint64_t chrom_off = 0, pos_off = 0, id_off = 0, ref_off = 0, alt_off = 0, qual_off = 0, gt_off = 0;
+        uint32_t chrom_size = 0, pos_size = 0, id_size = 0, ref_size = 0, alt_size = 0, qual_size = 0, gt_size = 0;
+        bool valid = false;
+    } legacy_fixed_fields;
 
 	vector<uint32_t> v_coder_part_ids;
 	vector<std::unique_ptr<CompressionStrategy>> field_size_codecs;

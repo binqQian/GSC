@@ -387,10 +387,27 @@ bool CompressionReader::GetFilterInfoFormatKeys(int &no_flt_keys, int &no_info_k
             keys.emplace_back(new_key);
         }
     }
-    keys.shrink_to_fit();
     return true;
 }
 // ************************************************************************************
+namespace {
+inline void EnsureFieldCapacity(field_desc &f, uint32_t bytes)
+{
+    if (bytes == 0)
+    {
+        f.data_size = 0;
+        return;
+    }
+    if (f.data == nullptr || f.capacity < bytes)
+    {
+        delete[] f.data;
+        f.data = new char[bytes];
+        f.capacity = bytes;
+    }
+    f.data_size = bytes;
+}
+} // namespace
+
 bool CompressionReader::GetVariantFromRec(bcf1_t *rec, vector<field_desc> &fields)
 {
     auto logger = LogManager::Instance().Logger();
@@ -455,18 +472,15 @@ bool CompressionReader::GetVariantFromRec(bcf1_t *rec, vector<field_desc> &field
                 switch (type)
                 {
                 case BCF_HT_INT:
-                    cur_field.data_size = (uint32_t)curr_size * 4;
-                    cur_field.data = new char[cur_field.data_size];
+                    EnsureFieldCapacity(cur_field, (uint32_t)curr_size * 4);
                     memcpy(cur_field.data, (char *)dst_int, cur_field.data_size);
                     break;
                 case BCF_HT_REAL:
-                    cur_field.data_size = (uint32_t)curr_size * 4;
-                    cur_field.data = new char[cur_field.data_size];
+                    EnsureFieldCapacity(cur_field, (uint32_t)curr_size * 4);
                     memcpy(cur_field.data, (char *)dst_real, cur_field.data_size);
                     break;
                 case BCF_HT_STR:
-                    cur_field.data_size = curr_size;
-                    cur_field.data = new char[cur_field.data_size];
+                    EnsureFieldCapacity(cur_field, (uint32_t)curr_size);
                     memcpy(cur_field.data, (char *)dst_str, cur_field.data_size);
                     break;
                 case BCF_HT_FLAG:
@@ -514,17 +528,15 @@ bool CompressionReader::GetVariantFromRec(bcf1_t *rec, vector<field_desc> &field
                 // std::cerr<<vcf_hdr_key<<endl;
                 if (strcmp(vcf_hdr_key, "GT") == 0)
                 {
-                    int *gt_arr = NULL, ngt_arr = 0;
-                    curr_size = bcf_get_genotypes(vcf_hdr, rec, &gt_arr, &ngt_arr);
-                    cur_field.data_size = curr_size - rec->n_sample;
-                    cur_field.data = new char[cur_field.data_size];
+                    curr_size = bcf_get_genotypes(vcf_hdr, rec, &fmt_gt_arr_, &nfmt_gt_arr_);
+                    EnsureFieldCapacity(cur_field, (uint32_t)(curr_size - rec->n_sample));
                     int cur_phased_pos = 0;
                     for (uint32_t j = 0; j < rec->n_sample; ++j)
                     {
                         for (uint32_t k = 1; k < ploidy; ++k)
                         {
-                            if (bcf_gt_is_phased(gt_arr[j * ploidy + k]))
-                                if (gt_arr[j * ploidy + k] == GT_NOT_CALL)
+                            if (bcf_gt_is_phased(fmt_gt_arr_[j * ploidy + k]))
+                                if (fmt_gt_arr_[j * ploidy + k] == GT_NOT_CALL)
                                     cur_field.data[cur_phased_pos++] = '.';
                                 else
                                     cur_field.data[cur_phased_pos++] = '|';
@@ -532,7 +544,6 @@ bool CompressionReader::GetVariantFromRec(bcf1_t *rec, vector<field_desc> &field
                                 cur_field.data[cur_phased_pos++] = '/';
                         }
                     }
-                    free(gt_arr);
                     continue;
                 }
                 else
@@ -560,8 +571,7 @@ bool CompressionReader::GetVariantFromRec(bcf1_t *rec, vector<field_desc> &field
 
                     if (bcf_ht_type == BCF_HT_INT || bcf_ht_type == BCF_HT_REAL)
                     {
-                        cur_field.data_size = (uint32_t)curr_size * 4;
-                        cur_field.data = new char[cur_field.data_size];
+                        EnsureFieldCapacity(cur_field, (uint32_t)curr_size * 4);
 
                         if (bcf_ht_type == BCF_HT_INT)
                         {
@@ -574,8 +584,7 @@ bool CompressionReader::GetVariantFromRec(bcf1_t *rec, vector<field_desc> &field
                     }
                     else if (bcf_ht_type == BCF_HT_STR)
                     {
-                        cur_field.data_size = (uint32_t)curr_size;
-                        cur_field.data = new char[cur_field.data_size];
+                        EnsureFieldCapacity(cur_field, (uint32_t)curr_size);
                         memcpy(cur_field.data, dst_str, cur_field.data_size);
                     }
                     else
@@ -697,9 +706,7 @@ bool CompressionReader::GetVariantFromRec(bcf1_t *rec, vector<field_desc> &field
                 while (enc_mdp.size() % 4 != 0)
                     enc_mdp.push_back(0);
 
-                delete[] min_dp_field.data;
-                min_dp_field.data_size = (uint32_t)enc_mdp.size();
-                min_dp_field.data = new char[min_dp_field.data_size];
+                EnsureFieldCapacity(min_dp_field, (uint32_t)enc_mdp.size());
                 memcpy(min_dp_field.data, enc_mdp.data(), min_dp_field.data_size);
             }
 
@@ -815,9 +822,7 @@ bool CompressionReader::GetVariantFromRec(bcf1_t *rec, vector<field_desc> &field
             while (enc.size() % 4 != 0)
                 enc.push_back(0);
 
-            delete[] dp_field.data;
-            dp_field.data_size = (uint32_t)enc.size();
-            dp_field.data = new char[dp_field.data_size];
+            EnsureFieldCapacity(dp_field, (uint32_t)enc.size());
             memcpy(dp_field.data, enc.data(), dp_field.data_size);
         }
     }
@@ -953,9 +958,7 @@ bool CompressionReader::GetVariantFromRec(bcf1_t *rec, vector<field_desc> &field
             while (enc_gq.size() % 4 != 0)
                 enc_gq.push_back(0);
 
-            delete[] gq_field.data;
-            gq_field.data_size = (uint32_t)enc_gq.size();
-            gq_field.data = new char[gq_field.data_size];
+            EnsureFieldCapacity(gq_field, (uint32_t)enc_gq.size());
             memcpy(gq_field.data, enc_gq.data(), gq_field.data_size);
         }
     }
@@ -1050,6 +1053,17 @@ bool CompressionReader::ProcessInVCF()
         file_nums = merge_files.size();
     }
 
+    std::vector<field_desc> curr_field;
+    auto reset_curr_field = [&]() {
+        for (auto &f : curr_field)
+        {
+            f.present = false;
+            f.data_size = 0;
+        }
+    };
+    if (compress_mode == compress_mode_t::lossless_mode)
+        curr_field.resize(keys.size());
+
     for (int i = 0; i < file_nums; i++)
     {
         if (merge_flag)
@@ -1098,20 +1112,11 @@ bool CompressionReader::ProcessInVCF()
                     }
                     if (compress_mode == compress_mode_t::lossless_mode)
                     {
-                        std::vector<field_desc> curr_field(keys.size());
-                        GetVariantFromRec(vcf_record, curr_field);
-                        SetVariantOtherFields(curr_field);
-                        for (size_t j = 0; j < keys.size(); ++j)
-                        {
-                            if (curr_field[j].data_size > 0)
-                            {
-                                if (curr_field[j].data)
-                                    delete[] curr_field[j].data;
-                                curr_field[j].data = nullptr;
-                                curr_field[j].data_size = 0;
-                            }
-                        }
-                        curr_field.clear();
+                        reset_curr_field();
+                        if (!GetVariantFromRec(vcf_record, curr_field))
+                            return false;
+                        if (!SetVariantOtherFields(curr_field))
+                            return false;
                     }
                     ++no_actual_variants;
                     ProcessFixedVariants(vcf_record, desc);
@@ -1153,23 +1158,11 @@ bool CompressionReader::ProcessInVCF()
                 if (compress_mode == compress_mode_t::lossless_mode)
                 {
 
-                    std::vector<field_desc> curr_field(keys.size());
-
-                    GetVariantFromRec(vcf_record, curr_field);
-
-                    SetVariantOtherFields(curr_field);
-
-                    for (size_t j = 0; j < keys.size(); ++j)
-                    {
-                        if (curr_field[j].data_size > 0)
-                        {
-                            if (curr_field[j].data)
-                                delete[] curr_field[j].data;
-                            curr_field[j].data = nullptr;
-                            curr_field[j].data_size = 0;
-                        }
-                    }
-                    curr_field.clear();
+                    reset_curr_field();
+                    if (!GetVariantFromRec(vcf_record, curr_field))
+                        return false;
+                    if (!SetVariantOtherFields(curr_field))
+                        return false;
                 }
 
                 ++no_actual_variants;
@@ -1188,6 +1181,12 @@ bool CompressionReader::ProcessInVCF()
     if (gt_data)
     {
         delete[] gt_data;
+    }
+    if (fmt_gt_arr_)
+    {
+        free(fmt_gt_arr_);
+        fmt_gt_arr_ = nullptr;
+        nfmt_gt_arr_ = 0;
     }
 
     logger->info("Read all the variants and genotypes.");

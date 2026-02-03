@@ -1,9 +1,86 @@
 #include "compressor.h"
 #include "logger.h"
 #include <algorithm>
+#include <cstring>
 #include <cstdio>
 #include <cstdlib>
+#include <deque>
 #include <iostream>
+#include <limits>
+#include <unordered_map>
+
+namespace {
+template <typename T>
+inline void append_pod(std::vector<uint8_t> &out, const T &v)
+{
+    const size_t off = out.size();
+    out.resize(off + sizeof(T));
+    std::memcpy(out.data() + off, &v, sizeof(T));
+}
+
+inline void append_bytes(std::vector<uint8_t> &out, const std::vector<uint8_t> &v)
+{
+    if (v.empty())
+        return;
+    const size_t off = out.size();
+    out.resize(off + v.size());
+    std::memcpy(out.data() + off, v.data(), v.size());
+}
+
+struct OtherFieldsResult
+{
+    int key_id = -1;
+    int part_id = -1;
+    uint32_t stream_id_size = 0;
+    uint32_t stream_id_data = 0;
+    std::vector<uint8_t> data_payload;
+    std::vector<uint8_t> size_payload;
+};
+
+class OtherFieldsResultQueue
+{
+    std::mutex mtx_;
+    std::condition_variable cv_pop_;
+    std::condition_variable cv_push_;
+    std::deque<OtherFieldsResult> q_;
+    size_t max_size_ = 0;
+    bool done_ = false;
+
+public:
+    explicit OtherFieldsResultQueue(size_t max_size) : max_size_(max_size) {}
+
+    void Complete()
+    {
+        std::lock_guard<std::mutex> lock(mtx_);
+        done_ = true;
+        cv_pop_.notify_all();
+        cv_push_.notify_all();
+    }
+
+    bool Push(OtherFieldsResult &&r)
+    {
+        std::unique_lock<std::mutex> lock(mtx_);
+        cv_push_.wait(lock, [&] { return done_ || q_.size() < max_size_; });
+        if (done_)
+            return false;
+        q_.emplace_back(std::move(r));
+        cv_pop_.notify_one();
+        return true;
+    }
+
+    bool Pop(OtherFieldsResult &out)
+    {
+        std::unique_lock<std::mutex> lock(mtx_);
+        cv_pop_.wait(lock, [&] { return done_ || !q_.empty(); });
+        if (q_.empty())
+            return false;
+        out = std::move(q_.front());
+        q_.pop_front();
+        cv_push_.notify_one();
+        return true;
+    }
+};
+} // namespace
 
 // **************************************************************************************************
 // write the compressed file
@@ -116,28 +193,32 @@ bool Compressor::writeCompressFlie()
     fwrite(&comp_size, sizeof(uint32_t), 1, comp);
     fwrite(comp_v_samples.data(), 1, comp_v_samples.size(), comp);
 
-    uint64_t size;
-    uint8_t *temp_buffer = NULL;
-    while (fread(&size, sizeof(size), 1, temp_file) == 1)
+    uint64_t size_u64 = 0;
+    std::vector<uint8_t> temp_buffer;
+    while (fread(&size_u64, sizeof(size_u64), 1, temp_file) == 1)
     {
         chunks_streams[curr_no_blocks + 1].offset = ftell(comp);
-
-        temp_buffer = (uint8_t *)realloc(temp_buffer, size);
-        if (!temp_buffer)
+        if (size_u64 > std::numeric_limits<size_t>::max())
         {
-            perror("Memory allocation failed");
+            perror("Data block too large for this platform");
             fclose(temp_file);
             return 1;
         }
+        const size_t size = static_cast<size_t>(size_u64);
 
-        if (fread(temp_buffer, 1, size, temp_file) != size)
+        temp_buffer.resize(size);
+        if (size && fread(temp_buffer.data(), 1, size, temp_file) != size)
         {
             perror("Error reading data block");
-            free(temp_buffer);
             fclose(temp_file);
             return 1;
         }
-        fwrite(temp_buffer, 1, size, comp);
+        if (size && fwrite(temp_buffer.data(), 1, size, comp) != size)
+        {
+            perror("Error writing data block");
+            fclose(temp_file);
+            return 1;
+        }
         curr_no_blocks++;
     }
 
@@ -192,7 +273,6 @@ bool Compressor::writeCompressFlie()
     // std::cerr << "ALT_comp_size:     " << ALT_comp_size <<"\tByte"<< endl;
     // std::cerr << "QUAL_comp_size:    " << QUAL_comp_size <<"\tByte"<< endl;
     // cout << "GT_index_comp_size:      " << GT_comp_size <<"\tByte"<< endl;
-    free(temp_buffer);
     fclose(temp_file);
     if (remove(temp_file1_fname) != 0)
     {
@@ -207,12 +287,13 @@ bool Compressor::writeCompressFlie()
     if (other_f)
     {
 
-        const size_t buffer_size = 1024;
-        char buffer[buffer_size];
+        setvbuf(other_f, nullptr, _IOFBF, 64 << 20);
+        const size_t buffer_size = 1024 * 1024;
+        std::vector<char> buffer(buffer_size);
         size_t bytes_read;
-        while ((bytes_read = fread(buffer, 1, buffer_size, other_f)) > 0)
+        while ((bytes_read = fread(buffer.data(), 1, buffer.size(), other_f)) > 0)
         {
-            fwrite(buffer, 1, bytes_read, comp);
+            fwrite(buffer.data(), 1, bytes_read, comp);
         }
         fclose(other_f);
         other_f = nullptr;
@@ -452,8 +533,40 @@ bool Compressor::CompressProcess()
     if (!OpenForWriting(params.out_file_name))
         return false;
 
+    auto cleanup_failed_output = [&]()
+    {
+        // Best-effort cleanup for failure paths: close handles and remove partial temp/output files.
+        if (temp_file)
+        {
+            fclose(temp_file);
+            temp_file = nullptr;
+        }
+        if (!temp_file2_fname.empty())
+        {
+            if (file_handle2)
+                file_handle2->Close();
+            remove(temp_file2_fname.c_str());
+        }
+        if (temp_file1_fname)
+        {
+            remove(temp_file1_fname);
+        }
+        if (comp && comp != stdout)
+        {
+            fclose(comp);
+            comp = nullptr;
+        }
+        if (!is_stdout && !fname.empty())
+        {
+            remove(fname.c_str());
+        }
+    };
+
     if (!OpenTempFile(params.out_file_name))
+    {
+        cleanup_failed_output();
         return false;
+    }
 
     string header;
 
@@ -469,6 +582,7 @@ bool Compressor::CompressProcess()
     if (!no_samples)
     {
         logger->error("The number of genotype samples is zero and cannot be compressed!");
+        cleanup_failed_output();
         return false;
     }
 
@@ -500,6 +614,9 @@ bool Compressor::CompressProcess()
     }
 
     PartQueue<SPackage> part_queue(max((int)params.no_threads * 2, 8));
+    std::atomic<bool> other_fields_error{false};
+    std::unique_ptr<OtherFieldsResultQueue> other_fields_results;
+    std::unique_ptr<std::thread> other_fields_write_thread;
 
     if (params.compress_mode == compress_mode_t::lossless_mode)
     {
@@ -511,51 +628,473 @@ bool Compressor::CompressProcess()
         compression_reader->GetOtherField(keys, no_keys, key_gt_id);
 
         InitCompressParams();
+        other_fields_results = std::make_unique<OtherFieldsResultQueue>(max((int)params.no_threads * 2, 8));
+
+        // Single writer thread keeps per-stream parts in increasing part_id order, while compression runs fully parallel.
+        other_fields_write_thread = std::make_unique<std::thread>([&]
+                                                                 {
+                                                                     auto logger = LogManager::Instance().Logger();
+                                                                     std::vector<int> expected_part_id(no_keys, 0);
+                                                                     std::vector<std::unordered_map<int, OtherFieldsResult>> pending(no_keys);
+                                                                     for (auto &m : pending)
+                                                                         m.reserve(4);
+
+                                                                     auto try_flush_key = [&](int key_id) {
+                                                                         int &expected = expected_part_id[key_id];
+                                                                         auto &pend = pending[key_id];
+                                                                         while (true)
+                                                                         {
+                                                                             auto it = pend.find(expected);
+                                                                             if (it == pend.end())
+                                                                                 break;
+                                                                             OtherFieldsResult r = std::move(it->second);
+                                                                             pend.erase(it);
+                                                                             file_handle2->AddPartComplete(r.stream_id_data, r.part_id, r.data_payload);
+                                                                             file_handle2->AddPartComplete(r.stream_id_size, r.part_id, r.size_payload);
+                                                                             ++expected;
+                                                                         }
+                                                                     };
+
+                                                                     OtherFieldsResult r;
+                                                                     while (other_fields_results->Pop(r))
+                                                                     {
+                                                                         if (other_fields_error.load(std::memory_order_relaxed))
+                                                                             continue;
+                                                                         if (r.key_id < 0 || r.key_id >= (int)no_keys)
+                                                                         {
+                                                                             logger->error("other_fields writer: invalid key_id={}", r.key_id);
+                                                                             other_fields_error.store(true, std::memory_order_relaxed);
+                                                                             other_fields_results->Complete();
+                                                                             break;
+                                                                         }
+                                                                         auto &pend = pending[r.key_id];
+                                                                         auto ins = pend.emplace(r.part_id, std::move(r));
+                                                                         if (!ins.second)
+                                                                         {
+                                                                             logger->error("other_fields writer: duplicate part_id={} for key_id={}", r.part_id, r.key_id);
+                                                                             other_fields_error.store(true, std::memory_order_relaxed);
+                                                                             other_fields_results->Complete();
+                                                                             break;
+                                                                         }
+                                                                         try_flush_key(ins.first->second.key_id);
+                                                                     }
+
+                                                                     // Final flush: writer is done receiving results.
+                                                                     for (uint32_t k = 0; k < no_keys; ++k)
+                                                                         try_flush_key((int)k);
+
+                                                                     if (!other_fields_error.load(std::memory_order_relaxed))
+                                                                     {
+                                                                         for (uint32_t k = 0; k < no_keys; ++k)
+                                                                         {
+                                                                             if (!pending[k].empty())
+                                                                             {
+                                                                                 logger->error("other_fields writer: missing parts for key_id={}, next_expected={}, pending={}",
+                                                                                               k, expected_part_id[k], pending[k].size());
+                                                                                 other_fields_error.store(true, std::memory_order_relaxed);
+                                                                             }
+                                                                         }
+                                                                     }
+                                                                 });
 
         part_compress_thread.reserve(params.no_threads);
-
         for (uint32_t i = 0; i < params.no_threads; ++i)
         {
             part_compress_thread.emplace_back(thread([&]()
                                                      {
                                                          SPackage pck;
-                                                         vector<uint8_t> v_compressed;
-                                                         vector<uint8_t> v_tmp;
+                                                         vector<uint8_t> scratch;
+                                                         vector<uint8_t> data_payload;
+                                                         vector<uint8_t> size_payload;
 
-                                                         auto fo = [this](SPackage &pck) -> bool
-                                                         { return check_coder_compressor(pck); };
+                                                         auto fo = [](SPackage &item) -> bool
+                                                         {
+                                                             (void)item;
+                                                             return true;
+                                                         };
 
                                                          while (true)
                                                          {
-
                                                              if (!part_queue.Pop<SPackage>(pck, fo))
                                                                  break;
-                                                             compress_other_fileds(pck, v_compressed, v_tmp);
+                                                             if (other_fields_error.load(std::memory_order_relaxed))
+                                                                 continue; // drain
+
+                                                             data_payload.clear();
+                                                             size_payload.clear();
+                                                             if (!compress_other_fields_to_payloads(pck, data_payload, size_payload, scratch))
+                                                             {
+                                                                 other_fields_error.store(true, std::memory_order_relaxed);
+                                                                 other_fields_results->Complete();
+                                                                 break;
+                                                             }
+
+                                                             OtherFieldsResult r;
+                                                             r.key_id = pck.key_id;
+                                                             r.part_id = pck.part_id;
+                                                             r.stream_id_size = pck.stream_id_size;
+                                                             r.stream_id_data = pck.stream_id_data;
+                                                             r.data_payload = std::move(data_payload);
+                                                             r.size_payload = std::move(size_payload);
+                                                             if (!other_fields_results->Push(std::move(r)))
+                                                                 break;
                                                          }
                                                      }));
         }
     }
-    block_size = params.var_in_block * 2;
+	    block_size = params.var_in_block * 2;
 
-    unique_ptr<thread> compress_thread(new thread([&]
-                                                  {
-                                                      fixed_field_chunk fixed_field_chunk_process;
-                                                      while (true)
-                                                      {
+	    // Fixed fields chunk compression pipeline:
+	    // - N worker threads compress chunks to payload blobs (CPU-bound)
+	    // - 1 writer thread writes blobs to temp file in strict chunk_id order (I/O-bound)
+	    std::atomic<bool> fixed_fields_error{false};
+	    const uint32_t fixed_fields_threads = std::max<uint32_t>(1u, params.no_threads);
+	    VarBlockQueue<std::vector<uint8_t>> fixed_payload_queue(max((int)(fixed_fields_threads * 4), 8));
 
-                                                          if (!sortVarBlockQueue.Pop(fixed_field_block_id, fixed_field_chunk_process))
-                                                          {
-                                                              break;
-                                                          }
+	    std::vector<std::thread> fixed_fields_compress_threads;
+	    fixed_fields_compress_threads.reserve(fixed_fields_threads);
 
-                                                          compressFixedFieldsChunk(fixed_field_chunk_process);
-                                                      }
-                                                  }));
+	    unique_ptr<thread> fixed_fields_write_thread(new thread([&]
+	                                                           {
+	                                                               auto logger = LogManager::Instance().Logger();
+	                                                               std::unordered_map<uint32_t, std::vector<uint8_t>> pending;
+	                                                               pending.reserve(fixed_fields_threads * 4);
 
-    // create multiple threads to handle individual blocks
-    block_process_thread.reserve(params.no_gt_threads);
-    string prev_chrom = "";
-    int chunk_id = 0;
+	                                                               uint32_t expected_chunk_id = 0;
+	                                                               uint32_t chunk_id = 0;
+	                                                               std::vector<uint8_t> payload;
+
+	                                                               auto write_one = [&](uint32_t id, const std::vector<uint8_t> &p) -> bool
+	                                                               {
+	                                                                   (void)id;
+	                                                                   const uint64_t sz = static_cast<uint64_t>(p.size());
+	                                                                   if (fwrite(&sz, sizeof(sz), 1, temp_file) != 1)
+	                                                                       return false;
+	                                                                   if (sz && fwrite(p.data(), 1, sz, temp_file) != sz)
+	                                                                       return false;
+	                                                                   return true;
+	                                                               };
+
+	                                                               while (fixed_payload_queue.Pop(chunk_id, payload))
+	                                                               {
+	                                                                   {
+	                                                                       auto ins = pending.emplace(chunk_id, std::move(payload));
+	                                                                       if (!ins.second)
+	                                                                       {
+	                                                                           logger->error("Duplicate fixed-fields chunk_id={} produced; aborting", chunk_id);
+	                                                                           fixed_fields_error.store(true, std::memory_order_relaxed);
+	                                                                           fixed_payload_queue.Complete();
+	                                                                           return;
+	                                                                       }
+	                                                                   }
+
+	                                                                   while (true)
+	                                                                   {
+	                                                                       auto it = pending.find(expected_chunk_id);
+	                                                                       if (it == pending.end())
+	                                                                           break;
+	                                                                       if (!write_one(expected_chunk_id, it->second))
+	                                                                       {
+	                                                                           logger->error("Failed writing fixed-fields chunk {} to temp file", expected_chunk_id);
+	                                                                           fixed_fields_error.store(true, std::memory_order_relaxed);
+	                                                                           fixed_payload_queue.Complete();
+	                                                                           pending.clear();
+	                                                                           return;
+	                                                                       }
+	                                                                       pending.erase(it);
+	                                                                       ++expected_chunk_id;
+	                                                                   }
+	                                                               }
+
+	                                                               // Flush any remaining contiguous tail (should normally be empty).
+	                                                               while (true)
+	                                                               {
+	                                                                   auto it = pending.find(expected_chunk_id);
+	                                                                   if (it == pending.end())
+	                                                                       break;
+	                                                                   if (!write_one(expected_chunk_id, it->second))
+	                                                                   {
+	                                                                       logger->error("Failed writing fixed-fields chunk {} to temp file (final flush)", expected_chunk_id);
+	                                                                       fixed_fields_error.store(true, std::memory_order_relaxed);
+	                                                                       fixed_payload_queue.Complete();
+	                                                                       return;
+	                                                                   }
+	                                                                   pending.erase(it);
+	                                                                   ++expected_chunk_id;
+	                                                               }
+
+	                                                               if (!pending.empty())
+	                                                               {
+	                                                                   logger->error("Missing fixed-fields chunk(s) starting at {} (pending out-of-order={})",
+	                                                                                 expected_chunk_id, pending.size());
+	                                                                   fixed_fields_error.store(true, std::memory_order_relaxed);
+	                                                                   fixed_payload_queue.Complete();
+	                                                               }
+	                                                           }));
+
+	    for (uint32_t i = 0; i < fixed_fields_threads; ++i)
+	    {
+	        fixed_fields_compress_threads.emplace_back(std::thread([&]
+	                                                               {
+	                                                                   uint32_t chunk_id = 0;
+	                                                                   fixed_field_chunk chunk;
+	                                                                   while (sortVarBlockQueue.Pop(chunk_id, chunk))
+	                                                                   {
+	                                                                       if (fixed_fields_error.load(std::memory_order_relaxed))
+	                                                                           continue; // drain without doing work
+
+	                                                                       std::vector<uint8_t> payload;
+	                                                                       if (!compressFixedFieldsChunkToPayload(chunk, payload))
+	                                                                       {
+	                                                                           fixed_fields_error.store(true, std::memory_order_relaxed);
+	                                                                           continue;
+	                                                                       }
+	                                                                       fixed_payload_queue.Push(chunk_id, std::move(payload));
+	                                                                   }
+	                                                               }));
+	    }
+
+	    // create multiple threads to handle individual blocks
+	    block_process_thread.reserve(params.no_gt_threads);
+	    string prev_chrom = "";
+	    int chunk_id = 0;
+    std::atomic<bool> gt_worker_error{false};
+
+    struct GtProcessResult
+    {
+        int block_id = 0;
+        uint32_t col_block_id = 0;
+        unsigned long num_rows = 0;
+        std::vector<variant_desc_t> v_vcf_data_io;
+        std::vector<uint32_t> perm;
+        std::vector<bool> zeros_only;
+        std::vector<bool> copies;
+        std::vector<uint32_t> origin_of_copy;
+        std::vector<uint8_t> samples_indexes;
+    };
+
+    class GtResultQueue
+    {
+        std::mutex mtx_;
+        std::condition_variable cv_pop_;
+        std::condition_variable cv_push_;
+        std::deque<GtProcessResult> q_;
+        size_t max_size_ = 0;
+        bool done_ = false;
+
+    public:
+        explicit GtResultQueue(size_t max_size) : max_size_(max_size) {}
+
+        void Complete()
+        {
+            std::lock_guard<std::mutex> lock(mtx_);
+            done_ = true;
+            cv_pop_.notify_all();
+            cv_push_.notify_all();
+        }
+
+        bool Push(GtProcessResult &&r)
+        {
+            std::unique_lock<std::mutex> lock(mtx_);
+            cv_push_.wait(lock, [&] { return done_ || q_.size() < max_size_; });
+            if (done_)
+                return false;
+            q_.emplace_back(std::move(r));
+            cv_pop_.notify_one();
+            return true;
+        }
+
+        bool Pop(GtProcessResult &out)
+        {
+            std::unique_lock<std::mutex> lock(mtx_);
+            cv_pop_.wait(lock, [&] { return done_ || !q_.empty(); });
+            if (q_.empty())
+                return false;
+            out = std::move(q_.front());
+            q_.pop_front();
+            cv_push_.notify_one();
+            return true;
+        }
+    };
+
+    GtResultQueue gt_result_queue(max((int)(params.no_blocks * params.no_gt_threads), 8));
+
+    // Aggregator thread: commits GT results in strict (block_id, col_block_id) order, but workers never block on it.
+    unique_ptr<thread> gt_agg_thread(new thread([&]()
+                                                {
+                                                    auto logger = LogManager::Instance().Logger();
+                                                    BlockProcess commit_block_process(params);
+
+                                                    auto make_key = [](int b, uint32_t c) -> uint64_t
+                                                    {
+                                                        return (static_cast<uint64_t>(static_cast<uint32_t>(b)) << 32) | static_cast<uint64_t>(c);
+                                                    };
+
+                                                    std::unordered_map<uint64_t, GtProcessResult> pending;
+                                                    pending.reserve(params.no_gt_threads * 4);
+
+                                                    int expected_block_id = 0;
+                                                    uint32_t expected_col_block_id = 0;
+                                                    bool saw_terminator = false;
+
+                                                    auto flush_chunk_if_needed = [&]()
+                                                    {
+                                                        if (no_curr_chrom_block == 0)
+                                                            return;
+
+                                                        size_t gt_sz = 0;
+                                                        for (const auto &b : fixed_chunk_io.gt_row_blocks)
+                                                            gt_sz += b.size();
+                                                        toal_all_size += gt_sz;
+                                                        sortVarBlockQueue.Push(chunk_id, std::move(fixed_chunk_io));
+                                                        int id = (int)chunks_streams.size();
+                                                        chunks_streams[id] = chunk_stream(cur_chunk_actual_pos, 0);
+                                                        no_curr_chrom_block = 0;
+                                                        chunk_id++;
+                                                        fixed_chunk_io.Clear();
+                                                    };
+
+                                                    auto commit_row_block = [&](GtProcessResult &r)
+                                                    {
+                                                        cur_chunk_actual_pos += (uint32_t)r.v_vcf_data_io.size();
+                                                        if (!has_pending_gt_row_block)
+                                                        {
+                                                            pending_gt_row_block.clear();
+                                                            pending_gt_row_block_id = static_cast<uint32_t>(r.block_id);
+                                                            has_pending_gt_row_block = true;
+                                                        }
+                                                        commit_block_process.AddGtIndexBlock(pending_gt_row_block, all_zeros, all_copies, comp_pos_copy,
+                                                                                             r.zeros_only, r.copies, r.origin_of_copy, r.samples_indexes);
+
+                                                        fixed_field_block row_block_fixed;
+                                                        row_block_fixed.Clear();
+                                                        int64_t prev_pos_rb = 0;
+                                                        commit_block_process.addFixedFieldsBlock(row_block_fixed, r.v_vcf_data_io, prev_pos_rb);
+
+                                                        fixed_fields_row_block_meta meta;
+                                                        meta.variant_count = row_block_fixed.no_variants;
+                                                        meta.first_pos = (int64_t)r.v_vcf_data_io.front().pos;
+                                                        meta.last_pos = (int64_t)r.v_vcf_data_io.back().pos;
+
+                                                        fixed_chunk_io.no_variants += meta.variant_count;
+                                                        fixed_chunk_io.row_blocks.emplace_back(std::move(row_block_fixed));
+                                                        fixed_chunk_io.row_meta.emplace_back(meta);
+                                                        fixed_chunk_io.gt_row_blocks.emplace_back(std::move(pending_gt_row_block));
+                                                        pending_gt_row_block.clear();
+                                                        has_pending_gt_row_block = false;
+                                                        no_curr_chrom_block++;
+
+                                                        if (no_curr_chrom_block == params.no_blocks)
+                                                            flush_chunk_if_needed();
+                                                    };
+
+                                                    auto commit_result = [&](GtProcessResult &r)
+                                                    {
+                                                        if (gt_worker_error.load(std::memory_order_relaxed))
+                                                            return;
+
+                                                        if (r.num_rows)
+                                                        {
+                                                            if (use_legacy_perm)
+                                                            {
+                                                                if (r.num_rows % block_size)
+                                                                    vint_last_perm.emplace(chunk_id, vint_code::EncodeArray(r.perm));
+                                                            }
+                                                            else
+                                                            {
+                                                                vint_last_perm_2d.emplace(make_pair(static_cast<uint32_t>(r.block_id), r.col_block_id), vint_code::EncodeArray(r.perm));
+                                                            }
+
+                                                            if (r.v_vcf_data_io.empty())
+                                                            {
+                                                                if (!has_pending_gt_row_block)
+                                                                {
+                                                                    pending_gt_row_block.clear();
+                                                                    pending_gt_row_block_id = static_cast<uint32_t>(r.block_id);
+                                                                    has_pending_gt_row_block = true;
+                                                                }
+                                                                commit_block_process.AddGtIndexBlock(pending_gt_row_block, all_zeros, all_copies, comp_pos_copy,
+                                                                                                     r.zeros_only, r.copies, r.origin_of_copy, r.samples_indexes);
+                                                            }
+                                                        }
+
+                                                        // In tiled mode, only the last column block has variant descriptors.
+                                                        if (!r.v_vcf_data_io.empty() && prev_chrom != r.v_vcf_data_io[0].chrom)
+                                                        {
+                                                            prev_chrom = r.v_vcf_data_io[0].chrom;
+                                                            flush_chunk_if_needed();
+                                                            if (r.num_rows)
+                                                                commit_row_block(r);
+                                                        }
+                                                        else if (!r.v_vcf_data_io.empty())
+                                                        {
+                                                            commit_row_block(r);
+                                                        }
+                                                    };
+
+                                                    GtProcessResult r;
+                                                    while (gt_result_queue.Pop(r))
+                                                    {
+                                                        pending.emplace(make_key(r.block_id, r.col_block_id), std::move(r));
+
+                                                        while (true)
+                                                        {
+                                                            auto it = pending.find(make_key(expected_block_id, expected_col_block_id));
+                                                            if (it == pending.end())
+                                                                break;
+
+                                                            GtProcessResult cur = std::move(it->second);
+                                                            pending.erase(it);
+
+                                                            const bool is_terminator = (cur.num_rows == 0);
+                                                            commit_result(cur);
+
+                                                            if (is_terminator)
+                                                            {
+                                                                saw_terminator = true;
+                                                                break;
+                                                            }
+
+                                                            // Advance in strict block order (row-major by col_block_id).
+                                                            if (n_col_blocks <= 1)
+                                                            {
+                                                                ++expected_block_id;
+                                                            }
+                                                            else
+                                                            {
+                                                                ++expected_col_block_id;
+                                                                if (expected_col_block_id >= n_col_blocks)
+                                                                {
+                                                                    expected_col_block_id = 0;
+                                                                    ++expected_block_id;
+                                                                }
+                                                            }
+                                                        }
+
+                                                        if (saw_terminator)
+                                                            break;
+                                                    }
+
+                                                    // If we didn't see the terminator, something went wrong (e.g., early exit).
+                                                    if (!saw_terminator && !gt_worker_error.load(std::memory_order_relaxed))
+                                                    {
+                                                        logger->error("GT aggregator terminated without termination marker; aborting compression.");
+                                                        gt_worker_error.store(true, std::memory_order_relaxed);
+                                                    }
+
+                                                    if (gt_worker_error.load(std::memory_order_relaxed))
+                                                    {
+                                                        // Ensure we don't accidentally emit a partial chunk on error.
+                                                        no_curr_chrom_block = 0;
+                                                        fixed_chunk_io.Clear();
+                                                        pending_gt_row_block.clear();
+                                                        has_pending_gt_row_block = false;
+                                                    }
+
+                                                    // Always complete the queue to unblock the fixed-fields compress thread.
+                                                    sortVarBlockQueue.Complete();
+                                                }));
+
     for (uint32_t i = 0; i < params.no_gt_threads; ++i)
         block_process_thread.emplace_back(thread([&]()
                                                  {
@@ -579,197 +1118,106 @@ bool Compressor::CompressProcess()
                                                              break;
                                                          }
 
+                                                         std::unique_ptr<unsigned char[]> data_owner(data);
+                                                         data = nullptr;
+
+                                                         // Reset per-block outputs to avoid cross-iteration contamination
+                                                         origin_of_copy.clear();
+                                                         samples_indexes.clear();
+                                                         perm.clear();
+
                                                          vector<bool> zeros_only(num_rows, false);
                                                          vector<bool> copies(num_rows, false);
-                                                         block_process.SetCurBlock(num_rows, data);
+                                                         block_process.SetCurBlock(num_rows, reinterpret_cast<uint8_t *>(data_owner.get()));
                                                          // Gets the sparse encoding for each block
 
-                                                        if (num_rows)
+                                                        if (num_rows && !gt_worker_error.load(std::memory_order_relaxed))
                                                         {
                                                             // Calculate column block parameters from precomputed tiling
                                                             if (col_block_id >= col_block_sizes.size() || col_block_id >= col_block_vec_lens.size())
                                                             {
                                                                 logger->error("Invalid column block id: {} (n_col_blocks={}, sizes={}, vec_lens={})",
                                                                               col_block_id, n_col_blocks, col_block_sizes.size(), col_block_vec_lens.size());
-                                                                continue;
+                                                                gt_worker_error.store(true, std::memory_order_relaxed);
                                                             }
-                                                            uint32_t col_block_size = col_block_sizes[col_block_id];
-                                                            uint32_t col_vec_len = static_cast<uint32_t>(col_block_vec_lens[col_block_id]);
-
-                                                            if (col_block_size == 0 || col_vec_len == 0)
+                                                            else
                                                             {
-                                                                logger->error("Empty column block detected: block_id={}, col_block_id={}, size={}, vec_len={}",
-                                                                              block_id, col_block_id, col_block_size, col_vec_len);
-                                                                continue;
-                                                            }
+                                                                uint32_t col_block_size = col_block_sizes[col_block_id];
+                                                                uint32_t col_vec_len = static_cast<uint32_t>(col_block_vec_lens[col_block_id]);
 
-                                                            logger->debug("Processing GT block: block_id={}, col_block_id={}, num_rows={}, col_block_size={}, col_vec_len={}",
-                                                                         block_id, col_block_id, num_rows, col_block_size, col_vec_len);
+                                                                if (col_block_size == 0 || col_vec_len == 0)
+                                                                {
+                                                                    logger->error("Empty column block detected: block_id={}, col_block_id={}, size={}, vec_len={}",
+                                                                                  block_id, col_block_id, col_block_size, col_vec_len);
+                                                                    gt_worker_error.store(true, std::memory_order_relaxed);
+                                                                }
+                                                                else
+                                                                {
+                                                                    logger->debug("Processing GT block: block_id={}, col_block_id={}, num_rows={}, col_block_size={}, col_vec_len={}",
+                                                                                  block_id, col_block_id, num_rows, col_block_size, col_vec_len);
 
-                                                            // Prepare permutation buffer for this column block
-                                                             perm.resize(col_block_size);
-                                                             for (size_t i_p = 0; i_p < perm.size(); i_p++)
-                                                                 perm[i_p] = static_cast<uint32_t>(i_p);
+                                                                    // Prepare permutation buffer for this column block
+                                                                    perm.resize(col_block_size);
+                                                                    for (size_t i_p = 0; i_p < perm.size(); i_p++)
+                                                                        perm[i_p] = static_cast<uint32_t>(i_p);
 
-                                                             // if(num_rows == block_size)
-                                                             block_process.ProcessSquareBlock(col_block_size, col_vec_len, perm, zeros_only, copies, origin_of_copy, samples_indexes, true);
-                                                             // else
-                                                             //     block_process.ProcessLastBlock(zeros_only, copies, origin_of_copy,samples_indexes);
+                                                                    block_process.ProcessSquareBlock(col_block_size, col_vec_len, perm, zeros_only, copies, origin_of_copy, samples_indexes, true);
 
-                                                            if (use_legacy_perm && num_rows == block_size)
-                                                                block_process.ProcessVariant(perm, v_vcf_data_io);
+                                                                    if (use_legacy_perm && num_rows == block_size)
+                                                                        block_process.ProcessVariant(perm, v_vcf_data_io);
 
                                                              logger->debug("Finished GT block: block_id={}, col_block_id={}, perm_size={}", block_id, col_block_id, perm.size());
                                                          }
+                                                     }
+                                                 }
 
-                                                         if (data != nullptr)
-                                                             delete[] data;
-                                                         // Gets the sparse encoding for each block
-                                                         lock_gt_block_process(block_id, col_block_id);
+                                                         // Free raw GT block as early as possible (even on error) to reduce peak RSS.
+                                                         data_owner.reset();
+                                                         // Push results to the single aggregator thread for in-order commit.
+                                                         GtProcessResult res;
+                                                         res.block_id = block_id;
+                                                         res.col_block_id = col_block_id;
+                                                         res.num_rows = num_rows;
+                                                         res.v_vcf_data_io = std::move(v_vcf_data_io);
+                                                         res.perm = std::move(perm);
+                                                         res.zeros_only = std::move(zeros_only);
+                                                         res.copies = std::move(copies);
+                                                         res.origin_of_copy = std::move(origin_of_copy);
+                                                         res.samples_indexes = std::move(samples_indexes);
+                                                         if (!gt_result_queue.Push(std::move(res)))
                                                          {
-                                                             if (num_rows)
-                                                             {
-                                                                 if (use_legacy_perm)
-                                                                 {
-                                                                     if (num_rows % block_size)
-                                                                         vint_last_perm.emplace(chunk_id, vint_code::EncodeArray(perm));
-                                                                 }
-                                                                 else
-                                                                 {
-                                                                     vint_last_perm_2d.emplace(make_pair(block_id, col_block_id), vint_code::EncodeArray(perm));
-                                                                 }
-                                                                 if (v_vcf_data_io.empty())
-                                                                 {
-                                                                     if (!has_pending_gt_row_block)
-                                                                     {
-                                                                         pending_gt_row_block.clear();
-                                                                         pending_gt_row_block_id = static_cast<uint32_t>(block_id);
-                                                                         has_pending_gt_row_block = true;
-                                                                     }
-                                                                     block_process.AddGtIndexBlock(pending_gt_row_block, all_zeros, all_copies, comp_pos_copy,
-                                                                                                  zeros_only, copies, origin_of_copy, samples_indexes);
-                                                                 }
-                                                             }
-                                                             // if(!cur_block_id)
-                                                             //     prev_chrom = v_vcf_data_io[0].chrom;
-                                                             // if(num_rows != block_size)
-                                                             //     block_process.ProcessLastPerm(perm,vint_last_perm);
-
-                                                             // In Tiled mode, only the last column block has variant descriptors
-                                                            // Skip variant descriptor processing for column blocks with empty v_vcf_data_io
-                                                            if (!v_vcf_data_io.empty() && prev_chrom != v_vcf_data_io[0].chrom)
-                                                             {
-
-                                                                 prev_chrom = v_vcf_data_io[0].chrom;
-                                                                 if (no_curr_chrom_block)
-                                                                 {
-
-                                                                     size_t gt_sz = 0;
-                                                                     for (const auto &b : fixed_chunk_io.gt_row_blocks)
-                                                                         gt_sz += b.size();
-                                                                     toal_all_size += gt_sz;
-                                                                     sortVarBlockQueue.Push(chunk_id, std::move(fixed_chunk_io));
-                                                                     int id = (int)chunks_streams.size();
-                                                                     chunks_streams[id] = chunk_stream(cur_chunk_actual_pos, 0);
-
-                                                                     no_curr_chrom_block = 0;
-                                                                     chunk_id++;
-                                                                     fixed_chunk_io.Clear();
-                                                                 }
-                                                                 if (num_rows)
-                                                                 {
-
-                                                                     cur_chunk_actual_pos += (uint32_t)v_vcf_data_io.size();
-                                                                     if (!has_pending_gt_row_block)
-                                                                     {
-                                                                         pending_gt_row_block.clear();
-                                                                         pending_gt_row_block_id = static_cast<uint32_t>(block_id);
-                                                                         has_pending_gt_row_block = true;
-                                                                     }
-                                                                     block_process.AddGtIndexBlock(pending_gt_row_block, all_zeros, all_copies, comp_pos_copy,
-                                                                                                  zeros_only, copies, origin_of_copy, samples_indexes);
-                                                                     fixed_field_block row_block_fixed;
-                                                                     row_block_fixed.Clear();
-                                                                     int64_t prev_pos_rb = 0;
-                                                                     block_process.addFixedFieldsBlock(row_block_fixed, v_vcf_data_io, prev_pos_rb);
-                                                                     fixed_fields_row_block_meta meta;
-                                                                     meta.variant_count = row_block_fixed.no_variants;
-                                                                     meta.first_pos = (int64_t)v_vcf_data_io.front().pos;
-                                                                     meta.last_pos = (int64_t)v_vcf_data_io.back().pos;
-                                                                     fixed_chunk_io.no_variants += meta.variant_count;
-                                                                     fixed_chunk_io.row_blocks.emplace_back(std::move(row_block_fixed));
-                                                                     fixed_chunk_io.row_meta.emplace_back(meta);
-                                                                     fixed_chunk_io.gt_row_blocks.emplace_back(std::move(pending_gt_row_block));
-                                                                     pending_gt_row_block.clear();
-                                                                     has_pending_gt_row_block = false;
-                                                                     no_curr_chrom_block++;
-
-                                                                     if (no_curr_chrom_block == params.no_blocks)
-                                                                     {
-                                                                         size_t gt_sz = 0;
-                                                                         for (const auto &b : fixed_chunk_io.gt_row_blocks)
-                                                                             gt_sz += b.size();
-                                                                         toal_all_size += gt_sz;
-                                                                         sortVarBlockQueue.Push(chunk_id, std::move(fixed_chunk_io));
-                                                                         int id = (int)chunks_streams.size();
-                                                                         chunks_streams[id] = chunk_stream(cur_chunk_actual_pos, 0);
-                                                                         no_curr_chrom_block = 0;
-                                                                         chunk_id++;
-                                                                         fixed_chunk_io.Clear();
-                                                                     }
-                                                                 }
-                                                                 // Note: num_rows == 0 is a termination marker
-                                                                 // sortVarBlockQueue.Complete() is now called by the main thread after all workers finish
-                                                             }
-                                                             else if (!v_vcf_data_io.empty())
-                                                             {
-
-                                                                 cur_chunk_actual_pos += (uint32_t)v_vcf_data_io.size();
-                                                                 if (!has_pending_gt_row_block)
-                                                                 {
-                                                                     pending_gt_row_block.clear();
-                                                                     pending_gt_row_block_id = static_cast<uint32_t>(block_id);
-                                                                     has_pending_gt_row_block = true;
-                                                                 }
-                                                                 block_process.AddGtIndexBlock(pending_gt_row_block, all_zeros, all_copies, comp_pos_copy,
-                                                                                              zeros_only, copies, origin_of_copy, samples_indexes);
-                                                                 fixed_field_block row_block_fixed;
-                                                                 row_block_fixed.Clear();
-                                                                 int64_t prev_pos_rb = 0;
-                                                                 block_process.addFixedFieldsBlock(row_block_fixed, v_vcf_data_io, prev_pos_rb);
-                                                                 fixed_fields_row_block_meta meta;
-                                                                 meta.variant_count = row_block_fixed.no_variants;
-                                                                 meta.first_pos = (int64_t)v_vcf_data_io.front().pos;
-                                                                 meta.last_pos = (int64_t)v_vcf_data_io.back().pos;
-                                                                 fixed_chunk_io.no_variants += meta.variant_count;
-                                                                 fixed_chunk_io.row_blocks.emplace_back(std::move(row_block_fixed));
-                                                                 fixed_chunk_io.row_meta.emplace_back(meta);
-                                                                 fixed_chunk_io.gt_row_blocks.emplace_back(std::move(pending_gt_row_block));
-                                                                 pending_gt_row_block.clear();
-                                                                 has_pending_gt_row_block = false;
-                                                                 no_curr_chrom_block++;
-
-                                                                 if (no_curr_chrom_block == params.no_blocks)
-                                                                 {
-                                                                     size_t gt_sz = 0;
-                                                                     for (const auto &b : fixed_chunk_io.gt_row_blocks)
-                                                                         gt_sz += b.size();
-                                                                     toal_all_size += gt_sz;
-                                                                     sortVarBlockQueue.Push(chunk_id, std::move(fixed_chunk_io));
-                                                                     int id = (int)chunks_streams.size();
-                                                                     chunks_streams[id] = chunk_stream(cur_chunk_actual_pos, 0);
-                                                                     no_curr_chrom_block = 0;
-                                                                     chunk_id++;
-                                                                     fixed_chunk_io.Clear();
-                                                                 }
-                                                             }
+                                                             // Aggregator is shutting down; exit worker loop.
+                                                             break;
                                                          }
-                                                         unlock_gt_block_process(col_block_id);
                                                      }
                                                  }));
 
     if (!compression_reader->ProcessInVCF())
-        return false;
+    {
+        logger->error("ProcessInVCF failed; aborting compression early");
+        gt_worker_error.store(true, std::memory_order_relaxed);
+        inGtBlockQueue.Complete();
+        gt_result_queue.Complete();
+        for (uint32_t i = 0; i < params.no_gt_threads; ++i)
+            block_process_thread[i].join();
+        gt_agg_thread->join();
+        if (params.compress_mode == compress_mode_t::lossless_mode)
+        {
+            part_queue.Complete();
+            for (uint32_t i = 0; i < params.no_threads; ++i)
+                part_compress_thread[i].join();
+            if (other_fields_results)
+                other_fields_results->Complete();
+            if (other_fields_write_thread)
+                other_fields_write_thread->join();
+        }
+        for (auto &t : fixed_fields_compress_threads)
+            t.join();
+        fixed_payload_queue.Complete();
+        fixed_fields_write_thread->join();
+	        cleanup_failed_output();
+	        return false;
+	    }
 
     no_vec = compression_reader->getNoVec();
 
@@ -777,24 +1225,31 @@ bool Compressor::CompressProcess()
     for (uint32_t i = 0; i < params.no_gt_threads; ++i)
         block_process_thread[i].join();
 
-    // After all GT blocks are processed, push any remaining data and complete the queue
+    // Signal GT aggregator no more results and wait for it to finish committing/closing sortVarBlockQueue.
+    gt_result_queue.Complete();
+    gt_agg_thread->join();
+
+    if (gt_worker_error.load(std::memory_order_relaxed))
     {
-        lock_guard<mutex> lock(mtx_gt_block);
-        if (no_curr_chrom_block > 0)
+        logger->error("GT block processing failed; aborting compression (no output will be produced).");
+        if (params.compress_mode == compress_mode_t::lossless_mode)
         {
-            // Push the last chunk if there's remaining data
-            size_t gt_sz = 0;
-            for (const auto &b : fixed_chunk_io.gt_row_blocks)
-                gt_sz += b.size();
-            toal_all_size += gt_sz;
-            sortVarBlockQueue.Push(chunk_id, std::move(fixed_chunk_io));
-            int id = (int)chunks_streams.size();
-            chunks_streams[id] = chunk_stream(cur_chunk_actual_pos, 0);
-            fixed_chunk_io.Clear();
+            for (uint32_t i = 0; i < params.no_threads; ++i)
+                part_compress_thread[i].join();
+            if (other_fields_results)
+                other_fields_results->Complete();
+            if (other_fields_write_thread)
+                other_fields_write_thread->join();
+            if (file_handle2)
+                file_handle2->Close();
         }
-        // Always complete the queue to unblock the compress thread
-        sortVarBlockQueue.Complete();
-    }
+        for (auto &t : fixed_fields_compress_threads)
+            t.join();
+        fixed_payload_queue.Complete();
+	        fixed_fields_write_thread->join();
+	        cleanup_failed_output();
+	        return false;
+	    }
 
     // obtain the variation description
 
@@ -805,6 +1260,16 @@ bool Compressor::CompressProcess()
 
         for (uint32_t i = 0; i < params.no_threads; ++i)
             part_compress_thread[i].join();
+        if (other_fields_results)
+            other_fields_results->Complete();
+        if (other_fields_write_thread)
+            other_fields_write_thread->join();
+        if (other_fields_error.load(std::memory_order_relaxed))
+        {
+            logger->error("Lossless other-fields compression failed; aborting compression.");
+            cleanup_failed_output();
+            return false;
+        }
 
         auto stream_id = file_handle2->RegisterStream("part2_params");
         vector<uint8_t> v_desc;
@@ -861,12 +1326,21 @@ bool Compressor::CompressProcess()
         file_handle2->Close();
     }
 
-    // GT threads already joined earlier, just wait for compress thread
-    compress_thread->join();
+	    // Wait for fixed-fields compression pipeline to finish before reading temp file.
+	    for (auto &t : fixed_fields_compress_threads)
+	        t.join();
+	    fixed_payload_queue.Complete();
+	    fixed_fields_write_thread->join();
+	    if (fixed_fields_error.load(std::memory_order_relaxed))
+	    {
+	        logger->error("Fixed-fields chunk compression failed; aborting compression.");
+	        cleanup_failed_output();
+	        return false;
+	    }
 
-    if (temp_file)
-        fclose(temp_file);
-    temp_file = fopen(temp_file1_fname, "rb");
+	    if (temp_file)
+	        fclose(temp_file);
+	    temp_file = fopen(temp_file1_fname, "rb");
     logger->info("Complete and process the chunking.");
 
     compressReplicatedRow();
@@ -903,7 +1377,6 @@ void Compressor::compressReplicatedRow()
         zeros_only_bit_vector[i % 2][i / 2] = all_zeros[i];
         copy_bit_vector[i % 2][i / 2] = all_copies[i];
     }
-    comp_pos_copy.shrink_to_fit();
     copy_no = comp_pos_copy.size();
 
     // std::cerr << "no_vec:" << no_vec << endl;
@@ -984,39 +1457,10 @@ char Compressor::bits_used(unsigned int n)
     }
     return bits;
 }
-// ************************************************************************************
-void Compressor::lock_coder_compressor(SPackage &pck)
+bool Compressor::compress_other_fields_to_payloads(SPackage &pck, vector<uint8_t> &data_payload, vector<uint8_t> &size_payload, vector<uint8_t> &scratch)
 {
-    unique_lock<mutex> lck(mtx_v_coder);
-    cv_v_coder.wait(lck, [&, this]
-                    {
-		int sid = pck.key_id;
-
-		return (int) v_coder_part_ids[sid] == pck.part_id; });
-}
-
-// ************************************************************************************
-bool Compressor::check_coder_compressor(SPackage &pck)
-{
-    unique_lock<mutex> lck(mtx_v_coder);
-    int sid = pck.key_id;
-
-    return (int)v_coder_part_ids[sid] == pck.part_id;
-}
-
-// ************************************************************************************
-void Compressor::unlock_coder_compressor(SPackage &pck)
-{
-    lock_guard<mutex> lck(mtx_v_coder);
-    int sid = pck.key_id;
-
-    ++v_coder_part_ids[sid];
-    cv_v_coder.notify_all();
-}
-void Compressor::compress_other_fileds(SPackage &pck, vector<uint8_t> &v_compressed, vector<uint8_t> &v_tmp)
-{
-
-    lock_coder_compressor(pck);
+    vector<uint8_t> v_compressed;
+    vector<uint8_t> &v_tmp = scratch;
     CompressionStrategy *cbsc_size = field_size_codecs[pck.key_id].get();
 
     // Special lossless compression for selected FORMAT fields (AD/PL/PGT/PID).
@@ -1052,7 +1496,7 @@ void Compressor::compress_other_fileds(SPackage &pck, vector<uint8_t> &v_compres
 	    const bool is_gq_field = (field_name == "GQ");
 	    const bool is_pl_field = (field_name == "PL");
 	    const bool is_pid_field = (field_name == "PID");
-	    const uint32_t n_samples = params.n_samples;
+    const uint32_t n_samples = params.n_samples;
 
     if (pck.v_data.size())
     {
@@ -2012,16 +2456,13 @@ void Compressor::compress_other_fileds(SPackage &pck, vector<uint8_t> &v_compres
             // zstd::zstd_compress(v_tmp, v_compressed);
         }
 
-        // cbsc->Compress(pck.v_data, v_compressed);
-
-        file_handle2->AddPartComplete(pck.stream_id_data, pck.part_id, v_compressed);
-        addFieldStats(raw_data_bytes, v_compressed.size());
+        const uint64_t comp_bytes = v_compressed.size();
+        addFieldStats(raw_data_bytes, comp_bytes);
+        data_payload = std::move(v_compressed);
     }
     else
     {
-        v_compressed.clear();
-
-        file_handle2->AddPartComplete(pck.stream_id_data, pck.part_id, v_compressed);
+        data_payload.clear();
     }
 
     v_compressed.clear();
@@ -2034,10 +2475,9 @@ void Compressor::compress_other_fileds(SPackage &pck, vector<uint8_t> &v_compres
     cbsc_size->Compress(v_tmp, v_compressed);
     // zstd::zstd_compress(v_tmp, v_compressed);
 
-    file_handle2->AddPartComplete(pck.stream_id_size, pck.part_id, v_compressed);
-    addFieldStats(v_tmp.size(), v_compressed.size());
-
-    unlock_coder_compressor(pck);
+    size_payload = std::move(v_compressed);
+    addFieldStats(v_tmp.size(), size_payload.size());
+    return true;
 }
 // void Compressor::compress_INT_fileds(SPackage& pck, vector<uint8_t>& v_compressed, vector<uint8_t>& v_tmp)
 // {
@@ -2141,7 +2581,7 @@ void Compressor::Encoder(vector<uint8_t> &v_data, vector<uint8_t> &v_tmp)
     //     v_tmp.emplace_back(count);
     // }
 
-    v_tmp.shrink_to_fit();
+    // Keep capacity for reuse (avoid allocator churn on hot paths).
     // for (size_t i = 0; i < v_data.size(); i++)
     // {
     //     std::cerr<<(int)v_data[i]<<" ";
@@ -2199,7 +2639,6 @@ bool Compressor::compress_meta(vector<string> v_samples, const string &v_header)
 void Compressor::InitCompressParams()
 {
 
-    v_coder_part_ids.resize(no_keys, 0);
     field_data_codecs.resize(no_keys);
     field_size_codecs.resize(no_keys);
 
@@ -2330,12 +2769,14 @@ bool Compressor::compressFixedFields(fixed_field_block &fixed_field_block_io)
     fixed_field_block_compress.gt_block.emplace_back(marker);
     writeTempFlie(fixed_field_block_compress);
     // comp_sort_block_queue.Push(fixed_field_block_id,fixed_field_block_compress);
-    fixed_field_block_compress.Clear();
-    return true;
-}
+	    fixed_field_block_compress.Clear();
+	    return true;
+	}
 
-bool Compressor::compressFixedFieldsChunk(fixed_field_chunk &chunk_io)
+bool Compressor::compressFixedFieldsChunkToPayload(const fixed_field_chunk &chunk_io, std::vector<uint8_t> &payload)
 {
+    payload.clear();
+
     if (chunk_io.row_blocks.size() != chunk_io.row_meta.size())
         return false;
     if (chunk_io.row_blocks.size() != chunk_io.gt_row_blocks.size())
@@ -2368,7 +2809,6 @@ bool Compressor::compressFixedFieldsChunk(fixed_field_chunk &chunk_io)
         codec->Compress(rb.alt, out.alt);
         codec->Compress(rb.qual, out.qual);
 
-        // Collect compressed field sizes for statistics
         if (enable_field_stats_)
         {
             comp_stats_.chrom.AddCompressed(out.chrom.size());
@@ -2381,22 +2821,20 @@ bool Compressor::compressFixedFieldsChunk(fixed_field_chunk &chunk_io)
     }
 
     uint8_t marker = 0;
+    switch (params.backend)
     {
-        switch (params.backend)
-        {
-        case compression_backend_t::bsc:
-            marker = 0;
-            break;
-        case compression_backend_t::zstd:
-            marker = 1;
-            break;
-        case compression_backend_t::brotli:
-            marker = 2;
-            break;
-        default:
-            marker = 0;
-            break;
-        }
+    case compression_backend_t::bsc:
+        marker = 0;
+        break;
+    case compression_backend_t::zstd:
+        marker = 1;
+        break;
+    case compression_backend_t::brotli:
+        marker = 2;
+        break;
+    default:
+        marker = 0;
+        break;
     }
 
     std::vector<std::vector<uint8_t>> gt_row_blocks_comp(row_block_count);
@@ -2409,13 +2847,126 @@ bool Compressor::compressFixedFieldsChunk(fixed_field_chunk &chunk_io)
         gt_codec->Compress(chunk_io.gt_row_blocks[i], gt_row_blocks_comp[i]);
         gt_row_blocks_comp[i].emplace_back(marker);
 
-        // Collect GT compressed size for statistics
         if (enable_field_stats_)
             comp_stats_.gt.AddCompressed(gt_row_blocks_comp[i].size());
     }
 
-    return writeTempChunkRB(chunk_io, row_blocks_comp, gt_row_blocks_comp);
+    // Serialize RB chunk (same bytes as writeTempChunkRB would write after the leading size field).
+    const uint32_t header_bytes = 5u * sizeof(uint32_t); // magic, version, total_variants, row_block_count, flags
+    const uint32_t entry_bytes =
+        sizeof(uint32_t) + 2u * sizeof(int64_t) + 6u * (2u * sizeof(uint32_t)) + 2u * sizeof(uint32_t); // + (gt_off,gt_size)
+    const uint32_t dir_bytes = row_block_count * entry_bytes;
+
+    struct DirEntryOffsets
+    {
+        uint32_t chrom_off, chrom_size;
+        uint32_t pos_off, pos_size;
+        uint32_t id_off, id_size;
+        uint32_t ref_off, ref_size;
+        uint32_t alt_off, alt_size;
+        uint32_t qual_off, qual_size;
+        uint32_t gt_off, gt_size;
+    };
+    std::vector<DirEntryOffsets> offsets(row_block_count);
+
+    uint32_t cur_off = header_bytes + dir_bytes;
+    for (uint32_t i = 0; i < row_block_count; ++i)
+    {
+        const fixed_field_block &rb = row_blocks_comp[i];
+        auto &o = offsets[i];
+
+        o.chrom_off = cur_off;
+        o.chrom_size = static_cast<uint32_t>(rb.chrom.size());
+        cur_off += o.chrom_size;
+
+        o.pos_off = cur_off;
+        o.pos_size = static_cast<uint32_t>(rb.pos.size());
+        cur_off += o.pos_size;
+
+        o.id_off = cur_off;
+        o.id_size = static_cast<uint32_t>(rb.id.size());
+        cur_off += o.id_size;
+
+        o.ref_off = cur_off;
+        o.ref_size = static_cast<uint32_t>(rb.ref.size());
+        cur_off += o.ref_size;
+
+        o.alt_off = cur_off;
+        o.alt_size = static_cast<uint32_t>(rb.alt.size());
+        cur_off += o.alt_size;
+
+        o.qual_off = cur_off;
+        o.qual_size = static_cast<uint32_t>(rb.qual.size());
+        cur_off += o.qual_size;
+
+        o.gt_off = cur_off;
+        o.gt_size = static_cast<uint32_t>(gt_row_blocks_comp[i].size());
+        cur_off += o.gt_size;
+    }
+
+    payload.reserve(cur_off);
+
+    const uint32_t magic = GSC_FIXED_FIELDS_RB_MAGIC;
+    const uint32_t version = GSC_FIXED_FIELDS_RB_VERSION_LATEST;
+    const uint32_t total_variants = chunk_io.no_variants;
+    const uint32_t flags = 0;
+
+    append_pod(payload, magic);
+    append_pod(payload, version);
+    append_pod(payload, total_variants);
+    append_pod(payload, row_block_count);
+    append_pod(payload, flags);
+
+    for (uint32_t i = 0; i < row_block_count; ++i)
+    {
+        const fixed_fields_row_block_meta &meta = chunk_io.row_meta[i];
+        const auto &o = offsets[i];
+
+        append_pod(payload, meta.variant_count);
+        append_pod(payload, meta.first_pos);
+        append_pod(payload, meta.last_pos);
+
+        append_pod(payload, o.chrom_off);
+        append_pod(payload, o.chrom_size);
+        append_pod(payload, o.pos_off);
+        append_pod(payload, o.pos_size);
+        append_pod(payload, o.id_off);
+        append_pod(payload, o.id_size);
+        append_pod(payload, o.ref_off);
+        append_pod(payload, o.ref_size);
+        append_pod(payload, o.alt_off);
+        append_pod(payload, o.alt_size);
+        append_pod(payload, o.qual_off);
+        append_pod(payload, o.qual_size);
+        append_pod(payload, o.gt_off);
+        append_pod(payload, o.gt_size);
+    }
+
+    for (uint32_t i = 0; i < row_block_count; ++i)
+    {
+        append_bytes(payload, row_blocks_comp[i].chrom);
+        append_bytes(payload, row_blocks_comp[i].pos);
+        append_bytes(payload, row_blocks_comp[i].id);
+        append_bytes(payload, row_blocks_comp[i].ref);
+        append_bytes(payload, row_blocks_comp[i].alt);
+        append_bytes(payload, row_blocks_comp[i].qual);
+        append_bytes(payload, gt_row_blocks_comp[i]);
+    }
+
+    return true;
 }
+
+	bool Compressor::compressFixedFieldsChunk(fixed_field_chunk &chunk_io)
+	{
+	    std::vector<uint8_t> payload;
+	    if (!compressFixedFieldsChunkToPayload(chunk_io, payload))
+	        return false;
+	    const uint64_t size = static_cast<uint64_t>(payload.size());
+	    fwrite(&size, sizeof(size), 1, temp_file);
+	    if (!payload.empty())
+	        fwrite(payload.data(), 1, payload.size(), temp_file);
+	    return true;
+	}
 
 bool Compressor::writeTempFlie(fixed_field_block &fixed_field_block_io)
 {

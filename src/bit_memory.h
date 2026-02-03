@@ -451,14 +451,15 @@ public:
 
 	// 	type = buffer_t::integer;
 	// }
-    void WriteInt(char* p, uint32_t size)
-	{
-		v_size.emplace_back(size>>2);
+	    void WriteInt(char* p, uint32_t size)
+		{
+			v_size.emplace_back(size>>2);
 
-		v_data.insert(v_data.end(), p, p + size);
+			if (size)
+				v_data.insert(v_data.end(), p, p + size);
 
-		type = buffer_t::integer;
-	}
+			type = buffer_t::integer;
+		}
 
 	void WriteInt64(int64_t x)
 	{
@@ -485,14 +486,15 @@ public:
 		for (int i = no_bytes - 1; i >= 0; --i)
 			v_data.emplace_back(bytes[i]);
 	}
-    void WriteReal(char* p, uint32_t size)
-	{
-		v_size.emplace_back(size>>2);
+	    void WriteReal(char* p, uint32_t size)
+		{
+			v_size.emplace_back(size>>2);
 
-		v_data.insert(v_data.end(), p, p +size);
+			if (size)
+				v_data.insert(v_data.end(), p, p + size);
 
-		type = buffer_t::real;
-	}
+			type = buffer_t::real;
+		}
 	// void WriteReal(char* p, uint32_t size)
 	// {
 	// 	v_size.emplace_back(size);

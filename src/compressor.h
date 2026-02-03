@@ -119,9 +119,6 @@ class Compressor
     CompressionStatistics comp_stats_;
     bool enable_field_stats_ = false;
 
-    mutex mtx_v_coder;
-	condition_variable cv_v_coder;
-	vector<uint32_t> v_coder_part_ids;
     vector<std::unique_ptr<CompressionStrategy>> field_size_codecs;
     vector<std::unique_ptr<CompressionStrategy>> field_data_codecs;
 
@@ -142,24 +139,22 @@ class Compressor
     void compressReplicatedRow();;
     bool writeCompressFlie();
 
-    void compress_other_fileds(SPackage& pck, vector<uint8_t>& v_compressed, vector<uint8_t>& v_tmp);
+    bool compress_other_fields_to_payloads(SPackage& pck, vector<uint8_t>& data_payload, vector<uint8_t>& size_payload, vector<uint8_t>& scratch);
     void compress_INT_fileds(SPackage& pck, vector<uint8_t>& v_compressed, vector<uint8_t>& v_tmp);
-    void lock_coder_compressor(SPackage& pck);
-    bool check_coder_compressor(SPackage& pck);
-    void unlock_coder_compressor(SPackage& pck);
     void lock_gt_block_process(int &_block_id, uint32_t _col_block_id);
     bool check_gt_block_process(int &_block_id);
     void unlock_gt_block_process(uint32_t _col_block_id);
     void Encoder(vector<uint8_t>& v_data, vector<uint8_t>& v_tmp);
     bool compress_meta(vector<string> v_samples,const string& v_header);
-    void InitCompressParams();
-    bool compressFixedFields(fixed_field_block &field_block_io);
-    bool compressFixedFieldsChunk(fixed_field_chunk &chunk_io);
-    bool OpenTempFile(const string &out_file_name);
-    bool writeTempFlie(fixed_field_block &fixed_field_block_io);
-    bool writeTempChunkRB(const fixed_field_chunk &chunk_io,
-                          const std::vector<fixed_field_block> &row_blocks_comp,
-                          const std::vector<std::vector<uint8_t>> &gt_row_blocks_comp);
+	    void InitCompressParams();
+	    bool compressFixedFields(fixed_field_block &field_block_io);
+	    bool compressFixedFieldsChunk(fixed_field_chunk &chunk_io);
+	    bool compressFixedFieldsChunkToPayload(const fixed_field_chunk &chunk_io, std::vector<uint8_t> &payload);
+	    bool OpenTempFile(const string &out_file_name);
+	    bool writeTempFlie(fixed_field_block &fixed_field_block_io);
+	    bool writeTempChunkRB(const fixed_field_chunk &chunk_io,
+	                          const std::vector<fixed_field_block> &row_blocks_comp,
+	                          const std::vector<std::vector<uint8_t>> &gt_row_blocks_comp);
 public:
     ~Compressor()
     {

@@ -1,13 +1,42 @@
 #include "decompressor.h"
 #include "logger.h"
+#include <atomic>
 #include <bitset>
 #include <chrono>
+#include <condition_variable>
+#include <deque>
+#include <cstdlib>
 #include <limits>
+#include <memory>
+#include <mutex>
+#include <utility>
 #include <zlib.h>
 
 using namespace std::chrono;
 
 namespace {
+
+template <typename F>
+class ScopeExit
+{
+    F fn_;
+    bool active_ = true;
+
+public:
+    explicit ScopeExit(F fn) : fn_(std::move(fn)) {}
+    ~ScopeExit()
+    {
+        if (active_)
+            fn_();
+    }
+    void dismiss() { active_ = false; }
+};
+
+template <typename F>
+ScopeExit<F> MakeScopeExit(F fn)
+{
+    return ScopeExit<F>(std::move(fn));
+}
 
 bool ends_with(const std::string &value, const std::string &suffix) {
     return value.size() >= suffix.size() &&
@@ -53,6 +82,66 @@ bool is_biallelic_desc_for_export(const variant_desc_t& desc) {
         return false;
     return true;
 }
+
+template <typename T>
+class BoundedQueue
+{
+    std::mutex mtx_;
+    std::condition_variable cv_pop_;
+    std::condition_variable cv_push_;
+    std::deque<T> q_;
+    size_t max_size_ = 0;
+    bool done_ = false;
+
+public:
+    explicit BoundedQueue(size_t max_size) : max_size_(max_size) {}
+
+    void Complete()
+    {
+        std::lock_guard<std::mutex> lock(mtx_);
+        done_ = true;
+        cv_pop_.notify_all();
+        cv_push_.notify_all();
+    }
+
+    bool Push(T &&item)
+    {
+        std::unique_lock<std::mutex> lock(mtx_);
+        cv_push_.wait(lock, [&] { return done_ || q_.size() < max_size_; });
+        if (done_)
+            return false;
+        q_.emplace_back(std::move(item));
+        cv_pop_.notify_one();
+        return true;
+    }
+
+    bool Pop(T &out)
+    {
+        std::unique_lock<std::mutex> lock(mtx_);
+        cv_pop_.wait(lock, [&] { return done_ || !q_.empty(); });
+        if (q_.empty())
+            return false;
+        out = std::move(q_.front());
+        q_.pop_front();
+        cv_push_.notify_one();
+        return true;
+    }
+};
+
+struct DecompressedChunk
+{
+    uint32_t chunk_id = 0; // 0-based chunk id
+    uint32_t start_actual_pos = 0;
+    uint32_t end_actual_pos = 0;
+    uint32_t chunk_variant_offset = 0;
+    bool has_fixed_fields_rb_dir = false;
+    uint32_t fixed_fields_chunk_version = 0;
+
+    std::vector<block_t> fixed_variants_chunk;
+    std::vector<std::vector<std::vector<uint32_t>>> sort_perm;
+    std::vector<uint8_t> gt_indexes;
+    std::vector<std::vector<field_desc>> all_fields;
+};
 
 } // namespace
 
@@ -316,8 +405,6 @@ bool Decompressor::initDecompression(DecompressionReader &decompression_reader){
 // Official Decompress Program Entry
 bool Decompressor::decompressProcess()
 {
-    MyBarrier  my_barrier(3);
-    
     decompression_reader.SetNoThreads(params.no_threads);
     // unique_ptr<CompressedFileLoading> cfile(new CompressedFileLoading());
 
@@ -327,6 +414,11 @@ bool Decompressor::decompressProcess()
     // unique_ptr<CompressedFileLoading> cfile(new CompressedFileLoading());
     if(!decompression_reader.OpenReading(in_file_name, decompression_mode_type))
         return false;
+
+    auto cleanup_guard = MakeScopeExit([&] {
+        decompression_reader.close();
+        Close();
+    });
 
     // Reject mode mismatches early: on-disk mode is stored in header as `mode_type`.
     if (decompression_reader.file_mode_type && params.compress_mode == compress_mode_t::lossly_mode)
@@ -395,13 +487,11 @@ bool Decompressor::decompressProcess()
     if (params.header_only)
     {
         // Header was written by initOut(). Exit early without decoding records.
-        if (decompression_mode_type)
-            decompression_reader.close();
-        Close();
         return true;
     }
 
-    initDecompression(decompression_reader);
+    if (!initDecompression(decompression_reader))
+        return false;
     
     if(!analyzeInputRange(start_chunk_id,end_chunk_id)){
         return false;
@@ -410,140 +500,211 @@ bool Decompressor::decompressProcess()
     if(!decompression_reader.setStartChunk(start_chunk_id)){
         return false;
     } 
-    cur_chunk_id = start_chunk_id;
-	    unique_ptr<thread> decompress_thread(new thread([&]{
+    std::atomic<bool> abort{false};
+    std::atomic<bool> ok{true};
 
-	        while(cur_chunk_id < end_chunk_id){
-	            my_barrier.count_down_and_wait();
-	            my_barrier.count_down_and_wait();
-	            initalIndex();
-	            if(out_type == file_type::BED_File){
-	                BedFormatDecompress();
+    // Decompression pipeline:
+    // - producer thread: readFixedFields + Decoder/DecoderByRange (+ optional other-fields)
+    // - consumer thread: initalIndex + output (VCF/BCF/BED/PGEN/BGEN)
+    //
+    // This replaces the fragile 3-way barrier synchronization and avoids deadlocks on early-exit paths.
+    const size_t pipeline_depth = 2;
+    BoundedQueue<std::unique_ptr<DecompressedChunk>> free_q(pipeline_depth);
+    BoundedQueue<std::unique_ptr<DecompressedChunk>> ready_q(pipeline_depth);
 
-	            }
-                else if (out_type == file_type::PGEN_File)
+    for (size_t i = 0; i < pipeline_depth; ++i)
+        free_q.Push(std::make_unique<DecompressedChunk>());
+
+    std::thread process_thread([&] {
+        auto logger = LogManager::Instance().Logger();
+        for (uint32_t chunk_id = start_chunk_id; chunk_id < end_chunk_id; ++chunk_id)
+        {
+            if (abort.load(std::memory_order_relaxed))
+                break;
+
+            std::unique_ptr<DecompressedChunk> buf;
+            if (!free_q.Pop(buf))
+                break;
+
+            buf->chunk_id = chunk_id;
+            buf->start_actual_pos = decompression_reader.getActualPos(chunk_id);
+            buf->end_actual_pos = decompression_reader.getActualPos(chunk_id + 1);
+            buf->chunk_variant_offset = 0;
+            buf->fixed_variants_chunk.clear();
+            buf->sort_perm.clear();
+            buf->gt_indexes.clear();
+            buf->all_fields.clear();
+
+            if (!decompression_reader.readFixedFields())
+            {
+                logger->error("process_thread: readFixedFields FAILED at chunk_id={}", chunk_id);
+                abort.store(true, std::memory_order_relaxed);
+                ok.store(false, std::memory_order_relaxed);
+                ready_q.Complete();
+                free_q.Complete();
+                break;
+            }
+
+            buf->has_fixed_fields_rb_dir = decompression_reader.has_fixed_fields_rb_dir;
+            buf->fixed_fields_chunk_version = decompression_reader.fixed_fields_chunk_version;
+
+            if (params.compress_mode == compress_mode_t::lossless_mode && params.samples.empty() &&
+                (out_type == file_type::VCF_File || out_type == file_type::BCF_File))
+            {
+                if (chunk_id >= decompression_reader.actual_variants.size())
                 {
-                    PgenFormatDecompress();
+                    logger->error("process_thread: actual_variants out of bounds (chunk_id={}, size={})",
+                                  chunk_id, decompression_reader.actual_variants.size());
+                    abort.store(true, std::memory_order_relaxed);
+                    ok.store(false, std::memory_order_relaxed);
+                    ready_q.Complete();
+                    free_q.Complete();
+                    break;
                 }
-                else if (out_type == file_type::BGEN_File)
+
+                uint32_t no_actual_variants = decompression_reader.actual_variants[chunk_id];
+                buf->all_fields.reserve(no_actual_variants);
+                while (no_actual_variants--)
                 {
-                    BgenFormatDecompress();
+                    buf->all_fields.emplace_back(vector<field_desc>(decompression_reader.keys.size()));
+                    decompression_reader.GetVariants(buf->all_fields.back());
                 }
-                else if (out_type == file_type::GDS_File)
+            }
+
+            uint32_t variants_before = 0;
+            bool decode_ok = false;
+            if (range != "" && buf->has_fixed_fields_rb_dir && !decompression_reader.useLegacyPath)
+            {
+                decode_ok = decompression_reader.DecoderByRange(buf->fixed_variants_chunk, buf->sort_perm, buf->gt_indexes,
+                                                               chunk_id, range_1, range_2, variants_before);
+            }
+            else
+            {
+                decode_ok = decompression_reader.Decoder(buf->fixed_variants_chunk, buf->sort_perm, buf->gt_indexes, chunk_id);
+            }
+
+            if (!decode_ok)
+            {
+                logger->error("process_thread: Decoder FAILED at chunk_id={}", chunk_id);
+                abort.store(true, std::memory_order_relaxed);
+                ok.store(false, std::memory_order_relaxed);
+                ready_q.Complete();
+                free_q.Complete();
+                break;
+            }
+            buf->chunk_variant_offset = variants_before;
+
+            if (!ready_q.Push(std::move(buf)))
+                break;
+        }
+        ready_q.Complete();
+    });
+
+    std::thread decompress_thread([&] {
+        auto logger = LogManager::Instance().Logger();
+
+        std::unique_ptr<DecompressedChunk> buf;
+        while (ready_q.Pop(buf))
+        {
+            if (!buf)
+                continue;
+            if (abort.load(std::memory_order_relaxed))
+                break;
+
+            // Keep legacy semantics: cur_chunk_id is 1-based in the output stage
+            // (code uses `cur_chunk_id-1` as the decoded chunk index).
+            cur_chunk_id = buf->chunk_id + 1;
+            start_chunk_actual_pos = buf->start_actual_pos;
+            end_chunk_actual_pos = buf->end_actual_pos;
+            chunk_variant_offset_io = buf->chunk_variant_offset;
+            has_fixed_fields_rb_dir_io = buf->has_fixed_fields_rb_dir;
+            fixed_fields_chunk_version_io = buf->fixed_fields_chunk_version;
+
+            fixed_variants_chunk_io.swap(buf->fixed_variants_chunk);
+            sort_perm_io.swap(buf->sort_perm);
+            decompress_gt_indexes_io.swap(buf->gt_indexes);
+            all_fields_io.swap(buf->all_fields);
+
+            bool chunk_ok = true;
+            if (!initalIndex())
+            {
+                logger->error("decompress_thread: initalIndex FAILED at cur_chunk_id={}", cur_chunk_id);
+                chunk_ok = false;
+            }
+            else if (out_type == file_type::BED_File)
+            {
+                chunk_ok = (BedFormatDecompress() == 0);
+            }
+            else if (out_type == file_type::PGEN_File)
+            {
+                chunk_ok = (PgenFormatDecompress() == 0);
+            }
+            else if (out_type == file_type::BGEN_File)
+            {
+                chunk_ok = (BgenFormatDecompress() == 0);
+            }
+            else if (out_type == file_type::GDS_File)
+            {
+                // Not implemented; OpenForWriting() should have rejected this already.
+                chunk_ok = false;
+            }
+            else
+            {
+                if (params.compress_mode == compress_mode_t::lossless_mode)
                 {
-                    // Not implemented; OpenForWriting() should have rejected this already.
-                }
-                else{
-	                if(params.compress_mode == compress_mode_t::lossless_mode){
-	                    if (params.samples.empty())
-	                    {
-	                        uint32_t no_actual_variants = decompression_reader.actual_variants[cur_chunk_id-1];
-
-                        decompressAll();
-
-                        // Validate bounds before cleanup
-                        if (no_actual_variants > all_fields_io.size()) {
-                            auto logger = LogManager::Instance().Logger();
-                            logger->error("decompress_thread: BOUNDS ERROR! no_actual_variants={} > all_fields_io.size()={}",
-                                          no_actual_variants, all_fields_io.size());
-                            no_actual_variants = static_cast<uint32_t>(all_fields_io.size());
-                        }
-                        for(uint32_t i = 0; i < no_actual_variants; ++i)
-                            for(size_t j = 0; j < decompression_reader.keys.size(); ++j){
-                                if(all_fields_io[i][j].data_size)
-                                {
-                                    delete[] all_fields_io[i][j].data;
-                                    all_fields_io[i][j].data = nullptr;
-                                    all_fields_io[i][j].data_size = 0;
-                                }
-                                else
-                                    all_fields_io[i][j].data = nullptr;
-
-                            }
-                        all_fields_io.clear();
+                    if (params.samples.empty())
+                    {
+                        chunk_ok = (decompressAll() == 0);
+                        all_fields_io.clear(); // release other-fields payloads for this chunk
                     }
                     else
                     {
                         // Lossless sample query: decode fixed fields + GT only.
-                        decompressSampleSmart(range);
+                        chunk_ok = (decompressSampleSmart(range) == 0);
                     }
-
                 }
-                else{
+                else
+                {
                     if (params.samples == "")
-                        decompressRange(range);
+                        chunk_ok = (decompressRange(range) == 0);
                     else
-                        decompressSampleSmart(range);
+                        chunk_ok = (decompressSampleSmart(range) == 0);
                 }
             }
+
+            // Return buffers back to pool (keep capacity, drop content).
             fixed_variants_chunk_io.clear();
             sort_perm_io.clear();
             decompress_gt_indexes_io.clear();
-        }
-    }));
+            all_fields_io.clear();
 
+            buf->fixed_variants_chunk.swap(fixed_variants_chunk_io);
+            buf->sort_perm.swap(sort_perm_io);
+            buf->gt_indexes.swap(decompress_gt_indexes_io);
+            buf->all_fields.swap(all_fields_io);
+            buf->chunk_variant_offset = 0;
+            buf->has_fixed_fields_rb_dir = false;
+            buf->fixed_fields_chunk_version = 0;
+            buf->start_actual_pos = 0;
+            buf->end_actual_pos = 0;
 
-	    unique_ptr<thread> process_thread(new thread([&]{
-	        while (cur_chunk_id < end_chunk_id)
-	        {
-	            if(!decompression_reader.readFixedFields()){
-                auto logger = LogManager::Instance().Logger();
-                logger->error("process_thread: readFixedFields FAILED at cur_chunk_id={}", cur_chunk_id);
+            if (!free_q.Push(std::move(buf)))
+                break;
+
+            if (!chunk_ok)
+            {
+                abort.store(true, std::memory_order_relaxed);
+                ok.store(false, std::memory_order_relaxed);
+                ready_q.Complete();
+                free_q.Complete();
                 break;
             }
-	            if(params.compress_mode == compress_mode_t::lossless_mode && params.samples.empty() &&
-                   (out_type == file_type::VCF_File || out_type == file_type::BCF_File)){
-
-	                uint32_t no_actual_variants =  decompression_reader.actual_variants[cur_chunk_id];
-
-	                while (no_actual_variants--)
-	                {
-                    all_fields.emplace_back(vector<field_desc>(decompression_reader.keys.size()));
-                    decompression_reader.GetVariants(all_fields.back());
-
-                }
-            }
-            uint32_t variants_before = 0;
-            if (range != "" && decompression_reader.has_fixed_fields_rb_dir && !decompression_reader.useLegacyPath)
-            {
-                decompression_reader.DecoderByRange(fixed_variants_chunk, sort_perm, decompress_gt_indexes, cur_chunk_id,
-                                                   range_1, range_2, variants_before);
-            }
-            else
-            {
-                decompression_reader.Decoder(fixed_variants_chunk,sort_perm,decompress_gt_indexes,cur_chunk_id);
-            }
-            chunk_variant_offset = variants_before;
-
-            my_barrier.count_down_and_wait();
-            my_barrier.count_down_and_wait();
-
         }
-    }));
-    while (cur_chunk_id < end_chunk_id)
-	{
-        my_barrier.count_down_and_wait();
-		swap(fixed_variants_chunk, fixed_variants_chunk_io);
-        swap(sort_perm, sort_perm_io);
-        swap(decompress_gt_indexes, decompress_gt_indexes_io);
-        swap(chunk_variant_offset, chunk_variant_offset_io);
-        if(params.compress_mode == compress_mode_t::lossless_mode){
-            swap(all_fields, all_fields_io);
-        }
-        start_chunk_actual_pos = decompression_reader.getActualPos(cur_chunk_id);
-        end_chunk_actual_pos = decompression_reader.getActualPos(cur_chunk_id+1);
+    });
 
-        cur_chunk_id++;
-		my_barrier.count_down_and_wait();
-
-    }
-
-    process_thread->join();
-    decompress_thread->join();
-    if(decompression_mode_type)
-        decompression_reader.close();
-    Close();
-    return true;
+    process_thread.join();
+    decompress_thread.join();
+    return ok.load(std::memory_order_relaxed);
 }
 
 void Decompressor::finalizePgen()
@@ -1575,8 +1736,8 @@ int Decompressor::BedFormatDecompressTiled()
 
     uint64_t start_pair_id = static_cast<uint64_t>(start_chunk_actual_pos) * n_col_blocks;
     uint64_t gt_index_base_pair_id = start_pair_id;
-    if (decompression_reader.has_fixed_fields_rb_dir &&
-        decompression_reader.fixed_fields_chunk_version >= GSC_FIXED_FIELDS_RB_VERSION_V2 &&
+    if (has_fixed_fields_rb_dir_io &&
+        fixed_fields_chunk_version_io >= GSC_FIXED_FIELDS_RB_VERSION_V2 &&
         chunk_variant_offset_io)
     {
         gt_index_base_pair_id += static_cast<uint64_t>(chunk_variant_offset_io) * n_col_blocks;
@@ -1738,8 +1899,8 @@ int Decompressor::PgenFormatDecompressTiled()
 
     uint64_t start_pair_id = static_cast<uint64_t>(start_chunk_actual_pos) * n_col_blocks;
     uint64_t gt_index_base_pair_id = start_pair_id;
-    if (decompression_reader.has_fixed_fields_rb_dir &&
-        decompression_reader.fixed_fields_chunk_version >= GSC_FIXED_FIELDS_RB_VERSION_V2 &&
+    if (has_fixed_fields_rb_dir_io &&
+        fixed_fields_chunk_version_io >= GSC_FIXED_FIELDS_RB_VERSION_V2 &&
         chunk_variant_offset_io)
     {
         gt_index_base_pair_id += static_cast<uint64_t>(chunk_variant_offset_io) * n_col_blocks;
@@ -1877,8 +2038,8 @@ int Decompressor::BgenFormatDecompressTiled()
 
     uint64_t start_pair_id = static_cast<uint64_t>(start_chunk_actual_pos) * n_col_blocks;
     uint64_t gt_index_base_pair_id = start_pair_id;
-    if (decompression_reader.has_fixed_fields_rb_dir &&
-        decompression_reader.fixed_fields_chunk_version >= GSC_FIXED_FIELDS_RB_VERSION_V2 &&
+    if (has_fixed_fields_rb_dir_io &&
+        fixed_fields_chunk_version_io >= GSC_FIXED_FIELDS_RB_VERSION_V2 &&
         chunk_variant_offset_io)
     {
         gt_index_base_pair_id += static_cast<uint64_t>(chunk_variant_offset_io) * n_col_blocks;
@@ -2090,8 +2251,8 @@ int Decompressor::decompressAllTiled()
 
     uint64_t start_pair_id = static_cast<uint64_t>(start_chunk_actual_pos) * n_col_blocks;
     uint64_t gt_index_base_pair_id = start_pair_id;
-    if (decompression_reader.has_fixed_fields_rb_dir &&
-        decompression_reader.fixed_fields_chunk_version >= GSC_FIXED_FIELDS_RB_VERSION_V2 &&
+    if (has_fixed_fields_rb_dir_io &&
+        fixed_fields_chunk_version_io >= GSC_FIXED_FIELDS_RB_VERSION_V2 &&
         chunk_variant_offset_io)
     {
         gt_index_base_pair_id += static_cast<uint64_t>(chunk_variant_offset_io) * n_col_blocks;
@@ -2477,8 +2638,8 @@ int Decompressor::decompressRangeTiled(const string &range)
     // Calculate start pair_id for this chunk
     uint64_t start_pair_id = static_cast<uint64_t>(start_chunk_actual_pos) * n_col_blocks;
     uint64_t gt_index_base_pair_id = start_pair_id;
-    if (decompression_reader.has_fixed_fields_rb_dir &&
-        decompression_reader.fixed_fields_chunk_version >= GSC_FIXED_FIELDS_RB_VERSION_V2 &&
+    if (has_fixed_fields_rb_dir_io &&
+        fixed_fields_chunk_version_io >= GSC_FIXED_FIELDS_RB_VERSION_V2 &&
         chunk_variant_offset_io)
     {
         gt_index_base_pair_id += static_cast<uint64_t>(chunk_variant_offset_io) * n_col_blocks;
@@ -2589,8 +2750,8 @@ int Decompressor::decompressSampleSmartTiled(const string &range)
     // Calculate start pair_id for this chunk
     uint64_t start_pair_id = static_cast<uint64_t>(start_chunk_actual_pos) * n_col_blocks;
     uint64_t gt_index_base_pair_id = start_pair_id;
-    if (decompression_reader.has_fixed_fields_rb_dir &&
-        decompression_reader.fixed_fields_chunk_version >= GSC_FIXED_FIELDS_RB_VERSION_V2 &&
+    if (has_fixed_fields_rb_dir_io &&
+        fixed_fields_chunk_version_io >= GSC_FIXED_FIELDS_RB_VERSION_V2 &&
         chunk_variant_offset_io)
     {
         gt_index_base_pair_id += static_cast<uint64_t>(chunk_variant_offset_io) * n_col_blocks;
@@ -4259,6 +4420,14 @@ int Decompressor::initOut()
         {
             if (bcf_hdr_write(out_file, out_hdr) < 0)
                 return 1;
+        }
+
+        const char* low_copy_env = std::getenv("GSC_LOW_COPY_VCF");
+        if (low_copy_env && *low_copy_env != '\0' && std::string(low_copy_env) != "0")
+        {
+            if (use_parallel_writing_)
+                LogManager::Instance().Logger()->info("Low-copy VCF mode enabled; disabling parallel writer");
+            use_parallel_writing_ = false;
         }
 
         // Initialize parallel writer if enabled

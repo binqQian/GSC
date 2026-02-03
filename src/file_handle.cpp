@@ -23,7 +23,7 @@ File_Handle_2::~File_Handle_2()
 }
 
 // ******************************************************************************
-bool File_Handle_2::Open(const string& temp_file2_fname)
+bool File_Handle_2::OpenInternal(const string& temp_file2_fname, bool range_enabled, size_t range_begin_in, size_t range_size_in)
 {
 	auto logger = LogManager::Instance().Logger();
 	lock_guard<mutex> lck(mtx);
@@ -32,6 +32,9 @@ bool File_Handle_2::Open(const string& temp_file2_fname)
 		fclose(f);
 
 	m_streams.clear();
+	use_range = range_enabled;
+	range_begin = range_begin_in;
+	range_end = range_enabled ? (range_begin_in + range_size_in) : 0;
 	// file_name = _file_name+".temp_gsc";
 
 	f = fopen(temp_file2_fname.c_str(), input_mode ? "rb" : "wb");
@@ -42,11 +45,32 @@ bool File_Handle_2::Open(const string& temp_file2_fname)
     }
 	setvbuf(f, nullptr, _IOFBF, 64 << 20);
 	if (input_mode)
-		deserialize();
+	{
+		if (!deserialize())
+		{
+			fclose(f);
+			f = nullptr;
+			return false;
+		}
+	}
 
 	f_offset = 0;
 
 	return true;
+}
+
+// ******************************************************************************
+bool File_Handle_2::Open(const string& temp_file2_fname)
+{
+	return OpenInternal(temp_file2_fname, false, 0, 0);
+}
+
+// ******************************************************************************
+bool File_Handle_2::OpenRange(const string& temp_file2_fname, size_t range_begin_in, size_t range_size_in)
+{
+	if (!input_mode)
+		return Open(temp_file2_fname);
+	return OpenInternal(temp_file2_fname, true, range_begin_in, range_size_in);
 }
 
 // // ******************************************************************************
@@ -121,10 +145,21 @@ bool File_Handle_2::serialize()
 bool File_Handle_2::deserialize()
 {
 	size_t footer_size;
-	my_fseek(f, -8, SEEK_END);
-	read_fixed(footer_size, f);
+	if (use_range)
+	{
+		if (range_end < range_begin + 8)
+			return false;
+		my_fseek(f, static_cast<long long>(range_end - 8), SEEK_SET);
+		read_fixed(footer_size, f);
+		my_fseek(f, static_cast<long long>(range_end - 8 - footer_size), SEEK_SET);
+	}
+	else
+	{
+		my_fseek(f, -8, SEEK_END);
+		read_fixed(footer_size, f);
 
-	my_fseek(f, -(long)(8 + footer_size), SEEK_END);
+		my_fseek(f, -(long)(8 + footer_size), SEEK_END);
+	}
 
 	// Load stream part offsets
 	size_t n_streams;
@@ -147,7 +182,10 @@ bool File_Handle_2::deserialize()
 		stream_second.cur_id = 0;
 	}
 	
-	my_fseek(f, 0, SEEK_SET);
+	if (use_range)
+		my_fseek(f, static_cast<long long>(range_begin), SEEK_SET);
+	else
+		my_fseek(f, 0, SEEK_SET);
 
 	return true;
 }
@@ -251,7 +289,8 @@ bool File_Handle_2::GetPart(int stream_id, vector<uint8_t> &v_data)
 		return false;
 	v_data.resize(p.parts[p.cur_id].size);
     
-	my_fseek(f, p.parts[p.cur_id].offset, SEEK_SET);
+	const size_t offset = use_range ? (range_begin + p.parts[p.cur_id].offset) : p.parts[p.cur_id].offset;
+	my_fseek(f, static_cast<long long>(offset), SEEK_SET);
 
 	auto r = fread(v_data.data(), 1, p.parts[p.cur_id].size, f);
     

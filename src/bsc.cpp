@@ -84,8 +84,6 @@ bool CBSCWrapper::Compress(const vector<uint8_t>& v_input, vector<uint8_t>& v_ou
 		c_size = bsc_store(vi, vo, (int) v_input.size(), features);
 
 	v_output.resize(c_size);
-	
-	v_output.shrink_to_fit();
 
 	return true;
 }

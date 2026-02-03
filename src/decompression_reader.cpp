@@ -85,46 +85,20 @@ bool DecompressionReader::OpenReading(const string &in_file_name, const bool &_d
 	in.read((char *)&other_fields_offset, sizeof(uint64_t));
 	in.read((char *)&sdsl_offset, sizeof(uint64_t));
 	file_mode_type = mode_type;
+	part2_in_place = false;
+	temp_file2_owned = false;
+	temp_file2_fname.clear();
+	part2_source_fname.clear();
+	part2_offset = 0;
+	part2_size = 0;
 	if (mode_type)
 	{
-		std::string base = fname;
-		size_t slash = base.find_last_of("/\\");
-		if (slash != std::string::npos)
-			base = base.substr(slash + 1);
-
-		temp_file2_fname = "tmp/gsc_part2_" + std::to_string(getpid()) + "_" + base + ".tmp";
-		in.seekg(other_fields_offset, std::ios::beg);
-		std::ofstream out(temp_file2_fname, std::ios::binary | std::ios::trunc);
-		if (!out)
-		{
-			// Fallback to the legacy behavior (next to the input file).
-			temp_file2_fname = fname + ".tmp";
-			out.open(temp_file2_fname, std::ios::binary | std::ios::trunc);
-			if (!out)
-			{
-				logger->error("Cannot open destination file: {}", temp_file2_fname);
-				return 1;
-			}
-		}
-		const std::streamsize bufferSize = 1024 * 1024;
-		char buffer[bufferSize];
-		std::streamsize bytesToRead = sdsl_offset - other_fields_offset;
-
-		while (bytesToRead > 0 && in)
-		{
-			std::streamsize readSize = std::min(bytesToRead, bufferSize);
-			in.read(buffer, readSize);
-			std::streamsize bytesRead = in.gcount();
-			out.write(buffer, bytesRead);
-			bytesToRead -= bytesRead;
-		}
-		if (in.bad())
-		{
-			logger->error("Error reading source file.");
-			return 1;
-		}
-
-		out.close();
+		part2_source_fname = fname;
+		part2_offset = other_fields_offset;
+		part2_size = (sdsl_offset > other_fields_offset) ? (sdsl_offset - other_fields_offset) : 0;
+		part2_in_place = true;
+		temp_file2_owned = false;
+		temp_file2_fname.clear();
 	}
 	logger->info("Mode: {} other_fields_offset: {} sdsl_offset: {}", mode_type, other_fields_offset, sdsl_offset);
 	in.seekg(sdsl_offset, std::ios::beg);
@@ -431,9 +405,24 @@ bool DecompressionReader::OpenReadingPart2(const string &in_file_name, bool star
 		delete file_handle2;
 	file_handle2 = new File_Handle_2(true);
 
-	if (!file_handle2->Open(temp_file2_fname))
+	bool open_ok = false;
+	if (part2_in_place)
 	{
-		logger->error("Can't open the temporary file: {}", temp_file2_fname);
+		if (part2_size < 8)
+		{
+			logger->error("Corrupted part2 region: size too small ({})", part2_size);
+			return false;
+		}
+		open_ok = file_handle2->OpenRange(part2_source_fname, static_cast<size_t>(part2_offset), static_cast<size_t>(part2_size));
+	}
+	else
+	{
+		open_ok = file_handle2->Open(temp_file2_fname);
+	}
+
+	if (!open_ok)
+	{
+		logger->error("Can't open part2 stream (in-place={}): {}", part2_in_place, part2_in_place ? part2_source_fname : temp_file2_fname);
 		logger->warn("The .gsc file is generated through lossy compression mode and can only be decompressed using a lossy mode.");
 		return false;
 	}
@@ -594,7 +583,7 @@ void DecompressionReader::close()
 			t.join();
 	}
 
-	if (!temp_file2_fname.empty())
+	if (temp_file2_owned && !temp_file2_fname.empty())
 	{
 		if (remove(temp_file2_fname.c_str()) != 0)
 		{
@@ -2731,6 +2720,7 @@ bool DecompressionReader::readFixedFields()
 	fixed_fields_row_block_count = 0;
 	fixed_fields_gt_off = 0;
 	fixed_fields_gt_size = 0;
+	legacy_fixed_fields = legacy_fixed_fields_offsets();
 
 	const uint64_t chunk_start = buf_pos;
 	uint32_t magic_or_no_variants = 0;
@@ -2855,49 +2845,52 @@ bool DecompressionReader::readFixedFields()
 	// Legacy chunk-level fixed fields format
 	memcpy(&fixed_field_block_compress.no_variants, buf + buf_pos, sizeof(uint32_t));
 	buf_pos = buf_pos + sizeof(uint32_t);
+	legacy_fixed_fields.no_variants = fixed_field_block_compress.no_variants;
 	uint32_t comp_size;
 
 	memcpy(&comp_size, buf + buf_pos, sizeof(uint32_t));
 	buf_pos = buf_pos + sizeof(uint32_t);
-	fixed_field_block_compress.chrom.resize(comp_size);
-	memcpy(&fixed_field_block_compress.chrom[0], buf + buf_pos, comp_size * sizeof(uint8_t));
+	legacy_fixed_fields.chrom_off = buf_pos;
+	legacy_fixed_fields.chrom_size = comp_size;
 	buf_pos = buf_pos + comp_size * sizeof(uint8_t);
 
 	memcpy(&comp_size, buf + buf_pos, sizeof(uint32_t));
 	buf_pos = buf_pos + sizeof(uint32_t);
-	fixed_field_block_compress.pos.resize(comp_size);
-	memcpy(&fixed_field_block_compress.pos[0], buf + buf_pos, comp_size * sizeof(uint8_t));
+	legacy_fixed_fields.pos_off = buf_pos;
+	legacy_fixed_fields.pos_size = comp_size;
 	buf_pos = buf_pos + comp_size * sizeof(uint8_t);
 
 	memcpy(&comp_size, buf + buf_pos, sizeof(uint32_t));
 	buf_pos = buf_pos + sizeof(uint32_t);
-	fixed_field_block_compress.id.resize(comp_size);
-	memcpy(&fixed_field_block_compress.id[0], buf + buf_pos, comp_size * sizeof(uint8_t));
+	legacy_fixed_fields.id_off = buf_pos;
+	legacy_fixed_fields.id_size = comp_size;
 	buf_pos = buf_pos + comp_size * sizeof(uint8_t);
 
 	memcpy(&comp_size, buf + buf_pos, sizeof(uint32_t));
 	buf_pos = buf_pos + sizeof(uint32_t);
-	fixed_field_block_compress.ref.resize(comp_size);
-	memcpy(&fixed_field_block_compress.ref[0], buf + buf_pos, comp_size * sizeof(uint8_t));
+	legacy_fixed_fields.ref_off = buf_pos;
+	legacy_fixed_fields.ref_size = comp_size;
 	buf_pos = buf_pos + comp_size * sizeof(uint8_t);
 
 	memcpy(&comp_size, buf + buf_pos, sizeof(uint32_t));
 	buf_pos = buf_pos + sizeof(uint32_t);
-	fixed_field_block_compress.alt.resize(comp_size);
-	memcpy(&fixed_field_block_compress.alt[0], buf + buf_pos, comp_size * sizeof(uint8_t));
+	legacy_fixed_fields.alt_off = buf_pos;
+	legacy_fixed_fields.alt_size = comp_size;
 	buf_pos = buf_pos + comp_size * sizeof(uint8_t);
 
 	memcpy(&comp_size, buf + buf_pos, sizeof(uint32_t));
 	buf_pos = buf_pos + sizeof(uint32_t);
-	fixed_field_block_compress.qual.resize(comp_size);
-	memcpy(&fixed_field_block_compress.qual[0], buf + buf_pos, comp_size * sizeof(uint8_t));
+	legacy_fixed_fields.qual_off = buf_pos;
+	legacy_fixed_fields.qual_size = comp_size;
 	buf_pos = buf_pos + comp_size * sizeof(uint8_t);
 
 	memcpy(&comp_size, buf + buf_pos, sizeof(uint32_t));
 	buf_pos = buf_pos + sizeof(uint32_t);
-	fixed_field_block_compress.gt_block.resize(comp_size);
-	memcpy(&fixed_field_block_compress.gt_block[0], buf + buf_pos, comp_size * sizeof(uint8_t));
+	legacy_fixed_fields.gt_off = buf_pos;
+	legacy_fixed_fields.gt_size = comp_size;
 	buf_pos = buf_pos + comp_size * sizeof(uint8_t);
+
+	legacy_fixed_fields.valid = true;
 
 	return true;
 }
@@ -2928,7 +2921,7 @@ bool DecompressionReader::Decoder(std::vector<block_t> &v_blocks, std::vector<st
 	}
 	// Initialize decoder parameters
 	initDecoderParams();
-	no_variants = fixed_field_block_compress.no_variants;
+	no_variants = legacy_fixed_fields.valid ? legacy_fixed_fields.no_variants : fixed_field_block_compress.no_variants;
 
 	// Other initializations here...
 	std::vector<variant_desc_t> v_vcf_fixed_data_io;
@@ -2948,18 +2941,19 @@ bool DecompressionReader::Decoder(std::vector<block_t> &v_blocks, std::vector<st
         // Code from the original fixed field thread
         // Decompression and processing...
 		auto codec = MakeCompressionStrategy(backend, p_bsc_fixed_fields);
-		for (auto data : {
-        	make_tuple(ref(fixed_field_block_io.chrom), ref(fixed_field_block_compress.chrom), p_chrom, "chrom"),
-        	make_tuple(ref(fixed_field_block_io.id), ref(fixed_field_block_compress.id), p_id, "id"),
-        	make_tuple(ref(fixed_field_block_io.alt), ref(fixed_field_block_compress.alt), p_alt, "alt"),
-    		make_tuple(ref(fixed_field_block_io.qual), ref(fixed_field_block_compress.qual), p_qual, "qual"),
-
-
-    	})
+		if (legacy_fixed_fields.valid)
 		{
-			codec->Decompress(get<1>(data), get<0>(data));
-			// std::cerr<<get<3>(data)<<":"<<get<1>(data).size()<<":"<<get<0>(data).size()<<endl;
-
+			codec->DecompressFromPtr(buf + legacy_fixed_fields.chrom_off, legacy_fixed_fields.chrom_size, fixed_field_block_io.chrom);
+			codec->DecompressFromPtr(buf + legacy_fixed_fields.id_off, legacy_fixed_fields.id_size, fixed_field_block_io.id);
+			codec->DecompressFromPtr(buf + legacy_fixed_fields.alt_off, legacy_fixed_fields.alt_size, fixed_field_block_io.alt);
+			codec->DecompressFromPtr(buf + legacy_fixed_fields.qual_off, legacy_fixed_fields.qual_size, fixed_field_block_io.qual);
+		}
+		else
+		{
+			codec->Decompress(fixed_field_block_compress.chrom, fixed_field_block_io.chrom);
+			codec->Decompress(fixed_field_block_compress.id, fixed_field_block_io.id);
+			codec->Decompress(fixed_field_block_compress.alt, fixed_field_block_io.alt);
+			codec->Decompress(fixed_field_block_compress.qual, fixed_field_block_io.qual);
 		}
 		uint32_t i_variant;
 		variant_desc_t desc;
@@ -2978,40 +2972,76 @@ bool DecompressionReader::Decoder(std::vector<block_t> &v_blocks, std::vector<st
         // Code from the original sorted field thread
         // Decompression and processing...
 		auto codec = MakeCompressionStrategy(backend, p_bsc_fixed_fields);
-		for (auto data : {
-			
-        	make_tuple(ref(fixed_field_block_io.pos), ref(fixed_field_block_compress.pos), p_pos, "pos"),
-        	make_tuple(ref(fixed_field_block_io.ref), ref(fixed_field_block_compress.ref), p_ref, "ref"),
-        	// make_tuple(ref(fixed_field_block_io.gt_block), ref(fixed_field_block_compress.gt_block), p_gt, "GT")
-
-    	})
+		if (legacy_fixed_fields.valid)
 		{
-			codec->Decompress(get<1>(data), get<0>(data));
-			// std::cerr<<get<3>(data)<<":"<<get<1>(data).size()<<":"<<get<0>(data).size()<<endl;
+			codec->DecompressFromPtr(buf + legacy_fixed_fields.pos_off, legacy_fixed_fields.pos_size, fixed_field_block_io.pos);
+			codec->DecompressFromPtr(buf + legacy_fixed_fields.ref_off, legacy_fixed_fields.ref_size, fixed_field_block_io.ref);
+		}
+		else
+		{
+			codec->Decompress(fixed_field_block_compress.pos, fixed_field_block_io.pos);
+			codec->Decompress(fixed_field_block_compress.ref, fixed_field_block_io.ref);
+		}
 
-		}
-		uint8_t marker = fixed_field_block_compress.gt_block.back();
-		fixed_field_block_compress.gt_block.pop_back();
-		switch (marker) {
-		case 0: {
-			auto gt_codec = MakeCompressionStrategy(compression_backend_t::bsc, p_bsc_fixed_fields);
-			gt_codec->Decompress(fixed_field_block_compress.gt_block, fixed_field_block_io.gt_block);
-			break;
-		}
-		case 1:
-			zstd::zstd_decompress(fixed_field_block_compress.gt_block, fixed_field_block_io.gt_block);
-			break;
-		case 2: {
-			auto gt_codec = MakeCompressionStrategy(compression_backend_t::brotli, p_bsc_fixed_fields);
-			gt_codec->Decompress(fixed_field_block_compress.gt_block, fixed_field_block_io.gt_block);
-			break;
-		}
-		default:
+		if (legacy_fixed_fields.valid)
+		{
+			fixed_field_block_io.gt_block.clear();
+			if (legacy_fixed_fields.gt_size > 0)
 			{
-				auto gt_codec = MakeCompressionStrategy(backend, p_bsc_fixed_fields);
-				gt_codec->Decompress(fixed_field_block_compress.gt_block, fixed_field_block_io.gt_block);
+				const uint8_t *gt_ptr = buf + legacy_fixed_fields.gt_off;
+				uint32_t gt_size = legacy_fixed_fields.gt_size;
+				uint8_t marker = gt_ptr[gt_size - 1];
+				const uint8_t *data_ptr = gt_ptr;
+				size_t data_size = gt_size - 1;
+				switch (marker)
+				{
+				case 0: {
+					auto gt_codec = MakeCompressionStrategy(compression_backend_t::bsc, p_bsc_fixed_fields);
+					gt_codec->DecompressFromPtr(data_ptr, data_size, fixed_field_block_io.gt_block);
+					break;
+				}
+				case 1:
+					zstd::zstd_decompress_ptr(data_ptr, data_size, fixed_field_block_io.gt_block);
+					break;
+				case 2: {
+					auto gt_codec = MakeCompressionStrategy(compression_backend_t::brotli, p_bsc_fixed_fields);
+					gt_codec->DecompressFromPtr(data_ptr, data_size, fixed_field_block_io.gt_block);
+					break;
+				}
+				default:
+					{
+						auto gt_codec = MakeCompressionStrategy(backend, p_bsc_fixed_fields);
+						gt_codec->DecompressFromPtr(data_ptr, data_size, fixed_field_block_io.gt_block);
+					}
+					break;
+				}
 			}
-			break;
+		}
+		else
+		{
+			uint8_t marker = fixed_field_block_compress.gt_block.back();
+			fixed_field_block_compress.gt_block.pop_back();
+			switch (marker) {
+			case 0: {
+				auto gt_codec = MakeCompressionStrategy(compression_backend_t::bsc, p_bsc_fixed_fields);
+				gt_codec->Decompress(fixed_field_block_compress.gt_block, fixed_field_block_io.gt_block);
+				break;
+			}
+			case 1:
+				zstd::zstd_decompress(fixed_field_block_compress.gt_block, fixed_field_block_io.gt_block);
+				break;
+			case 2: {
+				auto gt_codec = MakeCompressionStrategy(compression_backend_t::brotli, p_bsc_fixed_fields);
+				gt_codec->Decompress(fixed_field_block_compress.gt_block, fixed_field_block_io.gt_block);
+				break;
+			}
+			default:
+				{
+					auto gt_codec = MakeCompressionStrategy(backend, p_bsc_fixed_fields);
+					gt_codec->Decompress(fixed_field_block_compress.gt_block, fixed_field_block_io.gt_block);
+				}
+				break;
+			}
 		}
 		uint32_t i_variant;
 		uint32_t block_id_local = 0;

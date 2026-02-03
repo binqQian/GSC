@@ -76,6 +76,8 @@ class CompressionReader {
     int  ndst_real = 0;
     int  ndst_str = 0;
     int  ndst_flag = 0;
+    int *fmt_gt_arr_ = nullptr;
+    int  nfmt_gt_arr_ = 0;
     std::vector<int> FilterIdToFieldId;
     std::vector<int> InfoIdToFieldId;
     std::vector<int> FormatIdToFieldId;

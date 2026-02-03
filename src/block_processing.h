@@ -143,6 +143,18 @@ class BlockProcess
     uint64_t start = 0;
     uint32_t cur_block_id = 0;
     // int64_t prev_pos;
+    // Workspace buffers (per BlockProcess instance) to avoid per-block allocations.
+    std::vector<uint32_t> comp_pos_copy_buf_;
+    std::vector<uint32_t> sparse_matrix_cols_buf_;
+    std::vector<uint64_t> mc_vectors_buf_;
+    std::vector<int> n_ones_buf_;
+    std::vector<int> mc_ids_buf_;
+    std::vector<uint32_t> perm_buf_;
+    std::vector<uint64_t> new_mc_vectors_buf_;
+    std::vector<uint64_t> new_xor_buf_;
+    std::vector<uint64_t> best_new_xor_buf_;
+    std::vector<uint8_t> old_vec_storage_;
+    std::vector<uint32_t> copy_from_buf_;
     void permute_range_vec(uint64_t id_start, uint64_t id_stop, vector<uint32_t> &v_perm,vector<bool> &zeros, vector<bool> &copies, vector<uint32_t> &origin_of_copy, vector<uint8_t> &samples_indexes);
     inline void get_perm(vector<uint32_t> perm, int n,vector<variant_desc_t> &v_vcf_data_compress);
     mutex mtx_v_part1;

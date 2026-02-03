@@ -81,9 +81,21 @@ public:
     {
     }
 
+    void cancel()
+    {
+        std::unique_lock<std::mutex> lock(m_mutex);
+        m_canceled = true;
+        ++m_generation;
+        m_count = m_count_reset_value;
+        lock.unlock();
+        m_cond.notify_all();
+    }
+
     void count_down_and_wait()
     {
         std::unique_lock<std::mutex> lock(m_mutex);
+        if (m_canceled)
+            return;
         unsigned int gen = m_generation;
         if (--m_count == 0)
         {
@@ -92,7 +104,7 @@ public:
             m_cond.notify_all();
             return;
         }
-        while (gen == m_generation)
+        while (gen == m_generation && !m_canceled)
             m_cond.wait(lock);
     }
 
@@ -102,6 +114,7 @@ private:
     unsigned int m_count;
     unsigned int m_generation;
     unsigned int m_count_reset_value;
+    bool m_canceled = false;
 };
 
 // *****************************************************************************************
