@@ -23,7 +23,7 @@ bool CompressionReader::OpenForReading(string &file_name)
             if (!directory_file_name.is_open())
             {
                 logger->error("Cannot open {} file with samples.", file_name.substr(1));
-                exit(1);
+                return false;
             }
             std::string item;
 
@@ -1123,6 +1123,7 @@ bool CompressionReader::ProcessInVCF()
             in_file = merge_files[i];
 
         // Use parallel reader if enabled and not merging multiple files
+        bool ok = true;
         if (use_parallel_reading_ && !merge_flag)
         {
             logger->info("Using parallel VCF reader with {} threads", num_parse_threads_);
@@ -1146,18 +1147,27 @@ bool CompressionReader::ProcessInVCF()
 
                 for (bcf1_t *vcf_record : batch)
                 {
+                    if (!ok)
+                    {
+                        bcf_destroy(vcf_record);
+                        continue;
+                    }
                     variant_desc_t desc;
                     if (vcf_record->errcode)
                     {
                         logger->error("Repair VCF file.");
-                        exit(9);
+                        ok = false;
+                        bcf_destroy(vcf_record);
+                        continue;
                     }
                     bcf_unpack(vcf_record, BCF_UN_ALL);
                     if (vcf_record->d.fmt->n != (int)ploidy)
                     {
                         logger->error("Wrong ploidy (not equal to {}) for record at position {}.", ploidy, vcf_record->pos);
                         logger->error("Repair VCF file OR set correct ploidy using -p option.");
-                        exit(9);
+                        ok = false;
+                        bcf_destroy(vcf_record);
+                        continue;
                     }
                     if (tmpi % 1000 == 0)
                     {
@@ -1178,12 +1188,17 @@ bool CompressionReader::ProcessInVCF()
                     // Free the record after processing
                     bcf_destroy(vcf_record);
                 }
+
+                if (!ok)
+                    break;
             }
 
             // Cleanup parallel reader
             parallel_reader_->Cleanup();
             delete parallel_reader_;
             parallel_reader_ = nullptr;
+            if (!ok)
+                return false;
         }
         else
         {
@@ -1195,14 +1210,16 @@ bool CompressionReader::ProcessInVCF()
                 if (vcf_record->errcode)
                 {
                     logger->error("Repair VCF file.");
-                    exit(9);
+                    ok = false;
+                    break;
                 }
                 bcf_unpack(vcf_record, BCF_UN_ALL);
                 if (vcf_record->d.fmt->n != (int)ploidy)
                 {
                     logger->error("Wrong ploidy (not equal to {}) for record at position {}.", ploidy, vcf_record->pos);
                     logger->error("Repair VCF file OR set correct ploidy using -p option.");
-                    exit(9);
+                    ok = false;
+                    break;
                 }
                 if (tmpi % 1000 == 0)
                 {
@@ -1223,6 +1240,8 @@ bool CompressionReader::ProcessInVCF()
 
                 tmpi++;
             }
+            if (!ok)
+                return false;
         }
     }
     if (compress_mode == compress_mode_t::lossless_mode)

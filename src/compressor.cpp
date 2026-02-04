@@ -353,7 +353,7 @@ bool Compressor::writeCompressFlie()
             {
                 logger->error("ERROR: store_to_file not successful for: `{}`", fname);
             }
-            exit(1);
+            return false;
         }
         sdsl::rrr_vector<> rrr_bit_vector[5];
         for (int v = 0; v < 2; v++)
@@ -409,7 +409,7 @@ bool Compressor::writeCompressFlie()
 
     // std::cerr << "genotype compress file (" << params.out_file_name + ".gsc"<< ") created." << std::endl;
 
-    return 0;
+    return true;
 }
 // open file for writing
 //  *******************************************************************************************************************
@@ -426,7 +426,7 @@ bool Compressor::OpenForWriting(const string &out_file_name)
         {
 
             logger->error("storing archive not successful for: `{}`", fname);
-            exit(1);
+            return false;
         }
     }
     else
@@ -438,10 +438,12 @@ bool Compressor::OpenForWriting(const string &out_file_name)
     if (setvbuf(comp, nullptr, _IOFBF, 64 << 20) != 0)
     {
         logger->error("Buffer setup failed for: `{}`", fname);
-        // if (fname != nullptr) {
-        //     free(fname);
-        // }
-        exit(1);
+        if (comp && comp != stdout)
+        {
+            fclose(comp);
+            comp = nullptr;
+        }
+        return false;
     }
 
     mode_type = false;
@@ -482,7 +484,7 @@ bool Compressor::OpenTempFile(const string &out_file_name)
     {
 
         logger->error("storing archive not successful for: `{}`", temp_file1_fname);
-        exit(1);
+        return false;
     }
 
     setvbuf(temp_file, nullptr, _IOFBF, 64 << 20);
@@ -1402,7 +1404,12 @@ bool Compressor::CompressProcess()
 
     compressReplicatedRow();
 
-    writeCompressFlie();
+    if (!writeCompressFlie())
+    {
+        logger->error("Failed to finalize compressed output file.");
+        cleanup_failed_output();
+        return false;
+    }
 
     // Set total variants for statistics and log compression statistics
     if (enable_field_stats_)

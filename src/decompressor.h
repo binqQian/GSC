@@ -61,9 +61,13 @@ class Decompressor {
 	// GT column tiling: 3D structure [row_block][col_block][perm]
     vector<vector<vector<uint32_t>>> sort_perm, sort_perm_io;
     vector<uint8_t> decompress_gt_indexes,decompress_gt_indexes_io;
+    vector<std::pair<uint32_t, uint32_t>> row_block_ranges_io;
     vector<uint32_t> sparse_matrix_cols;
     vector<uint8_t> tmp_gt_indexes_;
     vector<uint8_t> vector_row_scratch_;
+    uint64_t max_col_vec_len_ = 0;
+    vector<uint8_t> col_decomp_perm_buf_;
+    vector<uint8_t> col_decomp_buf_;
 
 
 

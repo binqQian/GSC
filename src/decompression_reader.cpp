@@ -76,7 +76,7 @@ bool DecompressionReader::OpenReading(const string &in_file_name, const bool &_d
 		{
 			logger->error("Could not load file `{}`", fname);
 		}
-		exit(1);
+		return false;
 	}
 
 	uint64_t other_fields_offset;
@@ -128,7 +128,7 @@ bool DecompressionReader::OpenReading(const string &in_file_name, const bool &_d
 		if (!comp)
 		{
 			logger->error("Input file ({}) error", fname);
-			exit(1);
+			return false;
 		}
 		arch_size = other_fields_offset - FileStartPosition;
 		fseek(comp, FileStartPosition, SEEK_SET);
@@ -151,7 +151,9 @@ bool DecompressionReader::OpenReading(const string &in_file_name, const bool &_d
 	if (!fm->is_open())
 	{
 		logger->error("No file: {}", fname);
-		exit(1);
+		delete fm;
+		fm = nullptr;
+		return false;
 	}
 	buf = (uint8_t *)fm->data() + FileStartPosition;
 	// arch_size = other_fields_offset - FileStartPosition;
@@ -2922,10 +2924,11 @@ bool DecompressionReader::Decoder(std::vector<block_t> &v_blocks, std::vector<st
 	if (has_fixed_fields_rb_dir)
 	{
 		uint32_t variants_before = 0;
+		std::vector<std::pair<uint32_t, uint32_t>> dummy_ranges;
 		return DecoderByRange(v_blocks, s_perm, gt_index, cur_chunk_id,
 							  std::numeric_limits<int64_t>::min(),
 							  std::numeric_limits<int64_t>::max(),
-							  variants_before);
+							  variants_before, dummy_ranges);
 	}
 	// Initialize decoder parameters
 	initDecoderParams();
@@ -3181,7 +3184,8 @@ bool DecompressionReader::Decoder(std::vector<block_t> &v_blocks, std::vector<st
 
 bool DecompressionReader::DecoderByRange(vector<block_t> &v_blocks, vector<vector<vector<uint32_t>>> &s_perm,
 										vector<uint8_t> &gt_index, uint32_t cur_chunk_id,
-										int64_t range_1, int64_t range_2, uint32_t &variants_before)
+										int64_t range_1, int64_t range_2, uint32_t &variants_before,
+										std::vector<std::pair<uint32_t, uint32_t>> &row_block_ranges)
 {
 	if (!has_fixed_fields_rb_dir)
 		return false;
@@ -3220,16 +3224,23 @@ bool DecompressionReader::DecoderByRange(vector<block_t> &v_blocks, vector<vecto
 	v_blocks.clear();
 	s_perm.clear();
 	gt_index.clear();
+	row_block_ranges.clear();
 	if (!any)
 		return true;
 
-	// Pre-create codec objects for reuse (avoid repeated allocation)
-	auto gt_codec_bsc = MakeCompressionStrategy(compression_backend_t::bsc, p_bsc_fixed_fields);
-	auto gt_codec_brotli = MakeCompressionStrategy(compression_backend_t::brotli, p_bsc_fixed_fields);
-	auto gt_codec_backend = MakeCompressionStrategy(backend, p_bsc_fixed_fields);
+	const uint32_t total_rbs = last_rb - first_rb + 1;
+	uint32_t decode_threads = std::max<uint32_t>(1, no_threads);
+	const uint32_t max_decode_threads = 4;
+	if (decode_threads > max_decode_threads)
+		decode_threads = max_decode_threads;
+	if (decode_threads > total_rbs)
+		decode_threads = total_rbs;
 
 	// Lambda: decompress GT segment directly from pointer (no intermediate memcpy)
-	auto decompress_gt_segment = [&](const uint8_t *comp_ptr, uint32_t comp_size, std::vector<uint8_t> &out)
+	auto decompress_gt_segment = [&](const uint8_t *comp_ptr, uint32_t comp_size, std::vector<uint8_t> &out,
+	                                 CompressionStrategy *gt_codec_bsc,
+	                                 CompressionStrategy *gt_codec_brotli,
+	                                 CompressionStrategy *gt_codec_backend)
 	{
 		out.clear();
 		if (!comp_size)
@@ -3257,29 +3268,15 @@ bool DecompressionReader::DecoderByRange(vector<block_t> &v_blocks, vector<vecto
 	// Decode GT index (v1: chunk-level; v2+: per-row_block, only for selected row_blocks)
 	if (fixed_fields_chunk_version == GSC_FIXED_FIELDS_RB_VERSION_V1)
 	{
-		decompress_gt_segment(buf + fixed_fields_chunk_start + fixed_fields_gt_off, fixed_fields_gt_size, gt_index);
+		auto gt_codec_bsc = MakeCompressionStrategy(compression_backend_t::bsc, p_bsc_fixed_fields);
+		auto gt_codec_brotli = MakeCompressionStrategy(compression_backend_t::brotli, p_bsc_fixed_fields);
+		auto gt_codec_backend = MakeCompressionStrategy(backend, p_bsc_fixed_fields);
+		decompress_gt_segment(buf + fixed_fields_chunk_start + fixed_fields_gt_off, fixed_fields_gt_size, gt_index,
+		                      gt_codec_bsc.get(), gt_codec_brotli.get(), gt_codec_backend.get());
 	}
 	else if (fixed_fields_chunk_version == GSC_FIXED_FIELDS_RB_VERSION_V2)
 	{
-		// Pre-calculate total GT size for reservation (avoid repeated reallocation)
-		size_t estimated_total_size = 0;
-		for (uint32_t rb = first_rb; rb <= last_rb; ++rb)
-		{
-			// Estimate decompressed size as ~4x compressed size (conservative)
-			estimated_total_size += fixed_fields_rb_dir[rb].gt_size * 4;
-		}
-		gt_index.reserve(estimated_total_size);
-
-		std::vector<uint8_t> seg_out;
-		for (uint32_t rb = first_rb; rb <= last_rb; ++rb)
-		{
-			const auto &dir = fixed_fields_rb_dir[rb];
-			if (!dir.gt_size)
-				continue;
-			decompress_gt_segment(buf + fixed_fields_chunk_start + dir.gt_off, dir.gt_size, seg_out);
-			if (!seg_out.empty())
-				gt_index.insert(gt_index.end(), seg_out.begin(), seg_out.end());
-		}
+		// Defer GT decoding to per-row_block workers (parallel).
 	}
 	else
 	{
@@ -3299,25 +3296,26 @@ bool DecompressionReader::DecoderByRange(vector<block_t> &v_blocks, vector<vecto
 		bool valid = false;
 		std::vector<variant_desc_t> sort_desc;
 		std::vector<std::vector<uint32_t>> row_perm;
+		uint32_t range_start = 0;
+		uint32_t range_end = 0;
 	};
 
-	const uint32_t total_rbs = last_rb - first_rb + 1;
 	std::vector<RowBlockDecoded> decoded(total_rbs);
+	std::vector<std::vector<uint8_t>> gt_segments;
+	if (fixed_fields_chunk_version == GSC_FIXED_FIELDS_RB_VERSION_V2)
+		gt_segments.resize(total_rbs);
 	std::atomic<uint32_t> next_rb(first_rb);
-	const uint32_t max_decode_threads = 4;
-	uint32_t decode_threads = std::max<uint32_t>(1, no_threads);
-	if (decode_threads > max_decode_threads)
-		decode_threads = max_decode_threads;
-	if (decode_threads > total_rbs)
-		decode_threads = total_rbs;
 
 	std::vector<std::thread> workers;
 	workers.reserve(decode_threads);
+	const uint8_t *base_ptr = buf + fixed_fields_chunk_start;
 	for (uint32_t t = 0; t < decode_threads; ++t)
 	{
 		workers.emplace_back([&] {
 			auto local_codec = MakeCompressionStrategy(backend, p_bsc_fixed_fields);
-			const uint8_t *base_ptr = buf + fixed_fields_chunk_start;
+			auto gt_codec_bsc = MakeCompressionStrategy(compression_backend_t::bsc, p_bsc_fixed_fields);
+			auto gt_codec_brotli = MakeCompressionStrategy(compression_backend_t::brotli, p_bsc_fixed_fields);
+			auto gt_codec_backend = MakeCompressionStrategy(backend, p_bsc_fixed_fields);
 			while (true)
 			{
 				uint32_t rb = next_rb.fetch_add(1);
@@ -3327,6 +3325,13 @@ bool DecompressionReader::DecoderByRange(vector<block_t> &v_blocks, vector<vecto
 				const uint32_t vcount = dir.meta.variant_count;
 				if (!vcount)
 					continue;
+
+				if (fixed_fields_chunk_version == GSC_FIXED_FIELDS_RB_VERSION_V2 && dir.gt_size)
+				{
+					auto &seg_out = gt_segments[rb - first_rb];
+					decompress_gt_segment(base_ptr + dir.gt_off, dir.gt_size, seg_out,
+					                      gt_codec_bsc.get(), gt_codec_brotli.get(), gt_codec_backend.get());
+				}
 
 				std::vector<uint8_t> out_chrom, out_id, out_alt, out_qual, out_pos, out_ref;
 				local_codec->DecompressFromPtr(base_ptr + dir.chrom_off, dir.chrom_size, out_chrom);
@@ -3350,6 +3355,11 @@ bool DecompressionReader::DecoderByRange(vector<block_t> &v_blocks, vector<vecto
 
 				size_t p_pos_l = 0, p_ref_l = 0;
 				int64_t prev_pos_local = 0;
+				const bool has_range = !(range_1 == std::numeric_limits<int64_t>::min() &&
+				                         range_2 == std::numeric_limits<int64_t>::max());
+				bool start_set = !has_range;
+				uint32_t range_start = 0;
+				uint32_t range_end = vcount;
 				for (uint32_t i = 0; i < vcount; ++i)
 				{
 					int64_t delta = 0;
@@ -3360,6 +3370,22 @@ bool DecompressionReader::DecoderByRange(vector<block_t> &v_blocks, vector<vecto
 					read_str(out_ref, p_ref_l, sort_desc[i].ref);
 					sort_desc[i].filter = ".";
 					sort_desc[i].info = ".";
+
+					if (has_range)
+					{
+						if (!start_set && delta >= range_1)
+						{
+							range_start = i;
+							start_set = true;
+						}
+						if (range_end == vcount && delta > range_2)
+							range_end = i;
+					}
+				}
+				if (has_range && !start_set)
+				{
+					range_start = vcount;
+					range_end = vcount;
 				}
 
 				std::vector<std::vector<uint32_t>> row_perm;
@@ -3432,12 +3458,27 @@ bool DecompressionReader::DecoderByRange(vector<block_t> &v_blocks, vector<vecto
 				slot.valid = true;
 				slot.sort_desc = std::move(sort_desc);
 				slot.row_perm = std::move(row_perm);
+				slot.range_start = range_start;
+				slot.range_end = range_end;
 			}
 		});
 	}
 
 	for (auto &t : workers)
 		t.join();
+
+	if (fixed_fields_chunk_version == GSC_FIXED_FIELDS_RB_VERSION_V2)
+	{
+		size_t total_gt_size = 0;
+		for (auto &seg : gt_segments)
+			total_gt_size += seg.size();
+		gt_index.reserve(total_gt_size);
+		for (auto &seg : gt_segments)
+		{
+			if (!seg.empty())
+				gt_index.insert(gt_index.end(), seg.begin(), seg.end());
+		}
+	}
 
 	for (uint32_t rb = first_rb; rb <= last_rb; ++rb)
 	{
@@ -3446,6 +3487,7 @@ bool DecompressionReader::DecoderByRange(vector<block_t> &v_blocks, vector<vecto
 			continue;
 		s_perm.emplace_back(std::move(slot.row_perm));
 		v_blocks.emplace_back(std::move(slot.sort_desc));
+		row_block_ranges.emplace_back(slot.range_start, slot.range_end);
 	}
 
 	return true;

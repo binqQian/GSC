@@ -12,6 +12,7 @@
 #include <memory>
 #include <sstream>
 #include <algorithm>
+#include <cerrno>
 
 #ifdef OUR_STRTOL
 // *****************************************************************************************
@@ -25,8 +26,8 @@ long int strtol(const char* str, char** endptr, int base) noexcept
 	{
 		auto logger = LogManager::Instance().Logger();
 		logger->error("Unsupported base {}", base);
-		fflush(stdout);
-		exit(1);
+		errno = EINVAL;
+		return 0;
 	}
 
 	long int val = 0;

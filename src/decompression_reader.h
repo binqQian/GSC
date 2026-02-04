@@ -204,7 +204,8 @@ public:
 	bool Decoder(vector<block_t> &v_blocks,vector<vector<vector<uint32_t>>> &s_perm,vector<uint8_t> &gt_index,uint32_t cur_chunk_id);
     bool DecoderByRange(vector<block_t> &v_blocks, vector<vector<vector<uint32_t>>> &s_perm,
                         vector<uint8_t> &gt_index, uint32_t cur_chunk_id,
-                        int64_t range_1, int64_t range_2, uint32_t &variants_before);
+                        int64_t range_1, int64_t range_2, uint32_t &variants_before,
+                        std::vector<std::pair<uint32_t, uint32_t>> &row_block_ranges);
 	bool setStartChunk(uint32_t start_chunk);
 	uint32_t getActualPos(uint32_t chunk_id);
 

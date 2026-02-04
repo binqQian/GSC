@@ -197,6 +197,7 @@ struct DecompressedChunk
     std::vector<block_t> fixed_variants_chunk;
     std::vector<std::vector<std::vector<uint32_t>>> sort_perm;
     std::vector<uint8_t> gt_indexes;
+    std::vector<std::pair<uint32_t, uint32_t>> row_block_ranges;
     std::vector<std::vector<field_desc>> all_fields;
 };
 
@@ -448,6 +449,22 @@ bool Decompressor::initDecompression(DecompressionReader &decompression_reader){
     initialLut();
     logger->debug("initDecompression: lut initialization done");
 
+    max_col_vec_len_ = 0;
+    col_decomp_perm_buf_.clear();
+    col_decomp_buf_.clear();
+    if (!decompression_reader.useLegacyPath)
+    {
+        for (auto len : decompression_reader.col_block_vec_lens)
+            if (len > max_col_vec_len_)
+                max_col_vec_len_ = len;
+        if (max_col_vec_len_ > 0)
+        {
+            const size_t buf_len = static_cast<size_t>(max_col_vec_len_) * 2;
+            col_decomp_perm_buf_.resize(buf_len);
+            col_decomp_buf_.resize(buf_len);
+        }
+    }
+
     if (out_type == file_type::PGEN_File && !gsc_to_pgen_lut_ready_)
         initGscToPgenLUT();
     if (out_type == file_type::BGEN_File && !gsc_to_bgen_lut_ready_)
@@ -465,7 +482,10 @@ bool Decompressor::initDecompression(DecompressionReader &decompression_reader){
         if ((tmp = (char*)realloc(str.s, str.m)))
             str.s = tmp;
         else
-            exit(8);
+        {
+            logger->error("initDecompression: realloc failed for GT header buffer");
+            return false;
+        }
         
         str.l = 3;
     }
@@ -605,6 +625,7 @@ bool Decompressor::decompressProcess()
             buf->fixed_variants_chunk.clear();
             buf->sort_perm.clear();
             buf->gt_indexes.clear();
+            buf->row_block_ranges.clear();
             buf->all_fields.clear();
 
             if (!decompression_reader.readFixedFields())
@@ -648,7 +669,8 @@ bool Decompressor::decompressProcess()
             if (range != "" && buf->has_fixed_fields_rb_dir && !decompression_reader.useLegacyPath)
             {
                 decode_ok = decompression_reader.DecoderByRange(buf->fixed_variants_chunk, buf->sort_perm, buf->gt_indexes,
-                                                               chunk_id, range_1, range_2, variants_before);
+                                                               chunk_id, range_1, range_2, variants_before,
+                                                               buf->row_block_ranges);
             }
             else
             {
@@ -695,6 +717,7 @@ bool Decompressor::decompressProcess()
             fixed_variants_chunk_io.swap(buf->fixed_variants_chunk);
             sort_perm_io.swap(buf->sort_perm);
             decompress_gt_indexes_io.swap(buf->gt_indexes);
+            row_block_ranges_io.swap(buf->row_block_ranges);
             all_fields_io.swap(buf->all_fields);
 
             bool chunk_ok = true;
@@ -748,11 +771,13 @@ bool Decompressor::decompressProcess()
             fixed_variants_chunk_io.clear();
             sort_perm_io.clear();
             decompress_gt_indexes_io.clear();
+            row_block_ranges_io.clear();
             all_fields_io.clear();
 
             buf->fixed_variants_chunk.swap(fixed_variants_chunk_io);
             buf->sort_perm.swap(sort_perm_io);
             buf->gt_indexes.swap(decompress_gt_indexes_io);
+            buf->row_block_ranges.swap(row_block_ranges_io);
             buf->all_fields.swap(all_fields_io);
             buf->chunk_variant_offset = 0;
             buf->has_fixed_fields_rb_dir = false;
@@ -1271,7 +1296,17 @@ void Decompressor::appendVCFToRec(variant_desc_t &_desc, vector<uint8_t> &_genot
     if (_fields.size() != _keys.size()) {
         logger->error("appendVCFToRec: _fields.size()={} != _keys.size()={}", _fields.size(), _keys.size());
     }
-    bcf_clear(rec);
+    const bool use_parallel_record = (use_parallel_writing_ && parallel_writer_ && !params.split_flag);
+    bcf1_t *target_rec = rec;
+    if (use_parallel_record)
+        target_rec = parallel_writer_->AcquireRecord();
+    if (!target_rec)
+    {
+        logger->error("appendVCFToRec: failed to acquire output record");
+        return;
+    }
+
+    bcf_clear(target_rec);
     record.clear();
     record.reserve(_desc.chrom.size() + _desc.id.size() + _desc.ref.size() +
                    _desc.alt.size() + _desc.qual.size() + 16);
@@ -1289,8 +1324,8 @@ void Decompressor::appendVCFToRec(variant_desc_t &_desc, vector<uint8_t> &_genot
     s.s = (char *)record.c_str();
     s.m = record.length();
     s.l = 0;
-    vcf_parse(&s, out_hdr, rec);
-    rec->pos = (int32_t)(_desc.pos - 1);
+    vcf_parse(&s, out_hdr, target_rec);
+    target_rec->pos = (int32_t)(_desc.pos - 1);
     int curr_size = 0;
     for (size_t i = 0; i < _fields.size(); i++)
     {
@@ -1307,7 +1342,7 @@ void Decompressor::appendVCFToRec(variant_desc_t &_desc, vector<uint8_t> &_genot
         {
 
             if (_fields[id].present)
-                bcf_add_filter(out_hdr, rec, _keys[id].key_id);
+                bcf_add_filter(out_hdr, target_rec, _keys[id].key_id);
         }
     }
 
@@ -1327,19 +1362,19 @@ void Decompressor::appendVCFToRec(variant_desc_t &_desc, vector<uint8_t> &_genot
 		        case BCF_HT_INT:
                     curr_size = _fields[id].data_size >> 2;
                     // std::cerr<<curr_size<<endl;
-                    bcf_update_info_int32(out_hdr,rec,bcf_hdr_int2id(out_hdr, BCF_DT_ID, _keys[id].key_id), _fields[id].data, curr_size);
+                    bcf_update_info_int32(out_hdr, target_rec, bcf_hdr_int2id(out_hdr, BCF_DT_ID, _keys[id].key_id), _fields[id].data, curr_size);
 			        break;
 		        case BCF_HT_REAL:
                     curr_size = _fields[id].data_size >> 2;
-                    bcf_update_info_float(out_hdr,rec,bcf_hdr_int2id(out_hdr, BCF_DT_ID, _keys[id].key_id), _fields[id].data, curr_size);
+                    bcf_update_info_float(out_hdr, target_rec, bcf_hdr_int2id(out_hdr, BCF_DT_ID, _keys[id].key_id), _fields[id].data, curr_size);
 			        break;
 		        case BCF_HT_STR:
                     curr_size = _fields[id].data_size;
-                    bcf_update_info(out_hdr, rec, bcf_hdr_int2id(out_hdr, BCF_DT_ID, _keys[id].key_id), _fields[id].data, curr_size, BCF_HT_STR);
+                    bcf_update_info(out_hdr, target_rec, bcf_hdr_int2id(out_hdr, BCF_DT_ID, _keys[id].key_id), _fields[id].data, curr_size, BCF_HT_STR);
 			        break;
 		        case BCF_HT_FLAG:
                     curr_size = 1;
-                    bcf_update_info_flag(out_hdr,rec,bcf_hdr_int2id(out_hdr, BCF_DT_ID, _keys[id].key_id), _fields[id].data, curr_size);
+                    bcf_update_info_flag(out_hdr, target_rec, bcf_hdr_int2id(out_hdr, BCF_DT_ID, _keys[id].key_id), _fields[id].data, curr_size);
 			        break;
 		        }
 
@@ -1415,7 +1450,7 @@ void Decompressor::appendVCFToRec(variant_desc_t &_desc, vector<uint8_t> &_genot
                 str.l += _standard_block_size;
                 str.s[str.l] = 0;
 
-                bcf_update_genotypes_fast(out_hdr, rec,str);
+                bcf_update_genotypes_fast(out_hdr, target_rec, str);
             }
             else{
 
@@ -1454,7 +1489,7 @@ void Decompressor::appendVCFToRec(variant_desc_t &_desc, vector<uint8_t> &_genot
                             t++;
                     }
                 }
-                bcf_update_genotypes(out_hdr, rec, gt_arr_i32.data(), _standard_block_size);
+                bcf_update_genotypes(out_hdr, target_rec, gt_arr_i32.data(), _standard_block_size);
             }
             continue;
         }
@@ -1492,15 +1527,15 @@ void Decompressor::appendVCFToRec(variant_desc_t &_desc, vector<uint8_t> &_genot
 	                            abort();
 	                        }
 	                    }
-	                    bcf_update_format(out_hdr, rec, bcf_hdr_int2id(out_hdr, BCF_DT_ID, _keys[id].key_id), _fields[id].data, curr_size, BCF_HT_INT);
+	                    bcf_update_format(out_hdr, target_rec, bcf_hdr_int2id(out_hdr, BCF_DT_ID, _keys[id].key_id), _fields[id].data, curr_size, BCF_HT_INT);
 				        break;
 		        case BCF_HT_REAL:
                     curr_size = _fields[id].data_size >> 2;
-                    bcf_update_format(out_hdr, rec, bcf_hdr_int2id(out_hdr, BCF_DT_ID, _keys[id].key_id), _fields[id].data, curr_size, BCF_HT_REAL);
+                    bcf_update_format(out_hdr, target_rec, bcf_hdr_int2id(out_hdr, BCF_DT_ID, _keys[id].key_id), _fields[id].data, curr_size, BCF_HT_REAL);
 			        break;
 		        case BCF_HT_STR:
                     curr_size = _fields[id].data_size;
-                    bcf_update_format(out_hdr, rec, bcf_hdr_int2id(out_hdr, BCF_DT_ID, _keys[id].key_id), _fields[id].data, curr_size, BCF_HT_STR);
+                    bcf_update_format(out_hdr, target_rec, bcf_hdr_int2id(out_hdr, BCF_DT_ID, _keys[id].key_id), _fields[id].data, curr_size, BCF_HT_STR);
 			        break;
 		        case BCF_HT_FLAG:
                     assert(0);
@@ -1526,19 +1561,12 @@ void Decompressor::appendVCFToRec(variant_desc_t &_desc, vector<uint8_t> &_genot
 
         }
 
-        bcf_write1(split_files[cur_file], out_hdr, rec);
+        bcf_write1(split_files[cur_file], out_hdr, target_rec);
     }else {
-        // Use parallel writer if enabled
-        if (use_parallel_writing_ && parallel_writer_) {
-            // Reuse pooled record for parallel writing (writer takes ownership)
-            bcf1_t* rec_copy = parallel_writer_->AcquireRecord();
-            if (!rec_copy)
-                rec_copy = bcf_dup(rec);
-            else
-                bcf_copy(rec_copy, rec);
-            parallel_writer_->WriteRecord(rec_copy);
+        if (use_parallel_record) {
+            parallel_writer_->WriteRecord(target_rec);
         } else {
-            bcf_write1(out_file, out_hdr, rec);
+            bcf_write1(out_file, out_hdr, target_rec);
         }
     }
 }
@@ -2680,14 +2708,22 @@ void Decompressor::decodeVariantGtTiled(uint32_t block_id, uint32_t var_in_block
 {
     const uint32_t block_variants = static_cast<uint32_t>(fixed_variants_chunk_io[block_id].data_compress.size());
 
-    // Find max col_vec_len for buffer allocation
-    uint64_t max_col_vec_len = 0;
-    for (auto len : decompression_reader.col_block_vec_lens)
-        if (len > max_col_vec_len)
-            max_col_vec_len = len;
-
-    vector<uint8_t> col_decomp_perm(max_col_vec_len * 2);
-    vector<uint8_t> col_decomp(max_col_vec_len * 2);
+    if (max_col_vec_len_ == 0)
+    {
+        for (auto len : decompression_reader.col_block_vec_lens)
+            if (len > max_col_vec_len_)
+                max_col_vec_len_ = len;
+    }
+    if (max_col_vec_len_ > 0)
+    {
+        const size_t need = static_cast<size_t>(max_col_vec_len_) * 2;
+        if (col_decomp_perm_buf_.size() < need)
+            col_decomp_perm_buf_.resize(need);
+        if (col_decomp_buf_.size() < need)
+            col_decomp_buf_.resize(need);
+    }
+    uint8_t *col_decomp_perm = col_decomp_perm_buf_.data();
+    uint8_t *col_decomp = col_decomp_buf_.data();
 
     // Clear full decomp_data buffer
     fill_n(decomp_data, full_vec_len * 2, 0);
@@ -2699,17 +2735,17 @@ void Decompressor::decodeVariantGtTiled(uint32_t block_id, uint32_t var_in_block
         const uint32_t col_vec_len = static_cast<uint32_t>(decompression_reader.col_block_vec_lens[cb]);
         const uint64_t pair_index = pair_base + static_cast<uint64_t>(cb) * block_variants + var_in_block;
 
-        fill_n(col_decomp_perm.data(), col_vec_len * 2, 0);
-        decoded_vector_row(pair_index * 2, 0, curr_non_copy_vec_id_offset, col_vec_len, 0, col_decomp_perm.data());
-        decoded_vector_row(pair_index * 2 + 1, 0, curr_non_copy_vec_id_offset, col_vec_len, col_vec_len, col_decomp_perm.data());
+        fill_n(col_decomp_perm, col_vec_len * 2, 0);
+        decoded_vector_row(pair_index * 2, 0, curr_non_copy_vec_id_offset, col_vec_len, 0, col_decomp_perm);
+        decoded_vector_row(pair_index * 2 + 1, 0, curr_non_copy_vec_id_offset, col_vec_len, col_vec_len, col_decomp_perm);
 
-        fill_n(col_decomp.data(), col_vec_len * 2, 0);
+        fill_n(col_decomp, col_vec_len * 2, 0);
         decode_perm_rev(col_vec_len, col_vec_len, col_block_size, sort_perm_io[block_id][cb],
-                        col_decomp_perm.data(), col_decomp.data());
+                        col_decomp_perm, col_decomp);
 
         const uint32_t start_hap = decompression_reader.col_block_ranges[cb].first;
-        insert_block_bits(decomp_data, col_decomp.data(), full_vec_len, start_hap, col_block_size);
-        insert_block_bits(decomp_data + full_vec_len, col_decomp.data() + col_vec_len, full_vec_len, start_hap, col_block_size);
+        insert_block_bits(decomp_data, col_decomp, full_vec_len, start_hap, col_block_size);
+        insert_block_bits(decomp_data + full_vec_len, col_decomp + col_vec_len, full_vec_len, start_hap, col_block_size);
     }
 
     // Convert bit vectors to GT characters using lookup table
@@ -2777,14 +2813,28 @@ int Decompressor::decompressRangeTiled(const string &range)
     uint64_t pair_base = start_pair_id + static_cast<uint64_t>(chunk_variant_offset_io) * n_col_blocks;
     bool stop = false;
 
+    const bool use_row_ranges = has_range && !row_block_ranges_io.empty();
     for (size_t block_id = 0; block_id < fixed_variants_chunk_io.size(); ++block_id)
     {
         const uint32_t block_variants = static_cast<uint32_t>(fixed_variants_chunk_io[block_id].data_compress.size());
+        uint32_t start_idx = 0;
+        uint32_t end_idx = block_variants;
+        if (use_row_ranges)
+        {
+            const auto &range_pair = row_block_ranges_io[block_id];
+            start_idx = std::min(range_pair.first, block_variants);
+            end_idx = std::min(range_pair.second, block_variants);
+            if (start_idx >= end_idx)
+            {
+                pair_base += static_cast<uint64_t>(block_variants) * n_col_blocks;
+                continue;
+            }
+        }
 
-        for (uint32_t var_in_block = 0; var_in_block < block_variants; ++var_in_block)
+        for (uint32_t var_in_block = start_idx; var_in_block < end_idx; ++var_in_block)
         {
             variant_desc_t desc = fixed_variants_chunk_io[block_id].data_compress[var_in_block];
-            if (has_range)
+            if (has_range && !use_row_ranges)
             {
                 const int64_t pos = static_cast<int64_t>(desc.pos);
                 if (pos < start_pos)
@@ -2795,6 +2845,15 @@ int Decompressor::decompressRangeTiled(const string &range)
                         stop = true;
                     break;
                 }
+            }
+
+            if (!params.out_AC_AN)
+            {
+                const bool qual_id_reject =
+                    (atoi(desc.qual.c_str()) > max_qual || atoi(desc.qual.c_str()) < min_qual ||
+                     !(params.out_id == desc.id || params.out_id.empty()));
+                if (qual_id_reject)
+                    continue;
             }
 
             // Decode this variant
@@ -3214,6 +3273,20 @@ int Decompressor::decompressRange(const string &range)
             cur_block_id = cur_var / standard_block_size;
             // reverse_perm(sort_perm_io[cur_block_id][0], rev_perm, standard_block_size);
             for(size_t i = 0; i < standard_block_size; i++){
+                variant_desc_t desc = fixed_variants_chunk_io[cur_block_id].data_compress[i];
+                const bool needs_ac_an = params.out_AC_AN;
+                if (!needs_ac_an)
+                {
+                    const bool qual_id_reject =
+                        (atoi(desc.qual.c_str()) > max_qual || atoi(desc.qual.c_str()) < min_qual ||
+                         !(params.out_id == desc.id || params.out_id.empty()));
+                    if (qual_id_reject)
+                    {
+                        cur_vec_id += 2;
+                        continue;
+                    }
+                }
+
                 vec2_start = decompression_reader.vec_len;
                 fill_n(decomp_data, decompression_reader.vec_len*2, 0);
                 decoded_vector_row(cur_vec_id++, 0, curr_non_copy_vec_id_offset, decompression_reader.vec_len, 0, decomp_data_perm);
@@ -3240,8 +3313,6 @@ int Decompressor::decompressRange(const string &range)
                 // getRangeGT(decomp_data_perm,rev_perm,standard_block_size, my_str);    
                 // c_out_line = i;
 
-                variant_desc_t desc = fixed_variants_chunk_io[cur_block_id].data_compress[i];
-                
                 if(params.out_AC_AN){
                     
                     uint32_t AN = standard_block_size;
@@ -3258,7 +3329,8 @@ int Decompressor::decompressRange(const string &range)
 
                     
                 } 
-                skip_processing = (atoi(desc.qual.c_str()) > max_qual || atoi(desc.qual.c_str()) < min_qual || !(params.out_id == desc.id || params.out_id.empty()));
+                if (params.out_AC_AN)
+                    skip_processing = (atoi(desc.qual.c_str()) > max_qual || atoi(desc.qual.c_str()) < min_qual || !(params.out_id == desc.id || params.out_id.empty()));
 
                 if (skip_processing)
                     continue;  
@@ -3274,6 +3346,21 @@ int Decompressor::decompressRange(const string &range)
             // reverse_perm(sort_perm_io[cur_block_id][0], rev_perm, standard_block_size); 
     
             for(;cur_var < no_var;++cur_var){
+                c_out_line = cur_var % standard_block_size;
+                variant_desc_t desc = fixed_variants_chunk_io[cur_block_id].data_compress[c_out_line];
+                const bool needs_ac_an = params.out_AC_AN;
+                if (!needs_ac_an)
+                {
+                    const bool qual_id_reject =
+                        (atoi(desc.qual.c_str()) > max_qual || atoi(desc.qual.c_str()) < min_qual ||
+                         !(params.out_id == desc.id || params.out_id.empty()));
+                    if (qual_id_reject)
+                    {
+                        cur_vec_id += 2;
+                        continue;
+                    }
+                }
+
                 vec2_start = decompression_reader.vec_len;
                 fill_n(decomp_data, decompression_reader.vec_len*2, 0);
                 decoded_vector_row(cur_vec_id++, 0, curr_non_copy_vec_id_offset, decompression_reader.vec_len, 0, decomp_data_perm);
@@ -3304,8 +3391,6 @@ int Decompressor::decompressRange(const string &range)
                 // // getRangeGT(decomp_data_perm, standard_block_size, my_str);
                 // getRangeGT(decomp_data_perm,rev_perm,standard_block_size, my_str);
                     
-                c_out_line = cur_var % standard_block_size;
-                variant_desc_t desc = fixed_variants_chunk_io[cur_block_id].data_compress[c_out_line];
                 if(params.out_AC_AN){
                     
                     uint32_t AN = standard_block_size;
@@ -3323,7 +3408,8 @@ int Decompressor::decompressRange(const string &range)
                     
                 }   
                 
-                skip_processing = (atoi(desc.qual.c_str()) > max_qual || atoi(desc.qual.c_str()) < min_qual || !(params.out_id == desc.id || params.out_id.empty()));
+                if (params.out_AC_AN)
+                    skip_processing = (atoi(desc.qual.c_str()) > max_qual || atoi(desc.qual.c_str()) < min_qual || !(params.out_id == desc.id || params.out_id.empty()));
 
                 if (skip_processing)
                     continue;
@@ -3378,6 +3464,21 @@ int Decompressor::decompressRange(const string &range)
             //     tail_flag = false;
             // }                                
             
+            c_out_line = cur_var % standard_block_size;
+            variant_desc_t desc = fixed_variants_chunk_io[cur_block_id].data_compress[c_out_line];
+            const bool needs_ac_an = params.out_AC_AN;
+            if (!needs_ac_an)
+            {
+                const bool qual_id_reject =
+                    (atoi(desc.qual.c_str()) > max_qual || atoi(desc.qual.c_str()) < min_qual ||
+                     !(params.out_id == desc.id || params.out_id.empty()));
+                if (qual_id_reject)
+                {
+                    cur_vec_id += 2;
+                    continue;
+                }
+            }
+
             vec2_start = decompression_reader.vec_len;
             fill_n(decomp_data, decompression_reader.vec_len*2, 0);
             decoded_vector_row(cur_vec_id++, 0, curr_non_copy_vec_id_offset, decompression_reader.vec_len, 0, decomp_data_perm);
@@ -3409,8 +3510,6 @@ int Decompressor::decompressRange(const string &range)
 
             // // getRangeGT(decomp_data, standard_block_size, my_str);
 
-            c_out_line = cur_var % standard_block_size;
-            variant_desc_t desc = fixed_variants_chunk_io[cur_block_id].data_compress[c_out_line];
             if(params.out_AC_AN){
                 uint32_t AN = standard_block_size;
 
@@ -3423,7 +3522,8 @@ int Decompressor::decompressRange(const string &range)
                 desc.info = "AN=" + std::to_string(AN) + ";AC=" + std::to_string(AC);
             }
 
-            skip_processing = (atoi(desc.qual.c_str()) > max_qual || atoi(desc.qual.c_str()) < min_qual || !(params.out_id == desc.id || params.out_id.empty()));
+            if (params.out_AC_AN)
+                skip_processing = (atoi(desc.qual.c_str()) > max_qual || atoi(desc.qual.c_str()) < min_qual || !(params.out_id == desc.id || params.out_id.empty()));
 
             if (skip_processing)
                 continue;
@@ -4497,6 +4597,12 @@ int Decompressor::initOut()
         {
             
             sampleIDs = smpl.setSamples(params.samples.c_str(), str);
+            if (!sampleIDs)
+            {
+                auto logger = LogManager::Instance().Logger();
+                logger->error("Failed to resolve sample subset: {}", params.samples);
+                return 1;
+            }
         }
            
         if (!out_file)

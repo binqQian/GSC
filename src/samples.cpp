@@ -8,10 +8,12 @@
 #include <map>
 #include <sstream>
 #include <algorithm>
+#include <limits>
 // *****************************************************************************************************************
 int Samples::loadSamples(vector<string> &v_samples)
 {
     auto logger = LogManager::Instance().Logger();
+    ok_ = true;
     uint32_t c = 0;
     for (size_t i = 0; i < v_samples.size(); i++)
     {
@@ -42,7 +44,8 @@ uint32_t Samples::getWhich(std::string nm)
     else
     {
         logger->error("There is no sample {} in the set", nm);
-        exit(1);
+        ok_ = false;
+        return std::numeric_limits<uint32_t>::max();
     }
 }
 // *****************************************************************************************************************
@@ -52,6 +55,7 @@ uint32_t *Samples::setSamples(const std::string &samples, string &str)
     uint32_t *smplIDs = nullptr;
     long size = 0;
 
+    ok_ = true;
     no_samples = 0;
     if (samples[0] == '@')
     {
@@ -59,7 +63,8 @@ uint32_t *Samples::setSamples(const std::string &samples, string &str)
         if (!in_samples.is_open())
         {
             logger->error("Error. Cannot open {} file with samples.", samples.substr(1));
-            exit(1);
+            ok_ = false;
+            return nullptr;
         }
 
         uint32_t i = 0;
@@ -78,6 +83,8 @@ uint32_t *Samples::setSamples(const std::string &samples, string &str)
         {
             str += (item + "\t");
             smplIDs[i++] = getWhich(item);
+            if (!ok_)
+                break;
             no_samples++;
         }
     }
@@ -94,10 +101,22 @@ uint32_t *Samples::setSamples(const std::string &samples, string &str)
         {
             str += (item + "\t");
             smplIDs[i++] = getWhich(item);
+            if (!ok_)
+                break;
             no_samples++;
         }
     }
-    str = str.substr(0, str.length() - 1);
+    if (!ok_)
+    {
+        delete[] smplIDs;
+        smplIDs = nullptr;
+        str.clear();
+        no_samples = 0;
+        return nullptr;
+    }
+
+    if (!str.empty())
+        str.pop_back();
 
     return smplIDs;
 }

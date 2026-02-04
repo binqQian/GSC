@@ -12,12 +12,14 @@ class Samples{
      std::map<std::string, uint32_t> whichIndMap;
      bool samples_init;
      string all_samples;
+     bool ok_;
 public:
 
     Samples(){
         samples_init=false;
         all_samples="";
 		no_samples=0;
+        ok_ = true;
     }
     uint32_t no_samples;
     
@@ -26,6 +28,7 @@ public:
 
     uint32_t * setSamples(const std::string  & samples, string &str);
     void get_all_samples(string &str);
+    bool ok() const { return ok_; }
 
 };
 
