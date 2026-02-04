@@ -1608,9 +1608,9 @@ bool Decompressor::SetVariantToRec(variant_desc_t &desc, vector<field_desc> &fie
     }
     else{
         if(count == 0){
-            appendVCFToRec(desc, _my_str, _standard_block_size, fields, keys);
-            count = 0;
-            fields_pos++;
+            // Orphan <M> (no preceding <N>): skip to avoid consuming a field entry.
+            // This can happen in range-only decoding when the <N> record is outside the selection.
+            return true;
         }else{
             temp_desc.alt.append(",");
             temp_desc.alt += desc.alt.substr(0, desc.alt.find_first_of(','));
@@ -1690,9 +1690,16 @@ int Decompressor::BedFormatDecompress(){
     std::string bim_line;
     // vector<uint32_t> rev_perm(standard_block_size);  //2024.1.16注释
     
-    uint64_t curr_non_copy_vec_id_offset = start_chunk_actual_pos * 2 - rrr_rank_zeros_bit_vector[0](start_chunk_actual_pos) - 
-                rrr_rank_zeros_bit_vector[1](start_chunk_actual_pos) -rrr_rank_copy_bit_vector[0](start_chunk_actual_pos) - 
-                rrr_rank_copy_bit_vector[1](start_chunk_actual_pos);
+    uint64_t base_pair_id = start_chunk_actual_pos;
+    if (has_fixed_fields_rb_dir_io &&
+        fixed_fields_chunk_version_io >= GSC_FIXED_FIELDS_RB_VERSION_V2 &&
+        chunk_variant_offset_io)
+        base_pair_id += chunk_variant_offset_io;
+
+    cur_vec_id = static_cast<uint32_t>(base_pair_id * 2);
+    uint64_t curr_non_copy_vec_id_offset = base_pair_id * 2 - rrr_rank_zeros_bit_vector[0](base_pair_id) -
+                rrr_rank_zeros_bit_vector[1](base_pair_id) - rrr_rank_copy_bit_vector[0](base_pair_id) -
+                rrr_rank_copy_bit_vector[1](base_pair_id);
 
     no_var = end_chunk_actual_pos - start_chunk_actual_pos;
 
@@ -3146,9 +3153,16 @@ int Decompressor::decompressAll(){
     fields_pos  = 0;
     vector<uint8_t> my_str(standard_block_size);
     // vector<uint32_t> rev_perm(standard_block_size);  
-    uint64_t curr_non_copy_vec_id_offset = start_chunk_actual_pos * 2 - rrr_rank_zeros_bit_vector[0](start_chunk_actual_pos) - 
-                rrr_rank_zeros_bit_vector[1](start_chunk_actual_pos) -rrr_rank_copy_bit_vector[0](start_chunk_actual_pos) - 
-                rrr_rank_copy_bit_vector[1](start_chunk_actual_pos);
+    uint64_t base_pair_id = start_chunk_actual_pos;
+    if (has_fixed_fields_rb_dir_io &&
+        fixed_fields_chunk_version_io >= GSC_FIXED_FIELDS_RB_VERSION_V2 &&
+        chunk_variant_offset_io)
+        base_pair_id += chunk_variant_offset_io;
+
+    cur_vec_id = static_cast<uint32_t>(base_pair_id * 2);
+    uint64_t curr_non_copy_vec_id_offset = base_pair_id * 2 - rrr_rank_zeros_bit_vector[0](base_pair_id) -
+                rrr_rank_zeros_bit_vector[1](base_pair_id) - rrr_rank_copy_bit_vector[0](base_pair_id) -
+                rrr_rank_copy_bit_vector[1](base_pair_id);
 
     no_var = end_chunk_actual_pos - start_chunk_actual_pos;
 
@@ -3179,8 +3193,20 @@ int Decompressor::decompressAll(){
                 
             }   
             variant_desc_t desc = fixed_variants_chunk_io[cur_block_id].data_compress[i];
-
-            SetVariantToRec(desc, all_fields_io[fields_pos], decompression_reader.keys, my_str,standard_block_size);
+            if (desc.alt.find("<M>") != string::npos && count > 0)
+            {
+                SetVariantToRec(desc, temp_fields, decompression_reader.keys, my_str, standard_block_size);
+            }
+            else
+            {
+                if (fields_pos >= all_fields_io.size())
+                {
+                    logger->error("decompressAll: fields_pos={} out of bounds (all_fields_io.size()={}, cur_block_id={}, i={})",
+                                  fields_pos, all_fields_io.size(), cur_block_id, i);
+                    return 1;
+                }
+                SetVariantToRec(desc, all_fields_io[fields_pos], decompression_reader.keys, my_str, standard_block_size);
+            }
             
         
         }
@@ -3219,8 +3245,20 @@ int Decompressor::decompressAll(){
             c_out_line = cur_var % standard_block_size;
 
             variant_desc_t desc = fixed_variants_chunk_io[cur_block_id].data_compress[c_out_line];
-            
-            SetVariantToRec(desc, all_fields_io[fields_pos], decompression_reader.keys, my_str, standard_block_size);
+            if (desc.alt.find("<M>") != string::npos && count > 0)
+            {
+                SetVariantToRec(desc, temp_fields, decompression_reader.keys, my_str, standard_block_size);
+            }
+            else
+            {
+                if (fields_pos >= all_fields_io.size())
+                {
+                    logger->error("decompressAll: fields_pos={} out of bounds (all_fields_io.size()={}, cur_block_id={}, c_out_line={})",
+                                  fields_pos, all_fields_io.size(), cur_block_id, c_out_line);
+                    return 1;
+                }
+                SetVariantToRec(desc, all_fields_io[fields_pos], decompression_reader.keys, my_str, standard_block_size);
+            }
         }
     }
     
@@ -3259,9 +3297,16 @@ int Decompressor::decompressRange(const string &range)
     // vector<uint32_t> rev_perm(standard_block_size);  
     vector<uint8_t> my_str(standard_block_size);
 
-    uint64_t curr_non_copy_vec_id_offset = start_chunk_actual_pos * 2 - rrr_rank_zeros_bit_vector[0](start_chunk_actual_pos) - 
-                rrr_rank_zeros_bit_vector[1](start_chunk_actual_pos) -rrr_rank_copy_bit_vector[0](start_chunk_actual_pos) - 
-                rrr_rank_copy_bit_vector[1](start_chunk_actual_pos);
+    uint64_t base_pair_id = start_chunk_actual_pos;
+    if (has_fixed_fields_rb_dir_io &&
+        fixed_fields_chunk_version_io >= GSC_FIXED_FIELDS_RB_VERSION_V2 &&
+        chunk_variant_offset_io)
+        base_pair_id += chunk_variant_offset_io;
+
+    cur_vec_id = static_cast<uint32_t>(base_pair_id * 2);
+    uint64_t curr_non_copy_vec_id_offset = base_pair_id * 2 - rrr_rank_zeros_bit_vector[0](base_pair_id) -
+                rrr_rank_zeros_bit_vector[1](base_pair_id) - rrr_rank_copy_bit_vector[0](base_pair_id) -
+                rrr_rank_copy_bit_vector[1](base_pair_id);
     
     if (range == "")
     {
@@ -3452,7 +3497,7 @@ int Decompressor::decompressRange(const string &range)
             no_var = end_chunk_actual_pos - start_chunk_actual_pos;
         }       
 
-        cur_vec_id = (start_chunk_actual_pos + start_var) * 2;
+        cur_vec_id = static_cast<uint32_t>((base_pair_id + start_var) * 2);
         // bool  tail_flag = true; 
         for (size_t cur_var = start_var;cur_var < no_var; cur_var++)
         {
@@ -3608,9 +3653,15 @@ int Decompressor::decompressSampleSmart(const string &range)
     uint32_t first_vec_in_block = 0;
 
     // int var_block_num=fixed_variants_chunk_io.size();
-    uint64_t prev_chr_zeros_copy = rrr_rank_zeros_bit_vector[0](start_chunk_actual_pos) + rrr_rank_zeros_bit_vector[1](start_chunk_actual_pos) +
-                                       rrr_rank_copy_bit_vector[0](start_chunk_actual_pos) + rrr_rank_copy_bit_vector[1](start_chunk_actual_pos);
-    uint64_t curr_non_copy_vec_id_offset = start_chunk_actual_pos*2 - prev_chr_zeros_copy;
+    uint64_t base_pair_id = start_chunk_actual_pos;
+    if (has_fixed_fields_rb_dir_io &&
+        fixed_fields_chunk_version_io >= GSC_FIXED_FIELDS_RB_VERSION_V2 &&
+        chunk_variant_offset_io)
+        base_pair_id += chunk_variant_offset_io;
+
+    uint64_t prev_chr_zeros_copy = rrr_rank_zeros_bit_vector[0](base_pair_id) + rrr_rank_zeros_bit_vector[1](base_pair_id) +
+                                       rrr_rank_copy_bit_vector[0](base_pair_id) + rrr_rank_copy_bit_vector[1](base_pair_id);
+    uint64_t curr_non_copy_vec_id_offset = base_pair_id*2 - prev_chr_zeros_copy;
     
     if (range != "")
     {
@@ -3632,7 +3683,7 @@ int Decompressor::decompressSampleSmart(const string &range)
             no_var = end_chunk_actual_pos - start_chunk_actual_pos;
         }
         
-        cur_vec_id = (start_var + start_chunk_actual_pos) * 2;
+        cur_vec_id = static_cast<uint32_t>((start_var + base_pair_id) * 2);
   
         for (size_t cur_var = start_var;cur_var < no_var ; cur_var++)
         {
@@ -3640,7 +3691,7 @@ int Decompressor::decompressSampleSmart(const string &range)
 
             if (cur_block_id != prev_block_id) // Get perm and find out which bytes need decoding
             {
-                first_vec_in_block = start_chunk_actual_pos*2 + cur_block_id * standard_block_size*2;
+                first_vec_in_block = static_cast<uint32_t>(base_pair_id*2 + cur_block_id * standard_block_size*2);
                 unique_pos = 0;
                 if (prev_block_id == 0xFFFF) // to set curr_zeros, curr_copy (first processed block)
                 {
@@ -3780,7 +3831,7 @@ int Decompressor::decompressSampleSmart(const string &range)
 
             if (cur_block_id != prev_block_id) // get perm and find out which bytes need decoding
             {
-                first_vec_in_block = start_chunk_actual_pos*2 +cur_block_id * standard_block_size*2;
+                first_vec_in_block = static_cast<uint32_t>(base_pair_id*2 + cur_block_id * standard_block_size*2);
                 unique_pos = 0;
                 if (prev_block_id == 0xFFFF) // to set curr_zeros, curr_copy (first processed block)
                 {
@@ -4805,6 +4856,11 @@ void Decompressor::decoded_vector_row(uint64_t vec_id, uint64_t offset, uint64_t
         prev = cur_index;
         cur_pos = cur_index % 8;
         cur_id = cur_index / 8;
+        if (cur_id < 0 || static_cast<uint64_t>(cur_id) >= length) {
+            logger->error("decoded_vector_row: cur_id={} out of bounds (length={}, cur_index={})",
+                          cur_id, length, cur_index);
+            return;
+        }
         cur_decomp_data[cur_id] += perm_lut8[cur_pos];
     }
 

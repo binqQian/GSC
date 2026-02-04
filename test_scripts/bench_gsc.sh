@@ -3,7 +3,7 @@ set -euo pipefail
 
 GSC_BIN="${GSC_BIN:-./build/gsc}"
 OUT_DIR="${OUT_DIR:-tmp/bench_$(date +%Y%m%d_%H%M%S)}"
-SMALL_DATA="${SMALL_DATA:-toy/final_subset.vcf.gz}"
+SMALL_DATA="${SMALL_DATA:-}"
 MEDIUM_DATA="${MEDIUM_DATA:-}"
 LARGE_DATA="${LARGE_DATA:-}"
 THREADS="${THREADS:-}"
@@ -105,9 +105,9 @@ bench_dataset() {
   fi
 
   local lossless_gsc="${OUT_DIR}/${label}_lossless.gsc"
-  local lossless_vcf="${OUT_DIR}/${label}_lossless.vcf"
+  local lossless_vcf="${OUT_DIR}/${label}_lossless.vcf.gz"
   local lossy_gsc="${OUT_DIR}/${label}_lossy.gsc"
-  local lossy_vcf="${OUT_DIR}/${label}_lossy.vcf"
+  local lossy_vcf="${OUT_DIR}/${label}_lossy.vcf.gz"
 
   local elapsed rss_kb
 
@@ -157,7 +157,11 @@ bench_dataset() {
 
 echo "dataset,mode,step,variants,elapsed_s,rss_kb,throughput_vps,metric_a,metric_b" > "${OUT_DIR}/bench.csv"
 
-bench_dataset "small" "${SMALL_DATA}"
+if [[ -n "${SMALL_DATA}" ]]; then
+  bench_dataset "small" "${SMALL_DATA}"
+else
+  log "SKIP small: SMALL_DATA is empty"
+fi
 bench_dataset "medium" "${MEDIUM_DATA}"
 bench_dataset "large" "${LARGE_DATA}"
 
