@@ -183,6 +183,13 @@ bool Compressor::writeCompressFlie()
     }
 
     bm_comp_copy_orgl_id.Close();
+
+    // Write meta backend marker so decompression can choose the right codec (lossy/lossless).
+    const uint32_t meta_magic = GSC_META_MAGIC;
+    const uint8_t meta_backend = static_cast<uint8_t>(params.backend);
+    fwrite(&meta_magic, sizeof(uint32_t), 1, comp);
+    fwrite(&meta_backend, sizeof(uint8_t), 1, comp);
+
     Meta_comp_size += comp_v_header.size();
     uint32_t comp_size = static_cast<uint32_t>(comp_v_header.size());
     fwrite(&comp_size, sizeof(uint32_t), 1, comp);

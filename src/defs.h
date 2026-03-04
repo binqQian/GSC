@@ -74,6 +74,11 @@ const int max_part_size = 4;
 
 const size_t no_variants_in_buf = 8192u;
 
+// Magic tag before compressed meta (header/samples) to convey backend id.
+// "GSCM" in little-endian. Chosen to be far larger than typical meta sizes to
+// avoid collision with legacy comp_size values.
+const uint32_t GSC_META_MAGIC = 0x4D435347u;
+
 const uint32_t p_bsc_features = 1u;
 
 const uint32_t max_buffer_size = 8 << 20;
@@ -117,4 +122,3 @@ const float max_float = std::numeric_limits<float>::max();
 // const uint32_t PART_TRIALS = 10 * PART_SIZE * 2 / 20; 
 
 // const uint32_t MC_ARRAY_SIZE = (PART_TRIALS + 63) / 64;
-

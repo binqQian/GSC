@@ -334,6 +334,20 @@ bool DecompressionReader::OpenReading(const string &in_file_name, const bool &_d
 	}
 
 	// std::cerr<<"vint_last_perm_size: "<<vint_last_perm_size<<endl;
+	// Optional meta backend marker (new format). Legacy files start directly with comp_size.
+	uint32_t maybe_magic = 0;
+	memcpy(&maybe_magic, buf + buf_pos, sizeof(uint32_t));
+	if (maybe_magic == GSC_META_MAGIC)
+	{
+		buf_pos += sizeof(uint32_t);
+		uint8_t backend_id = 0;
+		memcpy(&backend_id, buf + buf_pos, sizeof(uint8_t));
+		buf_pos += sizeof(uint8_t);
+		if (backend_id <= static_cast<uint8_t>(compression_backend_t::brotli))
+			backend = static_cast<compression_backend_t>(backend_id);
+		InitializeCompressionBackend(backend);
+	}
+
 	uint32_t comp_size;
 	memcpy(&comp_size, buf + buf_pos, sizeof(uint32_t));
 	buf_pos = buf_pos + sizeof(uint32_t);
