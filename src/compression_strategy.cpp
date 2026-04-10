@@ -7,6 +7,7 @@
 
 namespace {
 
+// libbsc 只需要做一次全局初始化。
 std::once_flag g_bsc_init_flag;
 
 class BscCompressionStrategy : public CompressionStrategy {
@@ -39,6 +40,7 @@ public:
     }
 
     bool DecompressFromPtr(const uint8_t* src, size_t src_size, std::vector<uint8_t>& output) override {
+        // zstd 提供了直接从指针解压的实现，适合 mmap 读取场景。
         return zstd::zstd_decompress_ptr(src, src_size, output);
     }
 };
@@ -64,6 +66,7 @@ public:
     }
 
     bool Decompress(const std::vector<uint8_t>& input, std::vector<uint8_t>& output) override {
+        // Brotli 这里走流式解压，输出缓冲不够时逐步扩容。
         BrotliDecoderState* state = BrotliDecoderCreateInstance(nullptr, nullptr, nullptr);
         if (!state) return false;
 
@@ -92,12 +95,14 @@ public:
 }  // namespace
 
 void InitializeCompressionBackend(compression_backend_t backend) {
+    // 目前只有 bsc 需要显式初始化库状态。
     if (backend == compression_backend_t::bsc) {
         std::call_once(g_bsc_init_flag, []() { CBSCWrapper::InitLibrary(p_bsc_features); });
     }
 }
 
 std::unique_ptr<CompressionStrategy> MakeCompressionStrategy(compression_backend_t backend, const bsc_params_t& bsc_params) {
+    // 工厂函数：把后端枚举映射成具体策略对象。
     InitializeCompressionBackend(backend);
     switch (backend) {
     case compression_backend_t::bsc:

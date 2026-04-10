@@ -17,10 +17,15 @@ using namespace std;
 
 typedef enum {mode_none, mode_file_read, mode_file_write, mode_file_read_ra, mode_mem_read, mode_mem_write, mode_mem_read_ra} t_mode;
 
+// 位级读写缓冲：
+// - 压缩端用它持续 PutBit / PutByte 组装 GT bitplane 和 bit-packed 数据
+// - 解压端则按 bit/byte 视图读回这些 payload
+// 这里最关键的是 mem_buffer_ownership 的所有权语义。
 // ********************************************************************************************
 class CBitMemory {
 public:
     uint8_t *mem_buffer;
+    // true 表示 Close/析构时会释放 mem_buffer；false 表示缓冲由外部管理。
     bool mem_buffer_ownership;
     int64_t mem_buffer_pos;
     int32_t word_buffer_pos;
@@ -45,13 +50,18 @@ public:
     CBitMemory(const CBitMemory &y);
     ~CBitMemory();
     
+    // Open 用现成缓冲做“只读视图”；默认不会接管所有权。
     bool Open(uint8_t *p, int64_t size, bool force_open = false);
+    // Create / CreateFromBuffer 用于写模式。
     bool Create(int64_t size = 1);
     bool CreateFromBuffer(uint8_t *buffer, int64_t size, bool take_ownership = false);
+    // Complete 只补齐尾部缓冲，不释放内存；Close 会按所有权规则释放并重置状态。
     bool Complete();
     bool Close();
     bool Restart();
 
+    // 将所有权从“自己负责释放”切换成“外部负责释放”。
+    // 压缩端把缓冲交给队列后通常会调用它。
     bool TakeOwnership();
     
     inline uint64_t GetPos(void);
@@ -83,6 +93,7 @@ public:
 
 
 // ********************************************************************************************
+// 读模式下跳过指定 bit 数，不取出真实值。
 bool CBitMemory::GetBitsAndDiscard(uint32_t n_bits)
 {
     uint32_t count;
@@ -125,6 +136,7 @@ bool CBitMemory::GetBitsAndDiscard(uint32_t n_bits)
 }
 
 // ********************************************************************************************
+// 写模式下从尾部回退指定位数，主要给少量回滚场景使用。
 bool CBitMemory::discardBits(uint32_t n_bits)  //while putting
 {
     uint32_t word;
@@ -232,6 +244,7 @@ bool CBitMemory::PutBits(uint32_t word, int32_t n_bits)
 
 // ********************************************************************************************
 
+// 把尚未凑满 32 bit 的写缓冲按字节补齐写出。
 bool CBitMemory::FlushPartialWordBuffer()
 {
     word_buffer <<= (32 - word_buffer_pos) & 7;
@@ -260,6 +273,7 @@ bool CBitMemory::FlushInputWordBuffer()
 }
 
 // ********************************************************************************************
+// 顺序写单字节；空间不够时自动扩容。
 bool CBitMemory::PutByte(const unsigned char byte)
 {
     if(mem_buffer_pos + 1 > mem_buffer_size)
@@ -281,6 +295,7 @@ bool CBitMemory::PutByte(const unsigned char byte)
 
 
 // ********************************************************************************************
+// 顺序写一段原始字节；空间不够时自动扩容。
 bool CBitMemory::PutBytes(const unsigned char *data, int64_t n_bytes)
 {
    
@@ -434,6 +449,8 @@ public:
 	CBuffer();
 	~CBuffer();
 
+	// lossless other fields 的通用块缓冲：
+	// v_size 保存每条记录该字段的长度，v_data 保存真正 payload。
 	void SetMaxSize(uint32_t _max_size, uint32_t _offset);
 
 	// Output buffer methods
@@ -699,6 +716,7 @@ public:
 	CVariantsBuffer();
 	~CVariantsBuffer();
 
+	// fixed fields 的文本列缓冲，按“以 '\0' 结尾的字符串序列”组织。
 	void SetMaxSize(uint32_t _max_size, uint32_t _offset);
 
 	// Output buffer methods

@@ -15,6 +15,7 @@
 
 namespace gsc {
 
+// 并行写出的基础参数：队列越大，主线程越不容易被 I/O 反压。
 // Constants for parallel writing
 const size_t VCF_WRITE_QUEUE_SIZE = 1000;  // Max queued records
 
@@ -31,7 +32,7 @@ const size_t VCF_WRITE_QUEUE_SIZE = 1000;  // Max queued records
  */
 class ParallelVCFWriter {
 private:
-    // Write request with sequence number for ordering
+    // 带序号的写请求；最终必须严格按 seq 顺序落盘。
     struct WriteRequest {
         uint64_t seq;
         bcf1_t* rec;
@@ -41,7 +42,8 @@ private:
         WriteRequest(uint64_t s, bcf1_t* r) : seq(s), rec(r), is_sentinel(false) {}
     };
 
-    // Thread-safe priority queue for ordered writes
+    // 有序写队列：
+    // 主线程可以乱序提交，但 writer 线程只会按 next_seq_to_write_ 连续取出。
     class OrderedWriteQueue {
     private:
         std::map<uint64_t, bcf1_t*> pending_writes_;
@@ -60,7 +62,7 @@ private:
             , finished_(false)
             , current_size_(0) {}
 
-        // Submit a record for writing (blocks if queue is full)
+        // 提交一条记录；队列满时阻塞。
         void push(uint64_t seq, bcf1_t* rec) {
             std::unique_lock<std::mutex> lock(mutex_);
             space_available_.wait(lock, [this]() {
@@ -78,7 +80,7 @@ private:
             }
         }
 
-        // Get next record in sequence (blocks if not ready)
+        // 只有下一个期望 seq 到齐时才会弹出，确保输出顺序稳定。
         bool pop(bcf1_t*& rec) {
             std::unique_lock<std::mutex> lock(mutex_);
             data_ready_.wait(lock, [this]() {
@@ -111,13 +113,14 @@ private:
         }
     };
 
-    // Member variables
+    // 输出句柄和模式控制。
     htsFile* fp_out_;
     bcf_hdr_t* hdr_;
     bool initialized_;
     bool use_parallel_writing_;
 
-    // Writing infrastructure
+    // 写线程基础设施：
+    // 主线程只排队，真正的 bcf_write1()/bcf_write() 始终在单线程里执行。
     OrderedWriteQueue write_queue_;
     std::thread writer_thread_;
     std::atomic<uint64_t> next_write_seq_;
@@ -126,8 +129,9 @@ private:
     std::vector<bcf1_t*> record_pool_;
     size_t max_pool_size_;
 
-    // Writer thread function
+    // writer 线程负责串行调用 htslib 写接口。
     void WriterThread();
+    // 已写完记录回收进对象池，降低 bcf1_t 反复创建成本。
     void ReleaseRecord(bcf1_t* rec);
 
 public:

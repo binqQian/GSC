@@ -10,6 +10,7 @@
 #include "bit_memory.h"
 #include <algorithm>
 using namespace std;
+// 初始化为空缓冲；默认不持有任何外部内存。
 // ********************************************************************************************
 CBitMemory::CBitMemory()
 {
@@ -25,6 +26,8 @@ CBitMemory::CBitMemory()
     for(int32_t i = 0; i < 32; ++i)
         n_bit_mask[i] = (1u << i) - 1;
 }
+// 这里的“拷贝构造”实际上更接近一次所有权转移。
+// 调用后源对象会被置空，因此后续代码不要把它当普通 copy 使用。
 // ********************************************************************************************
 CBitMemory::CBitMemory(const CBitMemory &y)
 {
@@ -60,6 +63,7 @@ CBitMemory::~CBitMemory()
     if(mem_buffer && mem_buffer_ownership)
         delete[] mem_buffer;
 }
+// 如果当前缓冲原本由自己持有，就把释放责任交给外部。
 // ********************************************************************************************
 bool CBitMemory::TakeOwnership()
 {
@@ -71,6 +75,7 @@ bool CBitMemory::TakeOwnership()
     
     return false;
 }
+// 用外部缓冲建立只读视图；除非 size==0 触发兜底分配，否则不会接管所有权。
 // ********************************************************************************************
 bool CBitMemory::Open(uint8_t *p, int64_t size, bool force_open)
 {
@@ -105,6 +110,7 @@ bool CBitMemory::Open(uint8_t *p, int64_t size, bool force_open)
     
     return mode == mode_mem_read;
 }
+// 重新从头按读模式读取当前缓冲。
 // ********************************************************************************************
 bool CBitMemory::Restart()
 {
@@ -118,6 +124,7 @@ bool CBitMemory::Restart()
     return true;
 }
 
+// 创建一个自己持有的写缓冲。
 // ********************************************************************************************
 bool CBitMemory::Create(int64_t size)
 {
@@ -142,6 +149,7 @@ bool CBitMemory::Create(int64_t size)
     
     return mode == mode_mem_write;
 }
+// 使用现成缓冲做写缓冲；是否释放由 take_ownership 决定。
 // ********************************************************************************************
 bool CBitMemory::CreateFromBuffer(uint8_t *buffer, int64_t size, bool take_ownership)
 {
@@ -165,6 +173,7 @@ bool CBitMemory::CreateFromBuffer(uint8_t *buffer, int64_t size, bool take_owner
 
     return mode == mode_mem_write;
 }
+// Close 会在写模式下先 flush，再按所有权规则释放缓冲并清空状态。
 // ********************************************************************************************
 bool CBitMemory::Close()
 {
@@ -186,6 +195,7 @@ bool CBitMemory::Close()
     
     return true;
 }
+// Complete 只做“写尾部补齐”，不改变所有权和模式。
 // ********************************************************************************************
 bool CBitMemory::Complete()
 {

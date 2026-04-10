@@ -5,12 +5,14 @@
 
 
 // ******************************************************************************
+// 构造一个多流句柄；input_mode=false 表示后续会写 footer。
 File_Handle_2::File_Handle_2(bool _input_mode)
 {
 	f = nullptr;
 	input_mode = _input_mode;
 }
 
+// 析构时兜底关闭文件，确保写模式下 footer 有机会落盘。
 // ******************************************************************************
 File_Handle_2::~File_Handle_2()
 {
@@ -22,6 +24,8 @@ File_Handle_2::~File_Handle_2()
 		
 }
 
+// Open/OpenRange 最终都会走这里。
+// 读模式下会先反序列化 footer，建立 stream -> parts 映射。
 // ******************************************************************************
 bool File_Handle_2::OpenInternal(const string& temp_file2_fname, bool range_enabled, size_t range_begin_in, size_t range_size_in)
 {
@@ -73,6 +77,8 @@ bool File_Handle_2::OpenRange(const string& temp_file2_fname, size_t range_begin
 	return OpenInternal(temp_file2_fname, true, range_begin_in, range_size_in);
 }
 
+// 关闭句柄：
+// 写模式会先把 footer 追加到文件尾；读模式直接关闭。
 // // ******************************************************************************
 bool File_Handle_2::Close()
 {
@@ -99,13 +105,15 @@ bool File_Handle_2::Close()
 }
 void File_Handle_2::AddParamsPart(int stream_id,vector<uint8_t> & v_data){
     lock_guard<mutex> lck(mtx);
-    
+    // 参数流通常不需要 prepare/complete 两阶段，直接按当前偏移追加。
 	m_streams[stream_id].parts.emplace_back(f_offset, v_data.size());;
     if(v_data.size())
 		fwrite(v_data.data(), 1, v_data.size(), f);
 
 	f_offset += v_data.size();
 }
+// 将所有 stream 的 part 目录写到文件尾，并在最后补一个固定 8 字节 footer_size。
+// 读取时会先从文件尾倒着找到这段目录。
 // // ******************************************************************************
 bool File_Handle_2::serialize()
 {
@@ -141,6 +149,8 @@ bool File_Handle_2::serialize()
 	return true;
 }
 
+// 从文件尾读取 footer，恢复每个 stream 的 part 目录。
+// range 模式下，footer 位于子区间尾部而不是整个文件尾部。
 // // ******************************************************************************
 bool File_Handle_2::deserialize()
 {
@@ -189,6 +199,7 @@ bool File_Handle_2::deserialize()
 
 	return true;
 }
+// 注册一个新逻辑流，返回内部 stream_id。
 // ******************************************************************************
 int File_Handle_2::RegisterStream(string stream_name)
 {
@@ -203,6 +214,7 @@ int File_Handle_2::RegisterStream(string stream_name)
 	return id;
 }
 
+// 根据 stream_name 反查内部 id。
 // ******************************************************************************
 int File_Handle_2::GetStreamId(string stream_name)
 {
@@ -233,6 +245,8 @@ int File_Handle_2::GetStreamId(string stream_name)
 // 	return true;
 // }
 
+// 先预留 part 槽位，后续由 AddPartComplete 回填实际 offset/size。
+// 这样多个压缩线程可以先并行算 payload，再由单写线程顺序落盘。
 // ******************************************************************************
 int File_Handle_2::AddPartPrepare(int stream_id)
 {
@@ -244,6 +258,7 @@ int File_Handle_2::AddPartPrepare(int stream_id)
 }
 
 
+// 把预留 part_id 对应的真实 payload 写入文件，并记录 offset/size。
 // ******************************************************************************
 bool File_Handle_2::AddPartComplete(int stream_id, int part_id, vector<uint8_t>& v_data)
 {
@@ -279,6 +294,8 @@ size_t File_Handle_2::GetCompressedSize(int stream_id)
 	return size;
 }
 
+// 顺序读取某个 stream 的下一个 part。
+// 读模式下 cur_id 就是这个 stream 当前的读取游标。
 // ******************************************************************************
 bool File_Handle_2::GetPart(int stream_id, vector<uint8_t> &v_data)
 {
@@ -302,6 +319,7 @@ bool File_Handle_2::GetPart(int stream_id, vector<uint8_t> &v_data)
 	return r == p.parts[p.cur_id-1].size;
 }
 
+// 将某个 stream 的读取游标重置回开头。
 // ******************************************************************************
 bool File_Handle_2::ResetStreamPartIterator(int stream_id)
 {
@@ -335,6 +353,7 @@ bool File_Handle_2::ResetStreamPartIterator(int stream_id)
 // 	return h;
 // }
 
+// 让一个 stream 复用另一个 stream 的 part 目录，仅改逻辑名字。
 // ******************************************************************************
 bool File_Handle_2::LinkStream(int stream_id, string stream_name, int target_id)
 {
@@ -345,6 +364,7 @@ bool File_Handle_2::LinkStream(int stream_id, string stream_name, int target_id)
 }
 size_t File_Handle_2::WriteFixed(size_t x, FILE* file)
 {
+	// footer_size 固定写 8 字节，方便从文件尾反查。
 	fwrite(&x, 1, 8, file);
 
 	return 8;
@@ -353,6 +373,7 @@ size_t File_Handle_2::WriteFixed(size_t x, FILE* file)
 // ******************************************************************************
 size_t File_Handle_2::Write(size_t x, FILE* file)
 {
+	// 非固定宽整数按“字节数 + 大端内容”写入，减少目录体积。
 	int no_bytes = 0;
 
 	for (size_t tmp = x; tmp; tmp >>= 8)
@@ -382,6 +403,7 @@ size_t File_Handle_2::read_fixed(size_t& x, FILE* file)
 // ******************************************************************************
 size_t File_Handle_2::read(size_t& x, FILE* file)
 {
+	// 与 Write(size_t) 对应：先读字节数，再按大端拼回整数。
 	int no_bytes = getc(file);
 
 	x = 0;

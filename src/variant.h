@@ -3,8 +3,11 @@
 #include <vector>
 #include "defs.h"
 using namespace std;
+// 这些结构是压缩/解压主链路共享的“公共语言”，
+// 既描述变体文本字段，也描述 fixed fields / part2 的中间打包结果。
 // ************************************************************************************
 typedef struct variant_desc_tag {
+    // 逻辑上的一条变体描述；压缩前后都围绕这几个固定列字段工作。
     string chrom;
     uint64_t pos;
     string id;
@@ -56,7 +59,7 @@ typedef struct variant_desc_tag {
 } variant_desc_t;
 
 // ************************************************************************************
-// Column block metadata for GT tiling
+// GT 列分块元数据：描述一个列块覆盖哪些单倍体，以及其 GT payload 位置。
 typedef struct col_block_meta_tag {
     uint32_t start_haplotype;     // Starting haplotype index
     uint32_t n_haplotypes;        // Number of haplotypes in this column block
@@ -71,6 +74,7 @@ typedef struct col_block_meta_tag {
           gt_data_offset(0), gt_data_size(0) {}
 } col_block_meta_t;
 
+// 旧解压接口里的简单 block 容器，主要承载一块排好序的变体描述。
 // ************************************************************************************
 typedef struct block_tag
 {
@@ -91,10 +95,12 @@ typedef struct block_tag
 
 // } sblock;
 // ************************************************************************************
+// other fields 的 key 类型：对应 FILTER / INFO / FORMAT 三大类。
 enum  class key_type_t {flt, info, fmt};  // FILTER / INFO / FORMAT
 
 // ************************************************************************************
 typedef struct key_desc_tag {
+    // key_id 是内部顺序号，actual_field_id 是按拓扑排序修正后的真实写出顺序。
     uint32_t key_id;
     uint32_t actual_field_id;
     key_type_t keys_type;
@@ -105,9 +111,11 @@ typedef struct key_desc_tag {
 
 // ************************************************************************************
 typedef struct field_desc_tag {
+    // present=false 表示该字段在当前记录缺失；此时 data_size 应为 0。
     bool present = false;  // true if present in description
     char *data = nullptr;
     uint32_t data_size = 0;   // payload size in bytes (0 when absent)
+    // capacity 允许复用已分配缓冲，避免频繁 new/delete。
     uint32_t capacity = 0;    // allocated size in bytes (>= data_size when data!=nullptr)
 
 
@@ -115,6 +123,7 @@ typedef struct field_desc_tag {
 
     field_desc_tag(const field_desc_tag& other)
     {
+        // 拷贝构造做深拷贝，保证两个 field_desc 各自拥有自己的 payload。
         present = other.present;
         data_size = other.data_size;
         capacity = other.data_size;
@@ -130,6 +139,7 @@ typedef struct field_desc_tag {
         if (this == &other)
             return *this;
 
+        // 赋值时优先复用已有缓冲；只有空间不够时才重新分配。
         present = other.present;
         data_size = other.data_size;
 
@@ -151,7 +161,7 @@ typedef struct field_desc_tag {
   
     field_desc_tag(field_desc_tag&& other) noexcept
     {
-        // cout<<"Move"<<endl;
+        // 移动构造直接接管指针所有权，源对象被清空。
         present = other.present;
         data_size = other.data_size;
         capacity = other.capacity;
@@ -162,7 +172,7 @@ typedef struct field_desc_tag {
         other.data = nullptr;
     }
     field_desc_tag& operator=(field_desc_tag&& other) noexcept{
-        // cout<<"Move="<<endl;
+        // 移动赋值先释放自己原来的 payload，再接管对方缓冲。
         if(this != &other){
             delete [] data;
             data = nullptr;
@@ -179,9 +189,8 @@ typedef struct field_desc_tag {
     }
 
     ~field_desc_tag() {
-        // cout<<"~field_desc_tag"<<endl;
+        // data 始终由 field_desc 自己负责释放。
         if(data != nullptr){
-            // cout<<"delete"<<endl;
             delete[] data;
             data = nullptr;
         }
@@ -286,6 +295,8 @@ typedef struct field_desc_tag {
 
 // };
 struct fixed_field_block {
+    // 一个 row_block 内的 fixed fields 压缩结果。
+    // 这里的 gt_block 保存的是 GT index payload，不是原始 GT 字节。
 
     std::vector<uint8_t> chrom;
     std::vector<uint8_t> id;
@@ -351,6 +362,7 @@ static constexpr uint32_t GSC_FIXED_FIELDS_RB_VERSION_LATEST = GSC_FIXED_FIELDS_
 
 struct fixed_fields_row_block_meta
 {
+    // 目录项：记录一个 row_block 覆盖的变体数和位置范围。
     uint32_t variant_count = 0;
     int64_t first_pos = 0;
     int64_t last_pos = 0;
@@ -358,6 +370,8 @@ struct fixed_fields_row_block_meta
 
 struct fixed_field_chunk
 {
+    // 一个 chunk 由多个 row_block 组成；
+    // row_blocks 保存 fixed fields，gt_row_blocks 则单独保存对应 GT index。
     uint32_t no_variants = 0;
     std::vector<fixed_field_block> row_blocks; // fixed fields only; gt_block stored separately
     std::vector<fixed_fields_row_block_meta> row_meta;
@@ -372,6 +386,8 @@ struct fixed_field_chunk
     }
 };
 struct SPackage {
+    // other fields 并行压缩时在线程间传递的包。
+    // 一个 key 通常会拆成 size/data 两个 stream，并按 part_id 对齐。
 
 	int key_id;
 	uint32_t stream_id_size;

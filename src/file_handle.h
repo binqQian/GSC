@@ -11,6 +11,8 @@
 #include <condition_variable> 
 using namespace std;
 
+// lossless part2 的多流容器：
+// 每个 stream 由多个 part 组成，文件尾 footer 记录每个 part 的 offset/size。
 class File_Handle_2 {
 private:
 	bool input_mode;
@@ -22,6 +24,7 @@ private:
 	bool use_range = false;
 
 	struct part_t{
+		// 一个 part 对应 stream 中的一段连续 payload。
 		size_t offset;
 		size_t size;
 
@@ -33,6 +36,7 @@ private:
 	};
 
 	typedef struct {
+		// cur_id 在写模式下表示已分配 part 数，在读模式下表示当前读取游标。
 		string stream_name;
 		size_t cur_id;
 		vector<part_t> parts;
@@ -43,6 +47,7 @@ private:
 
 	bool serialize();
 	bool deserialize();
+	// footer 内部使用的轻量写读函数。
 	size_t WriteFixed(size_t x, FILE* file);
 	size_t Write(size_t x, FILE* file);
 	size_t Write(string s, FILE* file);
@@ -59,6 +64,10 @@ public:
 	bool OpenRange(const string& temp_file2_fname, size_t range_begin, size_t range_size);
 	bool Close();
 
+	// 写模式下：
+	// 1. RegisterStream 注册逻辑流
+	// 2. AddPartPrepare 预留 part_id
+	// 3. AddPartComplete 按顺序补齐真实数据
 	int RegisterStream(string stream_name);
 	int GetStreamId(string stream_name);
 
@@ -67,6 +76,7 @@ public:
 	bool AddPartComplete(int stream_id, int part_id, vector<uint8_t>& v_data);
 	void AddParamsPart(int stream_id,vector<uint8_t> & v_data);
 
+	// 读模式下按 stream 顺序迭代取 part；ResetStreamPartIterator 可回到开头。
 	bool GetPart(int stream_id, vector<uint8_t> &v_data);
 	void SetRawSize(int stream_id, size_t raw_size);
 	size_t GetRawSize(int stream_id);
@@ -83,6 +93,8 @@ public:
 		return m_streams.size();
 	}
 };
+
+// 简单的带缓冲输出器，支持字节流和位流写出。
 class COutFile
 {
 	const size_t BUFFER_SIZE = 4 << 20;
@@ -108,6 +120,7 @@ public:
 
 	bool Open(string file_name, const char* write_mode)
 	{
+		// 这里只负责打开文件和准备大缓冲，不做格式层逻辑。
 		if (f)
 			return false;
 		
@@ -126,6 +139,7 @@ public:
 
 	bool Close()
 	{
+		// Close 会把残留缓冲刷盘，但不会自动补齐位流尾部。
 		if (!f)
 			return true;
 
@@ -171,6 +185,7 @@ public:
 	}
 	bool PutBit(uint32_t word)
 	{
+		// 把 bit 先攒到 byte_buffer，凑满 8 位再真正写盘。
 		if(bit_pos < 8)
 		{
 			
@@ -191,6 +206,7 @@ public:
 		return true;
 	};
 	void FlushPartialByteBuffer(){
+		// 位流写完后要显式 flush，否则最后不足 1 字节的内容会丢失。
 		if(bit_pos){
 			
 			PutByte(byte_buffer);

@@ -17,10 +17,15 @@
 
 using namespace std;
 
+// 这些队列把压缩/解压各阶段串起来：
+// - 有的保证 FIFO
+// - 有的额外按 block_id 排序
+// - Complete() / producer 计数用于通知消费者安全退出
 // ********************************************************************************
 #include <atomic>
 #include <vector>
 
+// GT 原始缓冲池：按 size 分桶复用 unsigned char*，减少频繁 new/delete。
 class GtBufferPool
 {
 public:
@@ -154,6 +159,7 @@ public:
 
     ~GtBlockQueue()
     {
+        // 队列销毁时把尚未被消费的 GT 缓冲归还到池中。
         std::unique_lock<std::mutex> lck(m_mutex);
         while (!g_blocks.empty())
         {
@@ -169,6 +175,7 @@ public:
 
     unsigned char *AcquireBuffer(size_t size)
     {
+        // 压缩读取线程从这里借缓冲，后续由 worker/aggregator 再归还。
         return buffer_pool.Acquire(size);
     }
 
@@ -179,6 +186,7 @@ public:
 
     void Push(int id_block, uint32_t col_block_id, unsigned char *data, size_t data_size, size_t num_rows, std::vector<variant_desc_t> &v_vcf_data_compress)
     {
+        // 有界阻塞队列：满了就等；若已 Complete，则直接归还 data。
         {
             std::unique_lock<std::mutex> lck(m_mutex);
             cv_push.wait(lck, [this] { return g_blocks.size() < capacity || flag; });
@@ -196,6 +204,7 @@ public:
 
     bool Pop(int &id_block, uint32_t &col_block_id, unsigned char *&data, size_t &data_size, size_t &num_rows, std::vector<variant_desc_t> &v_vcf_data_compress)
     {
+        // Complete 且队列清空后返回 false，通知 worker 退出。
         std::unique_ptr<genotype_block_t> block;
 
         {
@@ -223,6 +232,7 @@ public:
 
     void Complete()
     {
+        // 唤醒所有等待中的 push/pop，让上下游线程安全收尾。
         {
             std::unique_lock<std::mutex> lck(m_mutex);
             flag = true;
@@ -234,6 +244,7 @@ public:
 private:
     struct genotype_block_t
     {
+        // 一个 GT 块 = 行块编号 + 列块编号 + 原始位流 + 可能携带的变体描述。
         int block_id;
         uint32_t col_block_id;  // NEW: column block ID for tiling support
         unsigned char *data;
@@ -769,6 +780,7 @@ public:
     
     void Push(uint32_t id_block, DataType data)
     {
+        // 简单 FIFO 有界队列，主要给 fixed fields chunk / payload 这类阶段使用。
         unique_lock<std::mutex> lck(m_mutex);
         cv_push.wait(lck, [this] {return var_blocks.size() < capacity || flag;});
         if (flag)
@@ -781,6 +793,7 @@ public:
     
     bool Pop(uint32_t &id_block, DataType &data)
     {
+        // Complete 且队列已空时返回 false。
         unique_lock<std::mutex> lck(m_mutex);
         cv_pop.wait(lck, [this] {return !var_blocks.empty() || flag; });
         if (flag && var_blocks.empty())
@@ -799,6 +812,7 @@ public:
     
     void Complete()
     {
+        // 与 GtBlockQueue 一样，Complete 只表示“不再有新数据”，不是清空现有数据。
         unique_lock<std::mutex> lck(m_mutex);
         
         flag = true;
@@ -843,6 +857,7 @@ private:
     } comp_fixed_fields_t;
     
     set<comp_fixed_fields_t> fixed_fields;
+    // 这里用 set 而不是 queue，是为了按 block_id 有序弹出。
 
     mutex m_mutex;
 
@@ -855,6 +870,7 @@ public:
     
     void Push(uint32_t _block_id,DataType &_comp_v_data)
     {
+        // 插入后不阻塞等待，适合体量较小、需要按 id 排序的结果集合。
         lock_guard<std::mutex> lck(m_mutex);
 
         fixed_fields.insert(comp_fixed_fields_t(_block_id,_comp_v_data));
@@ -863,7 +879,7 @@ public:
     
     bool Pop(uint32_t &block_id,DataType &comp_v_data)
     {
-        
+        // 每次取当前最小 block_id，调用方负责自己控制何时停止轮询。
         unique_lock<std::mutex> lck(m_mutex);
         
         if (fixed_fields.empty())
@@ -895,6 +911,7 @@ public:
     
     void Push(PartType &data)
     {
+        // 供 other fields 压缩阶段使用的有界队列。
         unique_lock<std::mutex> lck(m_mutex);
         cv_push.wait(lck, [this] {return part_queue.size() < capacity || flag;});
         if (flag)
@@ -934,6 +951,7 @@ public:
     template<typename S>
     bool Pop(PartType &data,const std::function<bool(S &item)> fo)
     {
+        // 可按谓词优先挑选某类 part；找不到匹配项时退回队首。
         unique_lock<std::mutex> lck(m_mutex);
         cv_pop.wait(lck, [this] {return !part_queue.empty() || flag; });
         if (flag && part_queue.empty())
@@ -958,6 +976,7 @@ public:
     
     void Complete()
     {
+        // 通知消费者不再有新 part。
         unique_lock<std::mutex> lck(m_mutex);
         
         flag = true;
@@ -978,7 +997,7 @@ private:
 };
 template<typename PartType>
 class DecompressPartQueue
-{  
+{
 public:
     DecompressPartQueue() : flag(false), n_producers(0), n_elements(0)
     {}
@@ -991,6 +1010,7 @@ public:
     
     void PushQueue(PartType data)
     {
+        // 多生产者解压阶段使用：n_producers 控制整体结束条件。
         unique_lock<std::mutex> lck(m_mutex);
         
 		bool was_empty = n_elements == 0;
@@ -1005,6 +1025,7 @@ public:
 
     bool PopQueue(PartType &data)
 	{
+        // 只有当“队列为空且没有生产者”时才返回 false。
         unique_lock<std::mutex> lck(m_mutex);
 		cv_queue_empty.wait(lck, [this]{return !this->part_queue.empty() || !this->n_producers;}); 
 
@@ -1029,6 +1050,7 @@ public:
 	}
     void Complete()
     {
+        // 一个生产者完成时调用一次；最后一个生产者结束后唤醒消费者退出。
         unique_lock<std::mutex> lck(m_mutex);
         
 		n_producers--;

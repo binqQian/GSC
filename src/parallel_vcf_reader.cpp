@@ -4,6 +4,7 @@
 
 namespace gsc {
 
+// 构造后先处于未初始化状态，真正打开文件在 Initialize() 里完成。
 ParallelVCFReader::ParallelVCFReader(int threads)
     : fp_hts_(nullptr)
     , hdr_(nullptr)
@@ -29,7 +30,7 @@ bool ParallelVCFReader::Initialize(const char* filename)
         return false;
     }
 
-    // Open file using hts_open (auto-detects VCF/BCF/compressed formats)
+    // 统一入口：hts_open 会自动识别 VCF / BCF / 压缩格式。
     fp_hts_ = hts_open(filename, "r");
     if (!fp_hts_) {
         LogManager::Instance().Logger()->error("Failed to open file: {}", filename);
@@ -45,7 +46,9 @@ bool ParallelVCFReader::Initialize(const char* filename)
         return false;
     }
 
-    // Decide parsing strategy based on file format
+    // 解析策略选择：
+    // - BCF 直接单线程 bcf_read()
+    // - VCF/VCF.gz 走“主线程读文本 + worker 线程解析”
     if (fp_hts_->format.format == htsExactFormat::bcf) {
         // BCF files: use single-threaded bcf_read() (binary parsing is fast)
         use_parallel_parsing_ = false;
@@ -78,7 +81,7 @@ bool ParallelVCFReader::Initialize(const char* filename)
         return false;
     }
 
-    // Launch parser threads only for VCF files
+    // 只有文本 VCF 才需要启动解析线程。
     if (use_parallel_parsing_) {
         parser_threads_.reserve(num_threads_);
         for (int i = 0; i < num_threads_; ++i) {
@@ -93,14 +96,14 @@ bool ParallelVCFReader::Initialize(const char* filename)
 
 void ParallelVCFReader::ParserThread()
 {
-    // Each thread gets its own HTSlib context for thread safety
+    // 每个线程独占一套 htslib 上下文，避免跨线程共享 rec/hdr。
     std::unique_ptr<ParserContext> ctx(new ParserContext(hdr_));
     VCFLine line;
 
     while (line_queue_.pop(line)) {
         if (!line.is_valid) continue;
 
-        // Prepare kstring buffer
+        // 先把 std::string 行内容拷回 htslib 需要的 kstring。
         ctx->kstr.l = line.line.size();
         if (ctx->kstr.m < line.line.size() + 1) {
             ctx->kstr.s = (char*)realloc(ctx->kstr.s, line.line.size() + 1);
@@ -109,7 +112,7 @@ void ParallelVCFReader::ParserThread()
         memcpy(ctx->kstr.s, line.line.c_str(), line.line.size());
         ctx->kstr.s[line.line.size()] = '\0';
 
-        // Parse VCF text line into bcf1_t structure
+        // 把一行 VCF 文本解析成 bcf1_t，再复制出一个可交给主线程的对象。
         bcf1_t* rec_copy = nullptr;
         if (vcf_parse1(&ctx->kstr, ctx->hdr, ctx->rec) >= 0) {
             rec_copy = bcf_dup(ctx->rec);
@@ -126,8 +129,8 @@ void ParallelVCFReader::ParserThread()
                 line.seq, line.line.substr(0, 50));
         }
 
-        // CRITICAL: Always insert result (even if nullptr) to prevent deadlock
-        // The main thread is waiting for this specific sequence number
+        // 关键点：即使解析失败也要插入 nullptr 结果。
+        // 否则主线程会一直等这个 seq，形成死锁。
         {
             std::lock_guard<std::mutex> lock(results_mutex_);
             parsed_results_[line.seq] = rec_copy;
@@ -146,7 +149,7 @@ std::vector<bcf1_t*> ParallelVCFReader::ParseNextBatch()
     std::vector<bcf1_t*> batch_records;
     batch_records.reserve(VCF_PARSE_BATCH_SIZE);
 
-    // BCF mode: direct bcf_read() call (no parallelization needed)
+    // BCF 直接顺序读即可，省掉线程同步开销。
     if (!use_parallel_parsing_) {
         for (size_t i = 0; i < VCF_PARSE_BATCH_SIZE; ++i) {
             bcf1_t* rec = bcf_init();
@@ -162,11 +165,14 @@ std::vector<bcf1_t*> ParallelVCFReader::ParseNextBatch()
         return batch_records;
     }
 
-    // VCF mode: parallel parsing
+    // VCF 模式：
+    // 1. 主线程顺序读文本行
+    // 2. worker 并行解析
+    // 3. 主线程按 seq 顺序回收结果
     uint64_t batch_count = 0;
     kstring_t kstr = {0, 0, nullptr};
 
-    // Read and submit lines to parser threads
+    // 先把本批文本行投递出去。
     while (batch_count < VCF_PARSE_BATCH_SIZE) {
         int ret;
         if (fp_hts_->format.compression == htsCompression::bgzf) {
@@ -196,7 +202,7 @@ std::vector<bcf1_t*> ParallelVCFReader::ParseNextBatch()
         return batch_records;
     }
 
-    // Collect parsed results in order
+    // 再严格按 seq 顺序收集本批解析结果，保证变体顺序不变。
     for (uint64_t i = 0; i < batch_count; ++i) {
         uint64_t target_seq = next_seq_to_process_ + i;
 
@@ -231,7 +237,7 @@ void ParallelVCFReader::Cleanup()
 {
     if (!initialized_) return;
 
-    // Signal parser threads to finish
+    // 先通知 worker 停止，再 join，最后清理残留结果和 htslib 资源。
     if (use_parallel_parsing_) {
         line_queue_.finish();
         for (auto& thread : parser_threads_) {

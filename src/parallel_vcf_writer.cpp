@@ -3,6 +3,7 @@
 
 namespace gsc {
 
+// writer 默认是关闭状态；是否真的并行写由 Initialize() 决定。
 ParallelVCFWriter::ParallelVCFWriter()
     : fp_out_(nullptr)
     , hdr_(nullptr)
@@ -33,7 +34,7 @@ bool ParallelVCFWriter::Initialize(const char* filename, bcf_hdr_t* hdr,
         return false;
     }
 
-    // Open output file
+    // 打开输出文件并写 header；真正的数据写出可以放到后台线程。
     fp_out_ = hts_open(filename, mode);
     if (!fp_out_) {
         LogManager::Instance().Logger()->error("Failed to open output file: {}", filename);
@@ -61,7 +62,7 @@ bool ParallelVCFWriter::Initialize(const char* filename, bcf_hdr_t* hdr,
 
     use_parallel_writing_ = use_parallel;
 
-    // Launch writer thread if parallel writing is enabled
+    // 并行模式下，writer 线程独占所有 htslib 写调用。
     if (use_parallel_writing_) {
         writer_thread_ = std::thread(&ParallelVCFWriter::WriterThread, this);
         LogManager::Instance().Logger()->debug("Parallel VCF writer initialized");
@@ -91,7 +92,7 @@ bool ParallelVCFWriter::InitializeWithHandle(htsFile* fp, bcf_hdr_t* hdr, bool u
         return false;
     }
 
-    // Take ownership of the file handle (no need to open or write header)
+    // 这里直接接管已打开的句柄；header 视为外部已经写好。
     fp_out_ = fp;
 
     // Duplicate header for thread safety
@@ -119,12 +120,14 @@ bool ParallelVCFWriter::InitializeWithHandle(htsFile* fp, bcf_hdr_t* hdr, bool u
 
 void ParallelVCFWriter::WriterThread()
 {
+    // 唯一真正调用 bcf_write1() 的线程。
+    // 主线程只负责排队，不直接碰 htslib 写接口。
     bcf1_t* rec = nullptr;
 
     while (write_queue_.pop(rec)) {
         if (!rec) continue;
 
-        // Write record to file
+        // 串行写出一条记录；失败只记日志，不中断整个 writer。
         if (bcf_write1(fp_out_, hdr_, rec) < 0) {
             LogManager::Instance().Logger()->error(
                 "Failed to write variant at position {}",
@@ -134,7 +137,7 @@ void ParallelVCFWriter::WriterThread()
             total_written_++;
         }
 
-        // Recycle the record
+        // 写完后把 record 回收到对象池，降低分配成本。
         ReleaseRecord(rec);
 
         // Log progress periodically
@@ -151,6 +154,7 @@ void ParallelVCFWriter::WriterThread()
 
 bcf1_t* ParallelVCFWriter::AcquireRecord()
 {
+    // 优先复用对象池里的 bcf1_t；没有时再新建。
     std::lock_guard<std::mutex> lock(pool_mutex_);
     if (!record_pool_.empty())
     {
@@ -164,6 +168,7 @@ bcf1_t* ParallelVCFWriter::AcquireRecord()
 
 void ParallelVCFWriter::ReleaseRecord(bcf1_t* rec)
 {
+    // 池满了就直接销毁，避免对象池无限增长。
     if (!rec)
         return;
     std::lock_guard<std::mutex> lock(pool_mutex_);
@@ -190,12 +195,12 @@ bool ParallelVCFWriter::WriteRecord(bcf1_t* rec)
     }
 
     if (use_parallel_writing_) {
-        // Submit to write queue with sequence number
+        // 并行模式下只负责分配 seq 并投递给 writer 线程。
         uint64_t seq = next_write_seq_.fetch_add(1);
         write_queue_.push(seq, rec);
     }
     else {
-        // Direct write in serial mode
+        // 串行模式直接在当前线程写出。
         if (bcf_write1(fp_out_, hdr_, rec) < 0) {
             LogManager::Instance().Logger()->error(
                 "Failed to write variant at position {}", rec->pos);
@@ -216,7 +221,7 @@ void ParallelVCFWriter::Finalize()
     LogManager::Instance().Logger()->info("Finalizing VCF writer, total written: {}",
                                           total_written_.load());
 
-    // Signal writer thread to finish
+    // 先停 writer，再关文件，最后清对象池。
     if (use_parallel_writing_ && writer_thread_.joinable()) {
         write_queue_.finish();
         writer_thread_.join();

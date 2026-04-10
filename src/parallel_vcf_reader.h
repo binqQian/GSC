@@ -19,6 +19,7 @@
 
 namespace gsc {
 
+// 并行读取的基础参数：批大小决定吞吐，队列大小决定前后端解耦程度。
 // Constants for parallel parsing
 const size_t VCF_PARSE_BATCH_SIZE = 50000;  // Variants per batch
 const size_t VCF_PARSE_QUEUE_SIZE = 12;     // Line queue capacity
@@ -36,7 +37,7 @@ const size_t VCF_PARSE_QUEUE_SIZE = 12;     // Line queue capacity
  */
 class ParallelVCFReader {
 private:
-    // VCF text line with sequence number for ordered delivery
+    // 带序号的文本行：多线程解析后仍然要按 seq 恢复原始顺序。
     struct VCFLine {
         uint64_t seq;
         std::string line;
@@ -45,7 +46,8 @@ private:
         VCFLine() : seq(0), is_valid(false) {}
     };
 
-    // Thread-safe queue template with capacity limit
+    // 简单有界线程安全队列。
+    // finish() 后，等待中的 push/pop 都会被唤醒。
     template<typename T>
     class ThreadSafeQueue {
     private:
@@ -101,7 +103,7 @@ private:
         }
     };
 
-    // Parser thread context with independent HTSlib structures
+    // 每个解析线程各自持有一套 htslib 上下文，避免跨线程共享 rec/hdr。
     struct ParserContext {
         bcf_hdr_t* hdr;
         bcf1_t* rec;
@@ -124,14 +126,15 @@ private:
         ParserContext& operator=(const ParserContext&) = delete;
     };
 
-    // Member variables
+    // 主文件句柄和模式控制。
     htsFile* fp_hts_;
     bcf_hdr_t* hdr_;
     int num_threads_;
     bool initialized_;
     bool use_parallel_parsing_;
 
-    // Parallel parsing infrastructure
+    // 并行解析基础设施：
+    // 主线程负责读文本行，worker 线程负责解析成 bcf1_t，再按 seq 回收结果。
     ThreadSafeQueue<VCFLine> line_queue_;
     std::vector<std::thread> parser_threads_;
     std::mutex results_mutex_;
@@ -141,7 +144,7 @@ private:
     std::atomic<uint64_t> total_parsed_;
     bool parsing_finished_;
 
-    // Parser worker thread function
+    // worker 线程函数：不断消费文本行并产出已解析记录。
     void ParserThread();
 
 public:
