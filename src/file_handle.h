@@ -21,6 +21,8 @@ private:
 	string file_name;
 	size_t range_begin = 0;
 	size_t range_end = 0;
+	size_t file_size = 0;
+	size_t payload_size = 0;
 	bool use_range = false;
 
 	struct part_t{

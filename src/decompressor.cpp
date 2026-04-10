@@ -663,8 +663,18 @@ bool Decompressor::decompressProcess()
                 while (no_actual_variants--)
                 {
                     buf->all_fields.emplace_back(vector<field_desc>(decompression_reader.keys.size()));
-                    decompression_reader.GetVariants(buf->all_fields.back());
+                    if (!decompression_reader.GetVariants(buf->all_fields.back()))
+                    {
+                        logger->error("process_thread: GetVariants FAILED at chunk_id={}", chunk_id);
+                        abort.store(true, std::memory_order_relaxed);
+                        ok.store(false, std::memory_order_relaxed);
+                        ready_q.Complete();
+                        free_q.Complete();
+                        break;
+                    }
                 }
+                if (abort.load(std::memory_order_relaxed))
+                    break;
             }
 
             uint32_t variants_before = 0;
@@ -1214,44 +1224,18 @@ void Decompressor::appendVCF(variant_desc_t &_desc, vector<uint8_t> &_my_str, si
   
     if (out_genotypes)
     {
-        if(count <= INT8_MAX && count > INT8_MIN+1){
-            gt_arr_i8.resize(_no_haplotypes);
+        gt_arr_i32.resize(_no_haplotypes);
 
-            int t = 0;
-            for (auto cur_genotype : _my_str)
-            {
-                if (cur_genotype == '.')
-                    gt_arr_i8[t++] = bcf_gt_missing;
-                else
-                    gt_arr_i8[t++] = bcf_gt_phased(int(cur_genotype - '0'));
+        int t = 0;
+        for (auto cur_genotype : _my_str)
+        {
+            if (cur_genotype == '.')
+                gt_arr_i32[t++] = bcf_gt_missing;
+            else
+                gt_arr_i32[t++] = bcf_gt_phased(int(cur_genotype - '0'));
 
-            }
-            
-            str.l = 3;
-            memcpy(str.s + str.l, gt_arr_i8.data(), _no_haplotypes * sizeof(int8_t));
-            str.l += _no_haplotypes;
-            str.s[str.l] = 0;
-            // for(int i=0;i<str.l;i++)
-            //     std::cerr<<(int)str.s[i]<;
-    
-            // bcf_update_genotypes(out_hdr, rec, gt_arr.data(), _no_haplotypes);
-            bcf_update_genotypes_fast(out_hdr, rec,str);
         }
-        else{
-
-            gt_arr_i32.resize(_no_haplotypes);
-
-            int t = 0;
-            for (auto cur_genotype : _my_str)
-            {
-                if (cur_genotype == '.')
-                    gt_arr_i32[t++] = bcf_gt_missing;
-                else
-                    gt_arr_i32[t++] = bcf_gt_phased(int(cur_genotype - '0'));
-
-            }
-            bcf_update_genotypes(out_hdr, rec, gt_arr_i32.data(), _no_haplotypes);
-        }
+        bcf_update_genotypes(out_hdr, rec, gt_arr_i32.data(), _no_haplotypes);
     }
     if(params.split_flag){
 
@@ -1405,95 +1389,42 @@ void Decompressor::appendVCFToRec(variant_desc_t &_desc, vector<uint8_t> &_genot
             uint32_t actual_samples = _standard_block_size / decompression_reader.ploidy;
             bool is_sample_subset = (actual_samples != decompression_reader.n_samples);
 
-            bool GT_NULL_flag = false;
-            for(uint32_t i = 0; i < actual_samples; i++)
-                if(_genotype[i] == '.'){
-                    GT_NULL_flag = true;
-                    break;
-                }
-            if(count <= INT8_MAX && count > INT8_MIN+1&&!GT_NULL_flag){
-
-                gt_arr_u8.resize(_standard_block_size);
-                uint32_t t = 0;
-                int cur_gt = 0;
-                for(uint32_t i = 0; i < actual_samples; i++){
-                    cur_gt = i*decompression_reader.ploidy;
+            gt_arr_i32.resize(_standard_block_size);
+            uint32_t t = 0;
+            int cur_gt = 0;
+            for(uint32_t i = 0; i < actual_samples; i++){
+                cur_gt = i*decompression_reader.ploidy;
+                if(_genotype[cur_gt] == '.')
+                    gt_arr_i32[cur_gt] = bcf_gt_missing;
+                else
+                    gt_arr_i32[cur_gt] = bcf_gt_unphased(_genotype[cur_gt]-'0');
+                for(uint32_t j = 1;j< (uint32_t)decompression_reader.ploidy;j++){
+                    cur_gt++;
+                    // In sample subset mode, use phase info from the original sample
+                    uint32_t orig_sample_idx = is_sample_subset ? sampleIDs[i] : i;
+                    uint32_t phase_idx = orig_sample_idx * (decompression_reader.ploidy - 1) + (j - 1);
+                    char phase_char = (phase_idx < _fields[id].data_size) ? _fields[id].data[phase_idx] : '|';
+                    if(phase_char == '/'){
                     if(_genotype[cur_gt] == '.')
-                        gt_arr_u8[cur_gt] = bcf_gt_missing;
-                    else
-                        gt_arr_u8[cur_gt] = bcf_gt_unphased((int)(_genotype[cur_gt]-'0'));
-                    for(uint32_t j = 1;j< (uint32_t)decompression_reader.ploidy;j++){
-                        cur_gt++;
-                        // In sample subset mode, use phase info from the original sample
-                        uint32_t orig_sample_idx = is_sample_subset ? sampleIDs[i] : i;
-                        uint32_t phase_idx = orig_sample_idx * (decompression_reader.ploidy - 1) + (j - 1);
-                        char phase_char = (phase_idx < _fields[id].data_size) ? _fields[id].data[phase_idx] : '|';
-                        if(phase_char == '/'){
-                            if(_genotype[cur_gt] == '.')
-                                    gt_arr_u8[cur_gt] = bcf_gt_missing;
-                                else
-                                    gt_arr_u8[cur_gt] = bcf_gt_unphased((int)(_genotype[cur_gt]-'0'));
-
-                        }
-                        else if(phase_char == '|'){
-                            if(_genotype[cur_gt] == '.')
-                                gt_arr_u8[cur_gt] = bcf_next_gt_missing;
-                            else
-                                gt_arr_u8[cur_gt] = bcf_gt_phased((int)(_genotype[cur_gt]-'0'));
-                        }
-                        if (!is_sample_subset)
-                            t++;
+                            gt_arr_i32[cur_gt] = bcf_gt_missing;
+                        else
+                            gt_arr_i32[cur_gt] = bcf_gt_unphased(_genotype[cur_gt]-'0');
 
                     }
-                }
-
-                str.l = 3;
-
-                memcpy(str.s + str.l, gt_arr_u8.data(), _standard_block_size * sizeof(uint8_t));
-                str.l += _standard_block_size;
-                str.s[str.l] = 0;
-
-                bcf_update_genotypes_fast(out_hdr, target_rec, str);
-            }
-            else{
-
-                gt_arr_i32.resize(_standard_block_size);
-                uint32_t t = 0;
-                int cur_gt = 0;
-                for(uint32_t i = 0; i < actual_samples; i++){
-                    cur_gt = i*decompression_reader.ploidy;
-                    if(_genotype[cur_gt] == '.')
-                        gt_arr_i32[cur_gt] = bcf_gt_missing;
-                    else
-                        gt_arr_i32[cur_gt] = bcf_gt_unphased(_genotype[cur_gt]-'0');
-                    for(uint32_t j = 1;j< (uint32_t)decompression_reader.ploidy;j++){
-                        cur_gt++;
-                        // In sample subset mode, use phase info from the original sample
-                        uint32_t orig_sample_idx = is_sample_subset ? sampleIDs[i] : i;
-                        uint32_t phase_idx = orig_sample_idx * (decompression_reader.ploidy - 1) + (j - 1);
-                        char phase_char = (phase_idx < _fields[id].data_size) ? _fields[id].data[phase_idx] : '|';
-                        if(phase_char == '/'){
+                    else if(phase_char == '|'){
                         if(_genotype[cur_gt] == '.')
-                                gt_arr_i32[cur_gt] = bcf_gt_missing;
-                            else
-                                gt_arr_i32[cur_gt] = bcf_gt_unphased(_genotype[cur_gt]-'0');
-
-                        }
-                        else if(phase_char == '|'){
-                            if(_genotype[cur_gt] == '.')
-                                gt_arr_i32[cur_gt] = bcf_next_gt_missing;
-                            else
-                                gt_arr_i32[cur_gt] = bcf_gt_phased(_genotype[cur_gt]-'0');
-                        }
-                        else{
-                            gt_arr_i32[cur_gt] =  GT_NOT_CALL;
-                        }
-                        if (!is_sample_subset)
-                            t++;
+                            gt_arr_i32[cur_gt] = bcf_next_gt_missing;
+                        else
+                            gt_arr_i32[cur_gt] = bcf_gt_phased(_genotype[cur_gt]-'0');
                     }
+                    else{
+                        gt_arr_i32[cur_gt] =  GT_NOT_CALL;
+                    }
+                    if (!is_sample_subset)
+                        t++;
                 }
-                bcf_update_genotypes(out_hdr, target_rec, gt_arr_i32.data(), _standard_block_size);
             }
+            bcf_update_genotypes(out_hdr, target_rec, gt_arr_i32.data(), _standard_block_size);
             continue;
         }
         if (_keys[id].keys_type == key_type_t::fmt)
@@ -3205,7 +3136,7 @@ int Decompressor::decompressAll(){
             }
             else
             {
-                if (fields_pos >= all_fields_io.size())
+                if (fields_pos < 0 || static_cast<size_t>(fields_pos) >= all_fields_io.size())
                 {
                     logger->error("decompressAll: fields_pos={} out of bounds (all_fields_io.size()={}, cur_block_id={}, i={})",
                                   fields_pos, all_fields_io.size(), cur_block_id, i);
@@ -3257,7 +3188,7 @@ int Decompressor::decompressAll(){
             }
             else
             {
-                if (fields_pos >= all_fields_io.size())
+                if (fields_pos < 0 || static_cast<size_t>(fields_pos) >= all_fields_io.size())
                 {
                     logger->error("decompressAll: fields_pos={} out of bounds (all_fields_io.size()={}, cur_block_id={}, c_out_line={})",
                                   fields_pos, all_fields_io.size(), cur_block_id, c_out_line);

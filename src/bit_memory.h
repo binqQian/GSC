@@ -13,6 +13,7 @@
 #include <iostream>
 #include <vector>
 #include <algorithm>
+#include <limits>
 using namespace std;
 
 typedef enum {mode_none, mode_file_read, mode_file_write, mode_file_read_ra, mode_mem_read, mode_mem_write, mode_mem_read_ra} t_mode;
@@ -276,20 +277,35 @@ bool CBitMemory::FlushInputWordBuffer()
 // 顺序写单字节；空间不够时自动扩容。
 bool CBitMemory::PutByte(const unsigned char byte)
 {
-    if(mem_buffer_pos + 1 > mem_buffer_size)
+    if (mem_buffer_pos < 0 || mem_buffer_size < 0)
+        return false;
+    if (mem_buffer_pos >= std::numeric_limits<int64_t>::max())
+        return false;
+
+    const int64_t required = mem_buffer_pos + 1;
+    if(required > mem_buffer_size)
     {
-        mem_buffer_size = (uint64_t) ((mem_buffer_pos + 1) * 1.5);
-        uint8_t *new_mem_buffer = new uint8_t[mem_buffer_size];
+        int64_t grow_by = std::max<int64_t>(1, mem_buffer_size / 2);
+        int64_t new_size = mem_buffer_size + grow_by;
+        if (new_size < required)
+            new_size = required;
+
+        uint8_t *new_mem_buffer = new uint8_t[new_size];
         if(mem_buffer)
         {
-            copy_n(mem_buffer, mem_buffer_pos, new_mem_buffer);
-            delete[] mem_buffer;
+            if (mem_buffer_pos > 0)
+                copy_n(mem_buffer, static_cast<size_t>(mem_buffer_pos), new_mem_buffer);
+            if (mem_buffer_ownership)
+                delete[] mem_buffer;
         }
         mem_buffer = new_mem_buffer;
+        mem_buffer_size = new_size;
+        // 一旦发生扩容，新缓冲一定由当前对象自己负责释放。
+        mem_buffer_ownership = true;
     }
-    
+
     mem_buffer[mem_buffer_pos++] = byte;
-    
+
     return true;
 }
 
@@ -298,19 +314,37 @@ bool CBitMemory::PutByte(const unsigned char byte)
 // 顺序写一段原始字节；空间不够时自动扩容。
 bool CBitMemory::PutBytes(const unsigned char *data, int64_t n_bytes)
 {
-   
-    if(mem_buffer_pos + n_bytes > mem_buffer_size)
+    if (n_bytes < 0 || mem_buffer_pos < 0 || mem_buffer_size < 0)
+        return false;
+    if (n_bytes == 0)
+        return true;
+    if (!data)
+        return false;
+    if (n_bytes > std::numeric_limits<int64_t>::max() - mem_buffer_pos)
+        return false;
+
+    const int64_t required = mem_buffer_pos + n_bytes;
+    if(required > mem_buffer_size)
     {
-        mem_buffer_size = (uint64_t) ((mem_buffer_pos + n_bytes) * 1.5);
-        uint8_t *new_mem_buffer = new uint8_t[mem_buffer_size];
+        int64_t grow_by = std::max<int64_t>(1, mem_buffer_size / 2);
+        int64_t new_size = mem_buffer_size + grow_by;
+        if (new_size < required)
+            new_size = required;
+
+        uint8_t *new_mem_buffer = new uint8_t[new_size];
         if(mem_buffer)
         {
-            copy_n(mem_buffer, mem_buffer_pos, new_mem_buffer);
-            delete[] mem_buffer;
+            if (mem_buffer_pos > 0)
+                copy_n(mem_buffer, static_cast<size_t>(mem_buffer_pos), new_mem_buffer);
+            if (mem_buffer_ownership)
+                delete[] mem_buffer;
         }
         mem_buffer = new_mem_buffer;
+        mem_buffer_size = new_size;
+        // 一旦发生扩容，新缓冲一定由当前对象自己负责释放。
+        mem_buffer_ownership = true;
     }
-    copy_n(data, n_bytes, mem_buffer+mem_buffer_pos);
+    copy_n(data, static_cast<size_t>(n_bytes), mem_buffer+mem_buffer_pos);
     mem_buffer_pos += n_bytes;
     
     return true;

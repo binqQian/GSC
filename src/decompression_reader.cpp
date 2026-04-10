@@ -4,6 +4,7 @@
 #include <atomic>
 #include <algorithm>
 #include <chrono>
+#include <fstream>
 #include <limits>
 #include <unistd.h>
 
@@ -71,6 +72,21 @@ bool DecompressionReader::OpenReading(const string &in_file_name, const bool &_d
 			temp_file.close();
 		}
 	}
+
+	std::ifstream size_stream(fname, std::ios::binary | std::ios::ate);
+	if (!size_stream)
+	{
+		logger->error("Could not stat file `{}`", fname);
+		return false;
+	}
+	const std::streamoff end_pos = size_stream.tellg();
+	if (end_pos < 0)
+	{
+		logger->error("Could not determine file size for `{}`", fname);
+		return false;
+	}
+	const uint64_t file_size = static_cast<uint64_t>(end_pos);
+	size_stream.close();
 	// sdsl vectors
 	sdsl::isfstream in(fname, std::ios::binary | std::ios::in);
 	if (!in)
@@ -85,9 +101,27 @@ bool DecompressionReader::OpenReading(const string &in_file_name, const bool &_d
 	uint64_t other_fields_offset;
 	uint64_t sdsl_offset;
 	bool mode_type;
+	const uint64_t header_size = sizeof(mode_type) + sizeof(other_fields_offset) + sizeof(sdsl_offset);
+	if (file_size < header_size)
+	{
+		logger->error("Corrupted `.gsc`: file too small for header ({} bytes)", file_size);
+		return false;
+	}
 	in.read((char *)&mode_type, sizeof(bool));
 	in.read((char *)&other_fields_offset, sizeof(uint64_t));
 	in.read((char *)&sdsl_offset, sizeof(uint64_t));
+	if (!in)
+	{
+		logger->error("Corrupted `.gsc`: failed to read header");
+		return false;
+	}
+	if (other_fields_offset < header_size || other_fields_offset > file_size ||
+		sdsl_offset < other_fields_offset || sdsl_offset > file_size)
+	{
+		logger->error("Corrupted `.gsc`: invalid offsets (other_fields_offset={}, sdsl_offset={}, file_size={})",
+					  other_fields_offset, sdsl_offset, file_size);
+		return false;
+	}
 	file_mode_type = mode_type;
 	part2_in_place = false;
 	temp_file2_owned = false;
@@ -111,8 +145,19 @@ bool DecompressionReader::OpenReading(const string &in_file_name, const bool &_d
 	rrr_zeros_bit_vector[1].load(in);
 	rrr_copy_bit_vector[0].load(in);
 	rrr_copy_bit_vector[1].load(in);
-	in.seekg(sizeof(mode_type) + sizeof(other_fields_offset) + sizeof(sdsl_offset), std::ios::beg); // 17 = sizeof()
-	uint64_t FileStartPosition = in.tellg();
+	in.seekg(header_size, std::ios::beg);
+	if (!in)
+	{
+		logger->error("Corrupted `.gsc`: failed to seek to archive start");
+		return false;
+	}
+	uint64_t FileStartPosition = static_cast<uint64_t>(in.tellg());
+	const uint64_t archive_size = other_fields_offset - FileStartPosition;
+	if (archive_size == 0)
+	{
+		logger->error("Corrupted `.gsc`: empty main archive region");
+		return false;
+	}
 
 	in.close();
 	if (sdsl::util::verbose)
@@ -163,95 +208,137 @@ bool DecompressionReader::OpenReading(const string &in_file_name, const bool &_d
 
 #endif
 	uint32_t chunks_streams_size;
-	memcpy(&chunks_streams_size, buf + buf_pos, sizeof(uint32_t));
-	buf_pos = buf_pos + sizeof(uint32_t);
+	auto ensure_bytes = [&](uint64_t bytes, const char *what) -> bool
+	{
+		if (bytes == 0)
+			return true;
+		if (buf_pos > archive_size || bytes > archive_size - buf_pos)
+		{
+			logger->error("Corrupted `.gsc`: truncated {}", what);
+			return false;
+		}
+		return true;
+	};
+	auto read_exact = [&](void *dst, uint64_t bytes, const char *what) -> bool
+	{
+		if (!ensure_bytes(bytes, what))
+			return false;
+		std::memcpy(dst, buf + buf_pos, static_cast<size_t>(bytes));
+		buf_pos += bytes;
+		return true;
+	};
+	auto ensure_array = [&](uint64_t count, uint64_t elem_size, const char *what) -> bool
+	{
+		if (elem_size == 0)
+			return true;
+		if (buf_pos > archive_size || count > (archive_size - buf_pos) / elem_size)
+		{
+			logger->error("Corrupted `.gsc`: invalid {} count/size (count={}, elem_size={})",
+						  what, count, elem_size);
+			return false;
+		}
+		return true;
+	};
+
+	if (!read_exact(&chunks_streams_size, sizeof(uint32_t), "chunk stream count"))
+		return false;
+	if (chunks_streams_size > (archive_size - buf_pos) / (sizeof(uint32_t) + sizeof(size_t)))
+	{
+		logger->error("Corrupted `.gsc`: unreasonable chunk stream count {}", chunks_streams_size);
+		return false;
+	}
 	// std::cerr<<"chunks_streams_size: "<<chunks_streams_size<<endl;
 	for (uint32_t i = 0; i < chunks_streams_size; i++)
 	{
 		size_t offset;
 		uint32_t cur_chunk_actual_pos;
 
-		memcpy(&cur_chunk_actual_pos, buf + buf_pos, sizeof(uint32_t));
-		buf_pos = buf_pos + sizeof(uint32_t);
-
-		memcpy(&offset, buf + buf_pos, sizeof(size_t));
-		buf_pos = buf_pos + sizeof(size_t);
+		if (!read_exact(&cur_chunk_actual_pos, sizeof(uint32_t), "chunk actual position"))
+			return false;
+		if (!read_exact(&offset, sizeof(size_t), "chunk offset"))
+			return false;
 
 		chunks_streams[i].cur_chunk_actual_pos = cur_chunk_actual_pos;
 		chunks_streams[i].offset = offset;
 	}
-	memcpy(&ploidy, buf + buf_pos, sizeof(uint8_t));
-	buf_pos = buf_pos + sizeof(uint8_t);
-
-	memcpy(&max_block_rows, buf + buf_pos, sizeof(uint32_t));
-	buf_pos = buf_pos + sizeof(uint32_t);
-
-	memcpy(&max_block_cols, buf + buf_pos, sizeof(uint32_t));
-	buf_pos = buf_pos + sizeof(uint32_t);
-
-	memcpy(&vec_len, buf + buf_pos, sizeof(uint64_t));
-	buf_pos = buf_pos + sizeof(uint64_t);
-
-	memcpy(&no_vec, buf + buf_pos, sizeof(uint64_t));
-	buf_pos = buf_pos + sizeof(uint64_t);
-
-	memcpy(&no_copy, buf + buf_pos, sizeof(uint64_t));
-	buf_pos = buf_pos + sizeof(uint64_t);
-
-	memcpy(&used_bits_cp, buf + buf_pos, sizeof(char));
-	buf_pos = buf_pos + sizeof(char);
-
-	memcpy(&bm_comp_cp_size, buf + buf_pos, sizeof(int));
-	buf_pos = buf_pos + sizeof(int);
-
+	if (!read_exact(&ploidy, sizeof(uint8_t), "ploidy"))
+		return false;
+	if (!read_exact(&max_block_rows, sizeof(uint32_t), "max_block_rows"))
+		return false;
+	if (!read_exact(&max_block_cols, sizeof(uint32_t), "max_block_cols"))
+		return false;
+	if (!read_exact(&vec_len, sizeof(uint64_t), "vec_len"))
+		return false;
+	if (!read_exact(&no_vec, sizeof(uint64_t), "no_vec"))
+		return false;
+	if (!read_exact(&no_copy, sizeof(uint64_t), "no_copy"))
+		return false;
+	if (!read_exact(&used_bits_cp, sizeof(char), "used_bits_cp"))
+		return false;
+	if (!read_exact(&bm_comp_cp_size, sizeof(int), "bm_comp_cp_size"))
+		return false;
+	if (!ensure_bytes(bm_comp_cp_size, "copy-origin bitmap payload"))
+		return false;
 	bm_comp_copy_orgl_id.Open(buf + buf_pos, bm_comp_cp_size);
 	buf_pos = buf_pos + sizeof(uint8_t) * bm_comp_cp_size;
 
 	// memcpy(&max_no_vec_in_block, buf + buf_pos, sizeof(uint32_t));
 	// buf_pos = buf_pos + sizeof(uint32_t);
 
-	memcpy(&n_samples, buf + buf_pos, sizeof(uint32_t));
-	buf_pos = buf_pos + sizeof(uint32_t);
+	if (!read_exact(&n_samples, sizeof(uint32_t), "n_samples"))
+		return false;
 
 	uint32_t chunks_min_pos_size;
-	memcpy(&chunks_min_pos_size, buf + buf_pos, sizeof(uint32_t));
-	buf_pos = buf_pos + sizeof(uint32_t);
+	if (!read_exact(&chunks_min_pos_size, sizeof(uint32_t), "chunks_min_pos_size"))
+		return false;
 	// std::cerr<<"chunks_min_pos_size: "<<chunks_min_pos_size<<endl;
+	if (!ensure_array(chunks_min_pos_size, sizeof(int64_t), "chunks_min_pos"))
+		return false;
 	chunks_min_pos.resize(chunks_min_pos_size);
-	memcpy(&chunks_min_pos[0], buf + buf_pos, chunks_min_pos_size * sizeof(int64_t));
-	buf_pos = buf_pos + chunks_min_pos_size * sizeof(int64_t);
+	if (chunks_min_pos_size)
+		std::memcpy(chunks_min_pos.data(), buf + buf_pos, static_cast<size_t>(chunks_min_pos_size) * sizeof(int64_t));
+	buf_pos = buf_pos + static_cast<uint64_t>(chunks_min_pos_size) * sizeof(int64_t);
 	// for(uint32_t i = 0; i < chunks_min_pos_size; i++){
 	// 	std::cerr<<chunks_min_pos[i]<<endl;
 	// }
 	uint32_t where_chrom_size;
-	memcpy(&where_chrom_size, buf + buf_pos, sizeof(uint32_t));
-	buf_pos = buf_pos + sizeof(uint32_t);
+	if (!read_exact(&where_chrom_size, sizeof(uint32_t), "where_chrom_size"))
+		return false;
+	if (where_chrom_size > (archive_size - buf_pos) / (sizeof(size_t) + sizeof(uint32_t)))
+	{
+		logger->error("Corrupted `.gsc`: unreasonable where_chrom count {}", where_chrom_size);
+		return false;
+	}
 
 	d_where_chrom.resize(where_chrom_size);
 	// std::cerr<<where_chrom_size<<endl;
 	for (size_t i = 0; i < where_chrom_size; ++i)
-	{
-		size_t chrom_size;
-		memcpy(&chrom_size, buf + buf_pos, sizeof(size_t));
-		buf_pos = buf_pos + sizeof(size_t);
-		// std::cerr<<chrom_size<<endl;
-		d_where_chrom[i].first.resize(chrom_size);
-		memcpy(&d_where_chrom[i].first[0], buf + buf_pos, chrom_size * sizeof(char));
-		buf_pos = buf_pos + chrom_size * sizeof(char);
+		{
+			size_t chrom_size;
+			if (!read_exact(&chrom_size, sizeof(size_t), "chrom name size"))
+				return false;
+			// std::cerr<<chrom_size<<endl;
+			d_where_chrom[i].first.resize(chrom_size);
+			if (!ensure_bytes(chrom_size * sizeof(char), "chrom name"))
+				return false;
+			if (chrom_size)
+				std::memcpy(&d_where_chrom[i].first[0], buf + buf_pos, chrom_size * sizeof(char));
+			buf_pos = buf_pos + chrom_size * sizeof(char);
 
-		memcpy(&d_where_chrom[i].second, buf + buf_pos, sizeof(uint32_t));
-		buf_pos = buf_pos + sizeof(uint32_t);
-	}
+			if (!read_exact(&d_where_chrom[i].second, sizeof(uint32_t), "chrom chunk boundary"))
+				return false;
+		}
 
 	// 尝试读取 GT 列分块元数据；老文件没有这一段，需要回退到旧路径。
-	if (buf_pos + sizeof(uint32_t) <= sdsl_offset)
+	if (buf_pos + sizeof(uint32_t) <= archive_size)
 	{
 		uint32_t saved_pos = buf_pos;
-		memcpy(&n_col_blocks, buf + buf_pos, sizeof(uint32_t));
-		buf_pos += sizeof(uint32_t);
+		if (!read_exact(&n_col_blocks, sizeof(uint32_t), "column block count"))
+			return false;
 
 		// Validate that n_col_blocks is reasonable (between 1 and 10000)
-		if (n_col_blocks > 0 && n_col_blocks <= 10000)
+		if (n_col_blocks > 0 && n_col_blocks <= 10000 &&
+			n_col_blocks <= (archive_size - buf_pos) / (2 * sizeof(uint32_t)))
 		{
 			col_block_ranges.reserve(n_col_blocks);
 			col_block_vec_lens.reserve(n_col_blocks);
@@ -260,10 +347,10 @@ bool DecompressionReader::OpenReading(const string &in_file_name, const bool &_d
 			for (uint32_t cb = 0; cb < n_col_blocks; ++cb)
 			{
 				uint32_t start, size;
-				memcpy(&start, buf + buf_pos, sizeof(uint32_t));
-				buf_pos += sizeof(uint32_t);
-				memcpy(&size, buf + buf_pos, sizeof(uint32_t));
-				buf_pos += sizeof(uint32_t);
+				if (!read_exact(&start, sizeof(uint32_t), "column block start"))
+					return false;
+				if (!read_exact(&size, sizeof(uint32_t), "column block size"))
+					return false;
 				col_block_ranges.emplace_back(start, size);
 				col_block_vec_lens.push_back((size + 7) / 8);
 			}
@@ -298,31 +385,38 @@ bool DecompressionReader::OpenReading(const string &in_file_name, const bool &_d
 
 	// 读取置换表；新格式按 (row_block, col_block)，旧格式只有 row_block。
 	uint32_t vint_last_perm_size;
-	memcpy(&vint_last_perm_size, buf + buf_pos, sizeof(uint32_t));
-	buf_pos = buf_pos + sizeof(uint32_t);
+	if (!read_exact(&vint_last_perm_size, sizeof(uint32_t), "permutation count"))
+		return false;
+	if (vint_last_perm_size > (archive_size - buf_pos) / (2 * sizeof(uint32_t)))
+	{
+		logger->error("Corrupted `.gsc`: unreasonable permutation count {}", vint_last_perm_size);
+		return false;
+	}
 	// std::cerr<<"vint_last_perm_size: "<<vint_last_perm_size<<endl;
 	for (uint32_t i = 0; i < vint_last_perm_size; ++i)
 	{
 		uint32_t data_size;
 		uint32_t first, second = 0;
 
-		memcpy(&first, buf + buf_pos, sizeof(uint32_t));
-		buf_pos = buf_pos + sizeof(uint32_t);
+		if (!read_exact(&first, sizeof(uint32_t), "permutation row_block_id"))
+			return false;
 
 		// New format: read col_block_id (second parameter)
 		// Old format (legacy path) stores only row_block_id
 		if (!useLegacyPath)
 		{
-			memcpy(&second, buf + buf_pos, sizeof(uint32_t));
-			buf_pos = buf_pos + sizeof(uint32_t);
+			if (!read_exact(&second, sizeof(uint32_t), "permutation col_block_id"))
+				return false;
 		}
 
-		memcpy(&data_size, buf + buf_pos, sizeof(uint32_t));
-		buf_pos = buf_pos + sizeof(uint32_t);
+		if (!read_exact(&data_size, sizeof(uint32_t), "permutation payload size"))
+			return false;
 		// std::cerr<<first<<":"<<data_size<<endl;
+		if (!ensure_bytes(data_size * sizeof(uint8_t), "permutation payload"))
+			return false;
 		vector<uint8_t> data(data_size);
-
-		memcpy(&data[0], buf + buf_pos, data_size * sizeof(uint8_t));
+		if (data_size)
+			std::memcpy(data.data(), buf + buf_pos, data_size * sizeof(uint8_t));
 		buf_pos = buf_pos + data_size * sizeof(uint8_t);
 
 		// Store in 2D map
@@ -338,31 +432,39 @@ bool DecompressionReader::OpenReading(const string &in_file_name, const bool &_d
 	// std::cerr<<"vint_last_perm_size: "<<vint_last_perm_size<<endl;
 	// 新格式会在 meta 区前放一个 backend 标记；旧格式则直接跟着 comp_size。
 	uint32_t maybe_magic = 0;
-	memcpy(&maybe_magic, buf + buf_pos, sizeof(uint32_t));
+	if (!ensure_bytes(sizeof(uint32_t), "meta magic or header size"))
+		return false;
+	std::memcpy(&maybe_magic, buf + buf_pos, sizeof(uint32_t));
 	if (maybe_magic == GSC_META_MAGIC)
 	{
 		buf_pos += sizeof(uint32_t);
 		uint8_t backend_id = 0;
-		memcpy(&backend_id, buf + buf_pos, sizeof(uint8_t));
-		buf_pos += sizeof(uint8_t);
+		if (!read_exact(&backend_id, sizeof(uint8_t), "meta backend id"))
+			return false;
 		if (backend_id <= static_cast<uint8_t>(compression_backend_t::brotli))
 			backend = static_cast<compression_backend_t>(backend_id);
 		InitializeCompressionBackend(backend);
 	}
 
 	uint32_t comp_size;
-	memcpy(&comp_size, buf + buf_pos, sizeof(uint32_t));
-	buf_pos = buf_pos + sizeof(uint32_t);
+	if (!read_exact(&comp_size, sizeof(uint32_t), "compressed header size"))
+		return false;
 
+	if (!ensure_bytes(comp_size * sizeof(uint8_t), "compressed header payload"))
+		return false;
 	comp_v_header.resize(comp_size);
-	memcpy(&comp_v_header[0], buf + buf_pos, comp_size * sizeof(uint8_t));
+	if (comp_size)
+		std::memcpy(comp_v_header.data(), buf + buf_pos, comp_size * sizeof(uint8_t));
 	buf_pos = buf_pos + comp_size * sizeof(uint8_t);
 
-	memcpy(&comp_size, buf + buf_pos, sizeof(uint32_t));
-	buf_pos = buf_pos + sizeof(uint32_t);
+	if (!read_exact(&comp_size, sizeof(uint32_t), "compressed samples size"))
+		return false;
 
+	if (!ensure_bytes(comp_size * sizeof(uint8_t), "compressed samples payload"))
+		return false;
 	comp_v_samples.resize(comp_size);
-	memcpy(&comp_v_samples[0], buf + buf_pos, comp_size * sizeof(uint8_t));
+	if (comp_size)
+		std::memcpy(comp_v_samples.data(), buf + buf_pos, comp_size * sizeof(uint8_t));
 	buf_pos = buf_pos + comp_size * sizeof(uint8_t);
 
 		// Precompute global GT row-block offsets per *actual* chunk.
@@ -887,6 +989,9 @@ bool DecompressionReader::decompress_other_fileds(SPackage *pck)
 					logger->debug("FMT AD decode: codec_id={} v_tmp_size={} records={}", (int)codec_id, v_tmp.size(), pck->v_size.size());
 				else if (field_name == "PL")
 					logger->debug("FMT PL decode: codec_id={} v_tmp_size={} records={}", (int)codec_id, v_tmp.size(), pck->v_size.size());
+				const bool ad_has_block_baseline = is_ad_field && (codec_id == 4 || codec_id == 5 || codec_id == 7);
+				const bool pl_has_block_baseline = is_pl_field && (codec_id == 4 || codec_id == 5 || codec_id == 6);
+				const bool pl_has_split_payload = is_pl_field && (codec_id == 4 || codec_id == 5 || codec_id == 6);
 
 				if (codec_id == 0)
 				{
@@ -896,20 +1001,24 @@ bool DecompressionReader::decompress_other_fileds(SPackage *pck)
 					return true;
 				}
 
-				// Keep a single built-in lossless codec per field.
+				// 兼容新旧两套 lossless FMT codec：
+				// AD: legacy 1/2/3/4 + current 5/7
+				// PL: legacy 1/2/3 + current 4/5/6
 				if (is_ad_field)
 				{
-					if (codec_id != 5 && codec_id != 7)
+					if (codec_id != 1 && codec_id != 2 && codec_id != 3 &&
+						codec_id != 4 && codec_id != 5 && codec_id != 7)
 					{
-						logger->error("Unsupported codec_id={} for FMT AD (INT); expected built-in codec_id=5/7", (int)codec_id);
+						logger->error("Unsupported codec_id={} for FMT AD (INT)", (int)codec_id);
 						return false;
 					}
 				}
 				else
 				{
-					if (codec_id != 6)
+					if (codec_id != 1 && codec_id != 2 && codec_id != 3 &&
+						codec_id != 4 && codec_id != 5 && codec_id != 6)
 					{
-						logger->error("Unsupported codec_id={} for FMT PL (INT); expected built-in codec_id=6", (int)codec_id);
+						logger->error("Unsupported codec_id={} for FMT PL (INT)", (int)codec_id);
 						return false;
 					}
 				}
@@ -943,7 +1052,7 @@ bool DecompressionReader::decompress_other_fileds(SPackage *pck)
 					std::vector<uint32_t> ad_baseline_ref;
 					uint32_t pl_block_size = 0;
 					std::vector<uint32_t> pl_baseline_a;
-									if (is_ad_field)
+									if (ad_has_block_baseline)
 									{
 										uint64_t bs = 0;
 									if (!decode_vint(in_off, bs))
@@ -959,7 +1068,7 @@ bool DecompressionReader::decompress_other_fileds(SPackage *pck)
 							ad_block_size = (uint32_t)bs;
 							ad_baseline_ref.assign(n_samples_u32, 0);
 					}
-							if (is_pl_field)
+							if (pl_has_block_baseline)
 							{
 								uint64_t bs = 0;
 								if (!decode_vint(in_off, bs))
@@ -989,7 +1098,7 @@ bool DecompressionReader::decompress_other_fileds(SPackage *pck)
 				}
 				const uint32_t per_sample = total / n_samples_u32;
 
-									if (is_ad_field)
+									if (ad_has_block_baseline)
 									{
 										// Block boundary: read baselines (sum(AD)) for all samples.
 										if ((rec_idx % ad_block_size) == 0)
@@ -1006,7 +1115,7 @@ bool DecompressionReader::decompress_other_fileds(SPackage *pck)
 								}
 								}
 							}
-							if (is_pl_field)
+							if (pl_has_block_baseline)
 							{
 								// Block boundary: read baselines (a) for all samples.
 								if ((rec_idx % pl_block_size) == 0)
@@ -1033,8 +1142,8 @@ bool DecompressionReader::decompress_other_fileds(SPackage *pck)
 				in_off += tip_bytes;
 
 						size_t ad_payload_end = 0;
-							// codec_id=5 (AD): record-wise payload length.
-							if (is_ad_field)
+							// codec_id=5/7 (AD): record-wise payload length.
+							if (is_ad_field && (codec_id == 5 || codec_id == 7))
 							{
 								uint64_t payload_len = 0;
 								if (!decode_vint(in_off, payload_len))
@@ -1057,7 +1166,7 @@ bool DecompressionReader::decompress_other_fileds(SPackage *pck)
 							const uint8_t *perm_vals = nullptr;
 							uint32_t perm_cnt = 0;
 							size_t perm_val_bytes = 0;
-							if (is_pl_field)
+							if (pl_has_split_payload)
 							{
 								if (in_off >= v_tmp.size())
 								{
@@ -1093,7 +1202,7 @@ bool DecompressionReader::decompress_other_fileds(SPackage *pck)
 						}
 
 							size_t pl_payload_end = 0;
-							if (is_pl_field)
+							if (pl_has_split_payload)
 							{
 								uint64_t payload_len = 0;
 								if (!decode_vint(in_off, payload_len))
@@ -1121,7 +1230,7 @@ bool DecompressionReader::decompress_other_fileds(SPackage *pck)
 						const uint8_t *ad7_alt_escape = nullptr;
 						size_t ad7_alt_escape_len = 0;
 						size_t ad7_alt_escape_off = 0;
-						if (is_ad_field)
+						if (is_ad_field && (codec_id == 5 || codec_id == 7))
 						{
 							uint64_t l = 0;
 							if (!decode_vint(in_off, l))
@@ -1176,7 +1285,7 @@ bool DecompressionReader::decompress_other_fileds(SPackage *pck)
 						size_t pl6_t10_delta_len = 0, pl6_t10_delta_off = 0;
 						const uint8_t *pl6_t10_res = nullptr;
 						size_t pl6_t10_res_len = 0, pl6_t10_res_off = 0;
-						if (is_pl_field)
+						if (pl_has_split_payload)
 						{
 							uint64_t l2 = 0, ld = 0, lr = 0;
 							if (!decode_vint(in_off, l2) || !decode_vint(in_off, ld) || !decode_vint(in_off, lr))
@@ -2081,7 +2190,7 @@ bool DecompressionReader::decompress_other_fileds(SPackage *pck)
 						}
 					}
 
-										if (is_ad_field)
+										if (is_ad_field && (codec_id == 5 || codec_id == 7))
 										{
 											if ((codec_id == 5 || codec_id == 7) && ad5_delta_off != ad5_delta_len)
 											{
@@ -2112,7 +2221,7 @@ bool DecompressionReader::decompress_other_fileds(SPackage *pck)
 											return false;
 										}
 									}
-								if (is_pl_field)
+								if (pl_has_split_payload)
 								{
 									if (pl6_type2_off != pl6_type2_len || pl6_t10_delta_off != pl6_t10_delta_len || pl6_t10_res_off != pl6_t10_res_len)
 									{
@@ -2218,7 +2327,7 @@ void DecompressionReader::InitDecompressParams()
 	}
 }
 //**********************************************************************************************************************
-	void DecompressionReader::GetVariants(vector<field_desc> &fields)
+	bool DecompressionReader::GetVariants(vector<field_desc> &fields)
 	{
 
 		// Load and set fields
@@ -2311,7 +2420,7 @@ void DecompressionReader::InitDecompressParams()
 					if (src_size < need)
 					{
 						logger->error("DP record_codec=0 payload too short (need {}, have {})", need, src_size);
-						abort();
+						return false;
 					}
 					char *out = new char[(size_t)n_samples * 4];
 					memcpy(out, src + 1, (size_t)n_samples * 4);
@@ -2328,13 +2437,13 @@ void DecompressionReader::InitDecompressParams()
 						              (ad_idx >= 0 ? (int)fields[ad_idx].present : -1),
 						              (ad_idx >= 0 ? (const void*)fields[ad_idx].data : nullptr),
 						              (ad_idx >= 0 ? (uint32_t)fields[ad_idx].data_size : 0u));
-						abort();
+						return false;
 					}
 					const uint32_t total_ad = fields[ad_idx].data_size / 4;
 					if (total_ad == 0 || total_ad % n_samples != 0)
 					{
 						logger->error("AD layout invalid for DP reconstruction (total_ad={}, n_samples={})", total_ad, n_samples);
-						abort();
+						return false;
 					}
 					const uint32_t ad_stride = total_ad / n_samples;
 					const int32_t *ad_vals = reinterpret_cast<const int32_t *>(fields[ad_idx].data);
@@ -2369,7 +2478,7 @@ void DecompressionReader::InitDecompressParams()
 					if (!decode_vint(off, raw_cnt))
 					{
 						logger->error("DP decode: failed to read raw_cnt");
-						abort();
+						return false;
 					}
 					uint32_t pos = 0;
 					for (uint64_t i = 0; i < raw_cnt; ++i)
@@ -2378,13 +2487,13 @@ void DecompressionReader::InitDecompressParams()
 						if (!decode_vint(off, delta) || !decode_vint(off, val))
 						{
 							logger->error("DP decode: failed in raw entry {}", i);
-							abort();
+							return false;
 						}
 						pos += (uint32_t)delta;
 						if (pos >= n_samples)
 						{
 							logger->error("DP decode: raw pos out of range {}", pos);
-							abort();
+							return false;
 						}
 						dp_out[pos] = (val == 0) ? bcf_int32_missing : (int32_t)((uint32_t)val - 1);
 					}
@@ -2393,7 +2502,7 @@ void DecompressionReader::InitDecompressParams()
 					if (!decode_vint(off, exc_cnt))
 					{
 						logger->error("DP decode: failed to read exc_cnt");
-						abort();
+						return false;
 					}
 					pos = 0;
 					for (uint64_t i = 0; i < exc_cnt; ++i)
@@ -2402,13 +2511,13 @@ void DecompressionReader::InitDecompressParams()
 						if (!decode_vint(off, delta) || !decode_vint(off, val))
 						{
 							logger->error("DP decode: failed in exc entry {}", i);
-							abort();
+							return false;
 						}
 						pos += (uint32_t)delta;
 						if (pos >= n_samples)
 						{
 							logger->error("DP decode: exc pos out of range {}", pos);
-							abort();
+							return false;
 						}
 						dp_out[pos] = (val == 0) ? bcf_int32_missing : (int32_t)((uint32_t)val - 1);
 					}
@@ -2418,7 +2527,7 @@ void DecompressionReader::InitDecompressParams()
 						if (src[i] != 0)
 						{
 							logger->error("DP decode: unexpected trailing bytes (off={}, size={})", off, src_size);
-							abort();
+							return false;
 						}
 					}
 
@@ -2431,7 +2540,7 @@ void DecompressionReader::InitDecompressParams()
 				else
 				{
 					logger->error("DP unknown record_codec={}", (int)rec_codec);
-					abort();
+					return false;
 				}
 			}
 
@@ -2460,7 +2569,7 @@ void DecompressionReader::InitDecompressParams()
 					if (src_size < need)
 					{
 						logger->error("MIN_DP record_codec=0 payload too short (need {}, have {})", need, src_size);
-						abort();
+						return false;
 					}
 					char *out = new char[(size_t)n_samples * 4];
 					memcpy(out, src + 1, (size_t)n_samples * 4);
@@ -2473,7 +2582,7 @@ void DecompressionReader::InitDecompressParams()
 					if (dp_idx < 0 || !fields[dp_idx].present || !fields[dp_idx].data || fields[dp_idx].data_size != (size_t)n_samples * 4)
 					{
 						logger->error("MIN_DP record_codec=1 requires DP to reconstruct");
-						abort();
+						return false;
 					}
 					vector<int32_t> out(n_samples, bcf_int32_missing);
 					memcpy(out.data(), fields[dp_idx].data, (size_t)n_samples * 4);
@@ -2483,7 +2592,7 @@ void DecompressionReader::InitDecompressParams()
 					if (!decode_vint(off, exc_cnt))
 					{
 						logger->error("MIN_DP decode: failed to read exc_cnt");
-						abort();
+						return false;
 					}
 					uint32_t pos = 0;
 					for (uint64_t i = 0; i < exc_cnt; ++i)
@@ -2492,13 +2601,13 @@ void DecompressionReader::InitDecompressParams()
 						if (!decode_vint(off, delta) || !decode_vint(off, val))
 						{
 							logger->error("MIN_DP decode: failed in exc entry {}", i);
-							abort();
+							return false;
 						}
 						pos += (uint32_t)delta;
 						if (pos >= n_samples)
 						{
 							logger->error("MIN_DP decode: pos out of range {}", pos);
-							abort();
+							return false;
 						}
 						out[pos] = (val == 0) ? bcf_int32_missing : (int32_t)((uint32_t)val - 1);
 					}
@@ -2508,7 +2617,7 @@ void DecompressionReader::InitDecompressParams()
 						if (src[i] != 0)
 						{
 							logger->error("MIN_DP decode: unexpected trailing bytes (off={}, size={})", off, src_size);
-							abort();
+							return false;
 						}
 					}
 
@@ -2521,7 +2630,7 @@ void DecompressionReader::InitDecompressParams()
 				else
 				{
 					logger->error("MIN_DP unknown record_codec={}", (int)rec_codec);
-					abort();
+					return false;
 				}
 			}
 
@@ -2550,7 +2659,7 @@ void DecompressionReader::InitDecompressParams()
 					if (src_size < need)
 					{
 						logger->error("GQ record_codec=0 payload too short (need {}, have {})", need, src_size);
-						abort();
+						return false;
 					}
 					char *out = new char[(size_t)n_samples * 4];
 					memcpy(out, src + 1, (size_t)n_samples * 4);
@@ -2568,7 +2677,7 @@ void DecompressionReader::InitDecompressParams()
 					if (!decode_vint(off, raw_cnt))
 					{
 						logger->error("GQ decode: failed to read raw_cnt");
-						abort();
+						return false;
 					}
 					uint32_t pos = 0;
 					for (uint64_t i = 0; i < raw_cnt; ++i)
@@ -2577,13 +2686,13 @@ void DecompressionReader::InitDecompressParams()
 						if (!decode_vint(off, delta) || !decode_vint(off, val))
 						{
 							logger->error("GQ decode: failed in raw entry {}", i);
-							abort();
+							return false;
 						}
 						pos += (uint32_t)delta;
 						if (pos >= n_samples)
 						{
 							logger->error("GQ decode: raw pos out of range {}", pos);
-							abort();
+							return false;
 						}
 						is_raw[pos] = 1;
 						out[pos] = (val == 0) ? bcf_int32_missing : (int32_t)((uint32_t)val - 1);
@@ -2643,7 +2752,7 @@ void DecompressionReader::InitDecompressParams()
 					if (!decode_vint(off, exc_cnt))
 					{
 						logger->error("GQ decode: failed to read exc_cnt");
-						abort();
+						return false;
 					}
 					pos = 0;
 					for (uint64_t i = 0; i < exc_cnt; ++i)
@@ -2652,13 +2761,13 @@ void DecompressionReader::InitDecompressParams()
 						if (!decode_vint(off, delta) || !decode_vint(off, val))
 						{
 							logger->error("GQ decode: failed in exc entry {}", i);
-							abort();
+							return false;
 						}
 						pos += (uint32_t)delta;
 						if (pos >= n_samples)
 						{
 							logger->error("GQ decode: exc pos out of range {}", pos);
-							abort();
+							return false;
 						}
 						out[pos] = (val == 0) ? bcf_int32_missing : (int32_t)((uint32_t)val - 1);
 					}
@@ -2668,7 +2777,7 @@ void DecompressionReader::InitDecompressParams()
 						if (src[i] != 0)
 						{
 							logger->error("GQ decode: unexpected trailing bytes (off={}, size={})", off, src_size);
-							abort();
+							return false;
 						}
 					}
 
@@ -2681,12 +2790,13 @@ void DecompressionReader::InitDecompressParams()
 				else
 				{
 					logger->error("GQ unknown record_codec={}", (int)rec_codec);
-					abort();
+					return false;
 				}
 			}
-		}
-//**********************************************************************************************************************
-void DecompressionReader::decompress_meta(vector<string> &v_samples, string &header)
+		return true;
+	}
+	//**********************************************************************************************************************
+	void DecompressionReader::decompress_meta(vector<string> &v_samples, string &header)
 {
 	auto logger = LogManager::Instance().Logger();
 	vector<uint8_t> all_v_header;

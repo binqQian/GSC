@@ -39,6 +39,8 @@ bool File_Handle_2::OpenInternal(const string& temp_file2_fname, bool range_enab
 	use_range = range_enabled;
 	range_begin = range_begin_in;
 	range_end = range_enabled ? (range_begin_in + range_size_in) : 0;
+	file_size = 0;
+	payload_size = 0;
 	// file_name = _file_name+".temp_gsc";
 
 	f = fopen(temp_file2_fname.c_str(), input_mode ? "rb" : "wb");
@@ -48,6 +50,27 @@ bool File_Handle_2::OpenInternal(const string& temp_file2_fname, bool range_enab
 		return false;
     }
 	setvbuf(f, nullptr, _IOFBF, 64 << 20);
+	if (input_mode)
+	{
+		my_fseek(f, 0, SEEK_END);
+		const auto end_pos = my_ftell(f);
+		if (end_pos < 0)
+		{
+			logger->error("Can't determine file size for {}", temp_file2_fname);
+			fclose(f);
+			f = nullptr;
+			return false;
+		}
+		file_size = static_cast<size_t>(end_pos);
+		if (use_range && range_end > file_size)
+		{
+			logger->error("Requested range [{}:{}) exceeds file size {}", range_begin, range_end, file_size);
+			fclose(f);
+			f = nullptr;
+			return false;
+		}
+		my_fseek(f, 0, SEEK_SET);
+	}
 	if (input_mode)
 	{
 		if (!deserialize())
@@ -154,6 +177,7 @@ bool File_Handle_2::serialize()
 // // ******************************************************************************
 bool File_Handle_2::deserialize()
 {
+	auto logger = LogManager::Instance().Logger();
 	size_t footer_size;
 	if (use_range)
 	{
@@ -161,12 +185,30 @@ bool File_Handle_2::deserialize()
 			return false;
 		my_fseek(f, static_cast<long long>(range_end - 8), SEEK_SET);
 		read_fixed(footer_size, f);
+		const size_t region_size = range_end - range_begin;
+		if (footer_size > region_size - 8)
+		{
+			logger->error("Corrupted part2: footer too large for selected range (footer_size={}, region_size={})", footer_size, region_size);
+			return false;
+		}
+		payload_size = region_size - 8 - footer_size;
 		my_fseek(f, static_cast<long long>(range_end - 8 - footer_size), SEEK_SET);
 	}
 	else
 	{
+		if (file_size < 8)
+		{
+			logger->error("Corrupted part2: file too small for footer");
+			return false;
+		}
 		my_fseek(f, -8, SEEK_END);
 		read_fixed(footer_size, f);
+		if (footer_size > file_size - 8)
+		{
+			logger->error("Corrupted part2: footer too large for file (footer_size={}, file_size={})", footer_size, file_size);
+			return false;
+		}
+		payload_size = file_size - 8 - footer_size;
 
 		my_fseek(f, -(long)(8 + footer_size), SEEK_END);
 	}
@@ -174,6 +216,11 @@ bool File_Handle_2::deserialize()
 	// Load stream part offsets
 	size_t n_streams;
 	read(n_streams, f);
+	if (n_streams > footer_size)
+	{
+		logger->error("Corrupted part2: unreasonable stream count {}", n_streams);
+		return false;
+	}
 	for (size_t i = 0; i < n_streams; ++i)
 	{
 		m_streams[(int) i] = stream_t();
@@ -187,6 +234,13 @@ bool File_Handle_2::deserialize()
 		{
 			read(stream_second.parts[j].offset, f);
 			read(stream_second.parts[j].size, f);
+			if (stream_second.parts[j].offset > payload_size ||
+				stream_second.parts[j].size > payload_size - stream_second.parts[j].offset)
+			{
+				logger->error("Corrupted part2: part out of payload bounds (stream={}, part={}, offset={}, size={}, payload_size={})",
+				              stream_second.stream_name, j, stream_second.parts[j].offset, stream_second.parts[j].size, payload_size);
+				return false;
+			}
 		}
 
 		stream_second.cur_id = 0;
@@ -301,8 +355,14 @@ bool File_Handle_2::GetPart(int stream_id, vector<uint8_t> &v_data)
 {
 	lock_guard<mutex> lck(mtx);
 	
-	auto& p = m_streams[stream_id];
+	auto it = m_streams.find(stream_id);
+	if (it == m_streams.end())
+		return false;
+	auto& p = it->second;
 	if (p.cur_id >= p.parts.size())
+		return false;
+	if (p.parts[p.cur_id].offset > payload_size ||
+		p.parts[p.cur_id].size > payload_size - p.parts[p.cur_id].offset)
 		return false;
 	v_data.resize(p.parts[p.cur_id].size);
     

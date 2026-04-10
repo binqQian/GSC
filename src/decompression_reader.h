@@ -215,7 +215,7 @@ public:
 	bool setStartChunk(uint32_t start_chunk);
 	uint32_t getActualPos(uint32_t chunk_id);
 
-	void GetVariants(vector<field_desc> &fields);
+	bool GetVariants(vector<field_desc> &fields);
 
 	// bool writeOtherFields(FILE* f,CompOtherFields<int,uint8_t,uint8_t> * fields_queue);
 	// bool readOtherFields(FILE* f,BlockingQueue<int,uint8_t,uint8_t> *fields_queue);

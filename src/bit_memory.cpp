@@ -45,7 +45,7 @@ CBitMemory::CBitMemory(const CBitMemory &y)
     x.mem_buffer_size = 0;
     
     word_buffer = x.word_buffer;
-    word_buffer = 0;
+    x.word_buffer = 0;
     
     word_buffer_pos = x.word_buffer_pos;
     x.word_buffer_pos = 0;
@@ -53,7 +53,7 @@ CBitMemory::CBitMemory(const CBitMemory &y)
     word_buffer_size = x.word_buffer_size;
     
     mode = x.mode;
-    mode = mode_none;
+    x.mode = mode_none;
     
     copy_n(x.n_bit_mask, 32, n_bit_mask);
 }
