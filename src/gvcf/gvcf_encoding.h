@@ -15,10 +15,8 @@
 
 namespace gvcf {
 
-// ============================================================================
-// RLE (Run-Length Encoding)
-// Used for: CHROM, FILTER, bitmasks - fields with high repetition
-// ============================================================================
+// 这些基础编码器是 gVCF 字段压缩的积木：不同字段会按数据形态选组合。
+// RLE：适合 CHROM、FILTER、位图这类高重复数据。
 
 struct RLERun {
     std::string value;
@@ -35,7 +33,7 @@ struct RLEResult {
     }
 };
 
-// RLE for string arrays
+// 字符串数组的 RLE 编码器。
 class RLEEncoder {
 public:
     static bool Compress(const std::vector<std::string>& data, RLEResult& result);
@@ -45,7 +43,7 @@ public:
     static bool Deserialize(const uint8_t* buffer, size_t size, RLEResult& result);
 };
 
-// RLE for integer arrays (used for bitmasks, indices)
+// 整数数组的 RLE 编码器，常用于索引或中间状态。
 struct RLEIntRun {
     int32_t value;
     uint32_t count;
@@ -95,10 +93,7 @@ public:
     static bool Deserialize(const uint8_t* buffer, size_t size, RLEByteResult& result);
 };
 
-// ============================================================================
-// Delta Encoding
-// Used for: POS, END - monotonically increasing sequences
-// ============================================================================
+// Delta：适合 POS、END 这类整体单调或近似单调的数据。
 
 struct DeltaResult {
     uint64_t first_value;        // First value in sequence
@@ -127,10 +122,7 @@ public:
     static bool Deserialize(const uint8_t* buffer, size_t size, DeltaResult& result);
 };
 
-// ============================================================================
-// Mask Encoding (Dominant Value Encoding)
-// Used for: GT (0/0 dominant), ALT (<NON_REF> dominant), ID ('.' dominant)
-// ============================================================================
+// Mask：适合“某个值占绝对多数”的字段，例如 GT/ALT/ID。
 
 struct MaskResult {
     std::string dominant_value;       // Most frequent value
@@ -205,10 +197,7 @@ public:
     static bool Deserialize(const uint8_t* buffer, size_t size, MaskIntResult& result);
 };
 
-// ============================================================================
-// Dictionary Encoding
-// Used for: REF, ALT variants, unknown fields with moderate cardinality
-// ============================================================================
+// Dictionary：适合中等基数、重复值较多但不一定有单一 dominant 的字段。
 
 struct DictResult {
     std::vector<std::string> dictionary;   // Unique values
@@ -260,6 +249,7 @@ public:
 
 class BitmapUtil {
 public:
+    // 位图工具：dominant/mask 类编码会频繁用到。
     // Create bitmap from boolean vector
     static std::vector<uint8_t> FromBools(const std::vector<bool>& data);
 
@@ -278,9 +268,7 @@ public:
     static uint32_t PopCount(const std::vector<uint8_t>& bitmap, uint32_t len);
 };
 
-// ============================================================================
-// Variable-length integer encoding utilities
-// ============================================================================
+// 变长整数工具：序列化时大量用于长度、索引和差值编码。
 
 class VarIntUtil {
 public:

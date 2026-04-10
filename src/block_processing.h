@@ -19,6 +19,7 @@ typedef vector<uint64_t> mc_vec_t;
 template <typename T>
 inline uint64_t bit_cost(const T &x, const T &y)
 {
+    // 统计两个位向量的差异位数，用来评估排列后的压缩代价。
     uint64_t r = 0;
     int max_i = x.size();
     // cout << "max_i:" << max_i << endl;
@@ -128,6 +129,8 @@ inline uint64_t bit_cost(const T &x, const T &y, uint64_t best_cost,uint64_t* ne
     return r;
 }
 #endif
+
+// GT 块处理器：负责重排、XOR 差分、稀疏索引和 copy/zero 标记。
 class BlockProcess
 {
 
@@ -143,7 +146,7 @@ class BlockProcess
     uint64_t start = 0;
     uint32_t cur_block_id = 0;
     // int64_t prev_pos;
-    // Workspace buffers (per BlockProcess instance) to avoid per-block allocations.
+    // 复用工作区缓冲，避免每个块都重新分配大内存。
     std::vector<uint32_t> comp_pos_copy_buf_;
     std::vector<uint32_t> sparse_matrix_cols_buf_;
     std::vector<uint64_t> mc_vectors_buf_;
@@ -180,6 +183,7 @@ public:
       
     }
     void SetCurBlock(uint64_t _cur_no_vec, uint8_t *cur_data);
+    // 处理一个 GT 块：必要时先做排列，再生成 copy/zero/稀疏索引信息。
     void ProcessSquareBlock(uint32_t col_block_size, uint32_t col_vec_len, vector<uint32_t> &perm,vector<bool> &zeros, vector<bool> &copies, vector<uint32_t> &origin_of_copy, vector<uint8_t> &samples_indexes, bool permute = true);
     void ProcessLastBlock(vector<bool> &zeros, vector<bool> &copies, vector<uint32_t> &origin_of_copy, vector<uint8_t> &samples_indexes);
     void ProcessVariant(vector<uint32_t> &perm,vector<variant_desc_t> &v_vcf_data_io);

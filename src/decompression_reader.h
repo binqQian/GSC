@@ -24,10 +24,12 @@
 #include <cpp-mmf/memory_mapped_file.hpp>
 #endif
 
+// 解压端读取器：负责解析 .gsc 结构、读取 chunk 元数据并解码 fixed fields / part2。
 class DecompressionReader {
 
     friend class Decompressor;
 
+    // fixed fields 新格式目录项：描述一个 row_block 各字段在 chunk 中的位置。
     struct fixed_fields_rb_dir_entry
     {
         fixed_fields_row_block_meta meta;
@@ -41,7 +43,7 @@ class DecompressionReader {
     };
     
 	
-    // sdsl vectors and ranks
+    // 零向量 / copy 向量位图，解压时会直接参与 GT 重建。
     sdsl::rrr_vector<> rrr_copy_bit_vector[2];  //for copy vectors (even and odd)
     sdsl::rrr_vector<> rrr_zeros_bit_vector[2];  //for zeros vectors (even and odd)
 
@@ -60,7 +62,7 @@ class DecompressionReader {
     uint32_t max_block_cols = 0;
     uint32_t n_samples;
 
-    // GT column tiling metadata
+    // GT 列分块元数据。
     uint32_t n_col_blocks = 1;           // Number of column blocks
 	    uint32_t total_haplotypes = 0;       // Total number of haplotypes
 	    vector<pair<uint32_t, uint32_t>> col_block_ranges; // (start_haplotype, n_haplotypes) per column block
@@ -122,7 +124,7 @@ class DecompressionReader {
 	fixed_field_block fixed_field_block_compress;
 	fixed_field_block fixed_field_block_io;
 
-    // New fixed-fields chunk format (row_block directory)
+    // fixed fields 新格式：chunk 内带 row_block 目录，可支持范围裁剪解码。
     bool has_fixed_fields_rb_dir = false;
     uint64_t fixed_fields_chunk_start = 0;
     uint32_t fixed_fields_chunk_version = 0;
@@ -132,7 +134,7 @@ class DecompressionReader {
     uint32_t fixed_fields_gt_size = 0;
     std::vector<fixed_fields_rb_dir_entry> fixed_fields_rb_dir;
 
-    // Legacy fixed-fields chunk offsets (single block)
+    // 旧 fixed fields 格式：整个 chunk 当成单块处理。
     struct legacy_fixed_fields_offsets
     {
         uint32_t no_variants = 0;
@@ -195,13 +197,17 @@ public:
 		delete decomp_part_queue;
     }
 
+	// 打开 .gsc 主文件，解析头部、列分块元数据和 meta 区。
 	bool OpenReading(const string &in_file_name, const bool &_decompression_mode_type);
 		bool OpenReadingPart2(const string &in_file_name, bool start_threads = true);
 		void InitDecompressParams();
 		void decompress_meta(vector<string> &v_samples, string &header);
+		// 读取当前 chunk 的 fixed fields；自动兼容新旧两种格式。
 		bool readFixedFields();
 
+	// 解码整个 chunk；新格式会自动转到 DecoderByRange 的全范围路径。
 	bool Decoder(vector<block_t> &v_blocks,vector<vector<vector<uint32_t>>> &s_perm,vector<uint8_t> &gt_index,uint32_t cur_chunk_id);
+    // 仅解码与查询范围重叠的 row_block，减少范围查询时的 I/O 和 CPU。
     bool DecoderByRange(vector<block_t> &v_blocks, vector<vector<vector<uint32_t>>> &s_perm,
                         vector<uint8_t> &gt_index, uint32_t cur_chunk_id,
                         int64_t range_1, int64_t range_2, uint32_t &variants_before,

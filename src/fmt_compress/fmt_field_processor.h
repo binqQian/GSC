@@ -11,10 +11,10 @@
 
 namespace fmt_compress {
 
-// Special FORMAT field names that use optimized compression
+// 会走特殊压缩逻辑的 FORMAT 字段。
 constexpr const char* kSpecialFields[] = {"AD", "DP", "GQ", "PL", "PGT", "PID"};
 
-// FMT field processor for optimized compression of AD/DP/PL/GQ/PGT/PID fields
+// FMT 特殊字段处理器：把 AD/DP/PL/GQ/PGT/PID 转成更紧凑的块内表示。
 class FmtFieldProcessor {
 public:
     explicit FmtFieldProcessor(FmtDictionaries* dictionaries)
@@ -22,7 +22,7 @@ public:
 
     ~FmtFieldProcessor() = default;
 
-    // Check if a field name requires special processing
+    // 判断字段名是否需要走特殊压缩逻辑。
     static bool isSpecialField(const std::string& name) {
         for (const auto& f : kSpecialFields) {
             if (name == f) return true;
@@ -30,7 +30,7 @@ public:
         return false;
     }
 
-    // Clear block-level data for next block
+    // 清空当前 block 的累计状态，准备处理下一块。
     void clear() {
         ad_tips_.clear();
         ad_ids_.clear();
@@ -51,7 +51,7 @@ public:
         sample_count_ = 0;
     }
 
-    // Process AD and DP fields together (they are correlated)
+    // AD 和 DP 相关性很强，所以放在一起编码。
     // AD: 2-bit tip encoding
     //   00: sum == 0 (all zeros)
     //   01: sum == AD[0] && sum == 2 (special single value)
@@ -109,7 +109,7 @@ public:
         }
     }
 
-    // Process PL and GQ fields together (they are correlated)
+    // PL 和 GQ 同样高度相关，优先利用 PL 推测 GQ。
     // PL: 4 pattern types
     //   Type 0 (00): all zeros
     //   Type 1 (01): [0, a, b, a, b, b, ...] pattern, store a, b
@@ -188,7 +188,7 @@ public:
         }
     }
 
-    // Process PGT field (sparse storage for non-"." values)
+    // PGT 只稀疏存储非 "." 的位置和值。
     void processPGT(const char* data, uint32_t len, uint32_t pos) {
         if (!data || len == 0 || (len == 1 && data[0] == '.')) {
             return;
@@ -200,7 +200,7 @@ public:
         pgt_data_.insert(pgt_data_.end(), data, data + len);
     }
 
-    // Process PID field (sparse storage with dictionary)
+    // PID 走“稀疏位置 + 字典 ID”组合，减少重复字符串开销。
     void processPID(const char* data, uint32_t len, uint32_t pos) {
         if (!data || len == 0 || (len == 1 && data[0] == '.')) {
             return;
@@ -219,7 +219,7 @@ public:
         pid_ids_.push_back(id);
     }
 
-    // Serialize compressed data to output buffer
+    // 把块内累计的特殊字段状态串成最终 payload。
     void serialize(std::vector<uint8_t>& output) const {
         uint8_t buf[16];
 
@@ -251,7 +251,7 @@ public:
         serializeVintVector(pid_ids_, output);
     }
 
-    // Deserialize compressed data from buffer
+    // 从 payload 反序列化回块内状态，供解压端使用。
     size_t unserialize(const uint8_t* data, size_t data_len) {
         size_t offset = 0;
 

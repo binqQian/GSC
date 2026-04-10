@@ -7,6 +7,7 @@
 #include <fstream>
 #include <sstream>
 // ***************************************************************************************************************************************
+// 打开输入文件；merge 模式会顺序打开多个文件并合并 header。
 // ***************************************************************************************************************************************
 bool CompressionReader::OpenForReading(string &file_name)
 {
@@ -105,7 +106,7 @@ bool CompressionReader::OpenForReading(string &file_name)
 }
 
 // ***************************************************************************************************************************************
-// Get number of samples in VCF
+// 读取 header 中的样本数，并缓存样本名列表。
 bool CompressionReader::ReadFile()
 {
 
@@ -165,6 +166,7 @@ vector<uint32_t> CompressionReader::GetActualVariants()
 {
     return actual_variants;
 }
+// 根据样本数和 ploidy 计算 GT 向量宽度，并初始化块缓冲区。
 // ***************************************************************************************************************************************
 bool CompressionReader::setBitVector()
 {
@@ -206,6 +208,7 @@ void CompressionReader::ReleaseUnusedBuffer(CBitMemory &bm, int64_t size)
     if (pooled && buffer)
         Gt_queue->ReleaseBuffer(buffer, static_cast<size_t>(size));
 }
+// 根据 max_block_cols 决定是否按单倍体维度切列，并初始化列块缓冲区。
 // ***************************************************************************************************************************************
 void CompressionReader::initializeColumnBlocks(bool create_buffers)
 {
@@ -1086,7 +1089,10 @@ bool CompressionReader::SetVariantOtherFields(vector<field_desc> &fields)
     return true;
 }
 // ***************************************************************************************************************************************
-// Splits multiple alleles sites, reads genotypes, creates blocks of bytes to process, fills out [archive_name].bcf file
+// 压缩读取主循环：
+// 1. 逐条读取 VCF/BCF 记录
+// 2. lossless 模式抽取 other fields
+// 3. fixed fields + GT 转成块后推给下游线程
 bool CompressionReader::ProcessInVCF()
 {
 
@@ -1173,6 +1179,7 @@ bool CompressionReader::ProcessInVCF()
                     {
                         logger->info("Processed {} variants...", tmpi);
                     }
+                    // lossless 模式下，先把 FILTER/INFO/FORMAT 拆出来走独立压缩通道。
                     if (compress_mode == compress_mode_t::lossless_mode)
                     {
                         reset_curr_field();
@@ -1202,7 +1209,7 @@ bool CompressionReader::ProcessInVCF()
         }
         else
         {
-            // Fallback to single-threaded bcf_read1() for BCF or merge mode
+            // merge 模式或单线程模式走传统 bcf_read1() 路径。
             while (bcf_read1(in_file, vcf_hdr, vcf_record) >= 0)
             {
                 // std::cerr<<"no_samples:"<<no_samples<<endl;
@@ -1225,6 +1232,7 @@ bool CompressionReader::ProcessInVCF()
                 {
                     logger->info("Processed {} variants...", tmpi);
                 }
+                // lossless 模式下，先把 FILTER/INFO/FORMAT 拆出来走独立压缩通道。
                 if (compress_mode == compress_mode_t::lossless_mode)
                 {
 
@@ -1279,6 +1287,8 @@ bool CompressionReader::ProcessInVCF()
 //         }
 
 // }
+// 预处理固定列和多等位位点：
+// 常规二等位位点直接进入 addVariant，特殊多等位位点按现有规则拆分后再处理。
 // ***************************************************************************************************************************************
 void CompressionReader::ProcessFixedVariants(bcf1_t *vcf_rec, variant_desc_t &desc)
 {
@@ -1424,6 +1434,7 @@ void CompressionReader::ProcessFixedVariants(bcf1_t *vcf_rec, variant_desc_t &de
     }
     cur_pos = desc.pos;
 }
+// 把一条记录写进 fixed fields，并把 GT 编成两条 bitplane（MSB/LSB）。
 // ***************************************************************************************************************************************
 void CompressionReader::addVariant(int *gt_data, int ngt_data, variant_desc_t &desc)
 {
@@ -1455,7 +1466,7 @@ void CompressionReader::addVariant(int *gt_data, int ngt_data, variant_desc_t &d
 
     if (desc.chrom == cur_chrom)
     {
-        // Legacy path: single column block
+        // 不切列时，直接把整条 GT 写进单个块缓冲区。
         if (n_col_blocks == 1)
         {
             for (int i = 0; i < ngt_data; i++)
@@ -1514,7 +1525,7 @@ void CompressionReader::addVariant(int *gt_data, int ngt_data, variant_desc_t &d
         }
         else
         {
-            // Tiled path: accumulate to column block buffers
+            // 切列时，把同一行变体拆到多个列块缓冲区里。
             for (uint32_t col_block_id = 0; col_block_id < n_col_blocks; ++col_block_id)
             {
                 uint32_t col_start = col_block_id * max_block_cols;
@@ -1579,8 +1590,7 @@ void CompressionReader::addVariant(int *gt_data, int ngt_data, variant_desc_t &d
                     logger->debug("  Pushing col_block {}: block_id={}, num_rows={}, buffer_size={}",
                                   col_block_id, block_id, no_vec_in_block, col_bv.mem_buffer_pos);
 
-                    // Only the last column block carries the variant descriptors
-                    // Other column blocks get empty vectors to avoid duplicate storage
+                    // 只有最后一个列块携带变体描述，避免重复存多份 fixed fields。
                     if (col_block_id < n_col_blocks - 1)
                     {
                         vector<variant_desc_t> empty_v;
@@ -1619,7 +1629,7 @@ void CompressionReader::addVariant(int *gt_data, int ngt_data, variant_desc_t &d
         vec_read_fixed_fields++;
         cur_chrom = desc.chrom;
 
-        // Flush remaining data from previous chromosome (legacy mode only)
+        // 切换染色体时，先把上一条染色体尚未送出的数据块刷出去。
         if (vec_read_in_block && n_col_blocks == 1)
         {
 
@@ -1634,7 +1644,7 @@ void CompressionReader::addVariant(int *gt_data, int ngt_data, variant_desc_t &d
             vec_read_in_block = 0;
         }
 
-        // Process first variant of new chromosome
+        // 新染色体的第一条记录重新从空块开始累计。
         if (n_col_blocks == 1)
         {
             // Legacy path: single column block

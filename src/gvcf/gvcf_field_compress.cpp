@@ -72,6 +72,7 @@ GenotypeData GenotypeData::FromString(const std::string& str) {
 
 bool FieldCompressor::ApplyBackendCompression(const std::vector<uint8_t>& input,
                                               CompressedField& output) {
+    // 后端压缩只在“压完更小”时保留，否则直接存编码结果，避免反向膨胀。
     if (!backend_) {
         output.data = input;
         return true;
@@ -1442,6 +1443,7 @@ GVCFBlockCompressor::GVCFBlockCompressor(std::shared_ptr<CompressionBackend> bac
     , generic_comp_(backend, config) {}
 
 bool GVCFBlockCompressor::Compress(const GVCFBlock& input, CompressedGVCFBlock& output) {
+    // 这里是整块压缩的总编排器：按字段顺序调用各自压缩器。
     output.Clear();
     output.variant_count = input.variant_count;
     output.sample_count = input.sample_count;

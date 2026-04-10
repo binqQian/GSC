@@ -83,7 +83,7 @@ public:
 } // namespace
 
 // **************************************************************************************************
-// write the compressed file
+// 把前面阶段准备好的元数据、fixed fields、part2 和尾部位图统一写成最终 .gsc 文件。
 bool Compressor::writeCompressFlie()
 {
     auto logger = LogManager::Instance().Logger();
@@ -143,7 +143,7 @@ bool Compressor::writeCompressFlie()
         fwrite(&elem.second, sizeof(int), 1, comp);
     }
 
-    // Write GT column tiling metadata
+    // 写入 GT 列分块元数据，解压端据此恢复每个列块的范围。
     fwrite(&n_col_blocks, sizeof(uint32_t), 1, comp);
     for (uint32_t cb = 0; cb < n_col_blocks; ++cb)
     {
@@ -153,7 +153,7 @@ bool Compressor::writeCompressFlie()
         fwrite(&block_size, sizeof(uint32_t), 1, comp);
     }
 
-    // Write permutations (legacy: chunk-based last block only, tiled: per row/col block)
+    // 写入排列信息：旧格式按块记录，新格式按 (row_block, col_block) 记录。
     if (!use_legacy_perm)
     {
         // New format: 2D permutations
@@ -184,7 +184,7 @@ bool Compressor::writeCompressFlie()
 
     bm_comp_copy_orgl_id.Close();
 
-    // Write meta backend marker so decompression can choose the right codec (lossy/lossless).
+    // 写入 meta 区使用的 codec 标记，方便解压端选对解码器。
     const uint32_t meta_magic = GSC_META_MAGIC;
     const uint8_t meta_backend = static_cast<uint8_t>(params.backend);
     fwrite(&meta_magic, sizeof(uint32_t), 1, comp);
@@ -418,7 +418,7 @@ bool Compressor::writeCompressFlie()
 
     return true;
 }
-// open file for writing
+// 打开最终输出文件，并先预留头部中的几个偏移字段。
 //  *******************************************************************************************************************
 bool Compressor::OpenForWriting(const string &out_file_name)
 {
@@ -478,6 +478,9 @@ bool Compressor::OpenForWriting(const string &out_file_name)
 
     return true;
 }
+// 创建压缩阶段使用的临时文件：
+// 1. 一个暂存 fixed fields chunk
+// 2. lossless 模式下再开一个 part2 多流文件
 //*******************************************************************************************************************
 bool Compressor::OpenTempFile(const string &out_file_name)
 {
@@ -513,7 +516,7 @@ bool Compressor::OpenTempFile(const string &out_file_name)
     return true;
 }
 // *******************************************************************************************************************
-// compess pragma entry
+// 压缩主流程：读取输入、并行处理 GT/other fields，最后合并写出 .gsc。
 bool Compressor::CompressProcess()
 {
     // it is important to initialize the library before using it
@@ -532,6 +535,7 @@ bool Compressor::CompressProcess()
 
     MyBarrier my_barrier(3);
 
+    // 读取器负责从原始 VCF/BCF 中持续切出 GT 块和 fixed fields。
     unique_ptr<CompressionReader> compression_reader(new CompressionReader(params));
 
     if (!compression_reader->OpenForReading(params.in_file_name))
@@ -595,7 +599,7 @@ bool Compressor::CompressProcess()
         return false;
     }
 
-    // compress meta data
+    // 先压缩 header 和 sample 列表，这部分会写到主 archive 的 meta 区。
     compress_meta(v_samples, header);
 
     compression_reader->setNoVecBlock(params);
@@ -753,9 +757,8 @@ bool Compressor::CompressProcess()
     }
 	    block_size = params.var_in_block * 2;
 
-	    // Fixed fields chunk compression pipeline:
-	    // - N worker threads compress chunks to payload blobs (CPU-bound)
-	    // - 1 writer thread writes blobs to temp file in strict chunk_id order (I/O-bound)
+	    // fixed fields 的策略是“并行压缩、单线程顺序写临时文件”，
+	    // 这样既能吃满 CPU，又能保证 chunk_id 顺序稳定。
 	    std::atomic<bool> fixed_fields_error{false};
 	    const uint32_t fixed_fields_threads = std::max<uint32_t>(1u, params.no_threads);
 	    VarBlockQueue<std::vector<uint8_t>> fixed_payload_queue(max((int)(fixed_fields_threads * 4), 8));
@@ -977,7 +980,7 @@ bool Compressor::CompressProcess()
     GtResultQueue gt_result_queue(max((int)(params.no_blocks * params.no_gt_threads), 8));
     GtResultPool gt_result_pool(max((int)(params.no_blocks * params.no_gt_threads), 8));
 
-    // Aggregator thread: commits GT results in strict (block_id, col_block_id) order, but workers never block on it.
+    // 聚合线程按严格块序提交 GT 结果，负责把 worker 的输出拼回 chunk 结构。
     unique_ptr<thread> gt_agg_thread(new thread([&]()
                                                 {
                                                     auto logger = LogManager::Instance().Logger();
@@ -1076,7 +1079,7 @@ bool Compressor::CompressProcess()
                                                             }
                                                         }
 
-                                                        // In tiled mode, only the last column block has variant descriptors.
+                                                        // tiled 模式里，只有最后一个列块携带变体描述，其余列块只提供 GT 索引。
                                                         if (!r.v_vcf_data_io.empty() && prev_chrom != r.v_vcf_data_io[0].chrom)
                                                         {
                                                             prev_chrom = r.v_vcf_data_io[0].chrom;

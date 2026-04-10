@@ -15,6 +15,7 @@ namespace gvcf {
 
 bool FieldDecompressor::ApplyBackendDecompression(const CompressedField& input,
                                                   std::vector<uint8_t>& output) {
+    // 第一个字节是“是否经过后端压缩”的标记，先看它再决定是否解压。
     if (input.data.empty()) {
         output.clear();
         return true;
@@ -915,6 +916,7 @@ GVCFBlockDecompressor::GVCFBlockDecompressor(std::shared_ptr<CompressionBackend>
 bool GVCFBlockDecompressor::Decompress(const CompressedGVCFBlock& input,
                                        GVCFBlock& output) {
     auto logger = LogManager::Instance().Logger();
+    // 整块解压时按依赖顺序恢复：先位置，再样本，再依赖其他字段的派生项。
     logger->debug("GVCFBlockDecompressor::Decompress - start, variants={}, samples={}",
                  input.variant_count, input.sample_count);
 

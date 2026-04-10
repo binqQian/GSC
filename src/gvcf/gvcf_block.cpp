@@ -9,10 +9,7 @@
 
 namespace gvcf {
 
-// ============================================================================
-// CompressedGVCFBlock Implementation
-// ============================================================================
-
+// 统计压缩块里各个字段 payload 的总大小，便于调试和估算压缩效果。
 size_t CompressedGVCFBlock::TotalCompressedSize() const {
     size_t total = 0;
 
@@ -53,7 +50,7 @@ size_t CompressedGVCFBlock::TotalCompressedSize() const {
 
 namespace {
 
-// Helper to serialize a CompressedField
+// 把一个压缩字段写成统一格式：[method][count][size][payload]。
 void SerializeField(const CompressedField& field, std::vector<uint8_t>& buffer) {
     // Method
     buffer.push_back(static_cast<uint8_t>(field.method));
@@ -66,7 +63,7 @@ void SerializeField(const CompressedField& field, std::vector<uint8_t>& buffer) 
     buffer.insert(buffer.end(), field.data.begin(), field.data.end());
 }
 
-// Helper to deserialize a CompressedField
+// 从统一格式里恢复单个压缩字段。
 bool DeserializeField(const uint8_t* buffer, size_t size, size_t& pos,
                      CompressedField& field) {
     if (pos >= size) return false;
@@ -93,6 +90,7 @@ bool DeserializeField(const uint8_t* buffer, size_t size, size_t& pos,
 } // anonymous namespace
 
 bool CompressedGVCFBlock::Serialize(std::vector<uint8_t>& buffer) const {
+    // 一个 block 会按固定顺序串起所有字段，便于顺序写盘和顺序读回。
     buffer.clear();
 
     // Header
@@ -177,6 +175,7 @@ bool CompressedGVCFBlock::Deserialize(const std::vector<uint8_t>& buffer) {
 }
 
 bool CompressedGVCFBlock::Deserialize(const uint8_t* buffer, size_t size) {
+    // 反序列化时必须和 Serialize 的字段顺序完全一致。
     Clear();
 
     size_t pos = 0;

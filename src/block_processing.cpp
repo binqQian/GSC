@@ -11,7 +11,7 @@
 void BlockProcess::SetCurBlock(uint64_t _cur_no_vec, uint8_t *cur_data)
 
 {
-
+    // 记录当前要处理的 GT 块指针和向量数。
     data = cur_data;
     cur_vec_len = params.vec_len;
 
@@ -22,10 +22,9 @@ void BlockProcess::SetCurBlock(uint64_t _cur_no_vec, uint8_t *cur_data)
 void BlockProcess::ProcessSquareBlock(uint32_t col_block_size, uint32_t col_vec_len, vector<uint32_t> &perm, vector<bool> &zeros, vector<bool> &copies, vector<uint32_t> &origin_of_copy, vector<uint8_t> &samples_indexes,bool permute)
 
 {
-
-    // Use per-column vec_len when tiling; fall back to global params for legacy path.
+    // 列分块时使用列块自己的 vec_len；旧路径仍使用全局 vec_len。
     cur_vec_len = col_vec_len ? col_vec_len : params.vec_len;
-    // Clear per-block state to avoid cross-column contamination
+    // 每个块开始前都把局部状态清零，避免跨块污染。
     start = 0;
 
     if (permute)
@@ -53,11 +52,11 @@ void BlockProcess::ProcessSquareBlock(uint32_t col_block_size, uint32_t col_vec_
 void BlockProcess::permute_range_vec(uint64_t id_start, uint64_t id_stop, vector<uint32_t> &v_perm,vector<bool> &zeros, vector<bool> &copies, vector<uint32_t> &origin_of_copy, vector<uint8_t> &samples_indexes)
 
 {
-   
+    // 这一阶段的目标是找到更利于压缩的样本排列，并产出 copy/zero/稀疏索引信息。
 
     size_t n_h_samples = v_perm.size();
 
-    // Use number of vectors in this block (rows) to size working buffers.
+    // 本块包含多少条向量，就按多少条向量准备工作区。
     uint64_t part_vec = id_stop - id_start;
     size_t max_no_vec_in_block = static_cast<size_t>(part_vec);
     
@@ -85,7 +84,7 @@ void BlockProcess::permute_range_vec(uint64_t id_start, uint64_t id_stop, vector
         const uint64_t &operator[](size_t i) const { return p[i]; }
     };
 
-    // One contiguous matrix: [n_h_samples][MC_ARRAY_SIZE]
+    // 把所有样本的出现情况整理成矩阵，后面用它评估排列代价。
     mc_vectors_buf_.assign(n_h_samples * MC_ARRAY_SIZE, 0);
     auto mc_at = [&](size_t i, size_t j) -> uint64_t& {
         return mc_vectors_buf_[i * MC_ARRAY_SIZE + j];
@@ -160,8 +159,7 @@ void BlockProcess::permute_range_vec(uint64_t id_start, uint64_t id_stop, vector
 	            }
 	        }
 	    }
-    // Keep capacity for reuse across blocks (avoids allocator churn).
-    // Determine the best permutation
+    // 下面开始根据稀疏度和 bit_cost 估算更省空间的样本排列。
 
     perm_buf_.clear();
     perm_buf_.reserve(n_h_samples + 2);
@@ -224,11 +222,7 @@ void BlockProcess::permute_range_vec(uint64_t id_start, uint64_t id_stop, vector
         auto best_p = p;
 
 
-        // Look for the most similar vector to *p
-
-        // Starts from p and moves up and down on the list ordered according to the number of ones
-
-        // This limits the number of vector pairs that must be evaluated
+        // 从 1 的个数相近的候选开始向两侧搜索，优先找最相似的下一列。
 
         auto p_down = p;
 

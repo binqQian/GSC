@@ -7,6 +7,7 @@
  */
 #pragma once
 
+// gVCF 模块对外总入口：聚合块结构、编码器和字段编解码器。
 // Core modules
 #include "gvcf_encoding.h"
 #include "gvcf_block.h"
@@ -40,10 +41,7 @@ constexpr uint32_t GVCF_FORMAT_VERSION = 1;
 // Backend Adapter for GSC Integration
 // ============================================================================
 
-/**
- * Adapter to connect gVCF compression to GSC's compression backends.
- * This class wraps GSC's CompressionStrategy interface.
- */
+// 适配层：把 gVCF 模块接到 GSC 主工程的压缩后端上。
 class GSCBackendAdapter : public CompressionBackend {
 public:
     // Compression function signature
@@ -95,10 +93,7 @@ private:
     DecompressPtrFunc decompress_ptr_fn_;
 };
 
-/**
- * No-op backend that doesn't apply any additional compression.
- * Useful for testing or when backend compression is handled elsewhere.
- */
+// 空后端：不做二次压缩，适合测试或上层已处理压缩的场景。
 class NoopBackend : public CompressionBackend {
 public:
     bool Compress(const std::vector<uint8_t>& input,
@@ -144,9 +139,7 @@ inline std::shared_ptr<CompressionBackend> CreateNoopBackend() {
     return std::make_shared<NoopBackend>();
 }
 
-/**
- * Quick compression of GT field (most common use case).
- */
+// 下面这些便捷 API 适合单独测试 GT 或整块编解码逻辑。
 inline bool CompressGT(const std::vector<std::string>& gt_strings,
                       std::shared_ptr<CompressionBackend> backend,
                       CompressedField& mask_output,
@@ -169,9 +162,7 @@ inline bool DecompressGT(const CompressedField& mask_input,
     return decompressor.DecompressStrings(mask_input, patches_input, phase_input, output);
 }
 
-/**
- * Analyze gVCF block to get compression statistics.
- */
+// 分析一个 block 的字段特征，辅助观察压缩策略是否合理。
 inline GVCFBlockAnalysis AnalyzeBlock(const GVCFBlock& block,
                                       std::shared_ptr<CompressionBackend> backend = nullptr,
                                       const GVCFBlockConfig& config = GVCFBlockConfig()) {

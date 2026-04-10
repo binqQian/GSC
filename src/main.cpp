@@ -68,12 +68,14 @@ int params_options(int argc, const char *argv[]);
 void decom(Decompressor &decompressor);
 
 compression_backend_t parse_backend(const std::string &name) {
+    // 将命令行里的压缩器名字映射成内部枚举。
     if (name == "bsc") return compression_backend_t::bsc;
     if (name == "zstd") return compression_backend_t::zstd;
     if (name == "brotli") return compression_backend_t::brotli;
     return compression_backend_t::bsc;
 }
 //--------------------------------------------------------------------------------
+// 全局参数对象：先统一解析，再交给各个入口函数使用。
 GSC_Params params;
 // Show execution options
 
@@ -223,7 +225,7 @@ Where:
 
     exit(0);
 }
-//Main program entry
+// 主入口：初始化日志，解析参数，再分发到对应的任务模式。
 int main(int argc, const char *argv[])
 {
     
@@ -277,7 +279,7 @@ int main(int argc, const char *argv[])
     return result;
 }
 
-// Parse the parameters
+// 统一解析 CLI 参数，并把结果写入全局 params。
 int params_options(int argc, const char *argv[]){
     
     auto logger = LogManager::Instance().Logger();
@@ -850,7 +852,7 @@ int params_options(int argc, const char *argv[]){
 }
  //**********************************************************************************************************************************
 
-//  Program compression inlet
+// 多样本压缩入口：这里只负责创建控制器并启动压缩流程。
 int compress_entry()
 
 {
@@ -864,7 +866,7 @@ int compress_entry()
     return 0;
 }    
 // *********************************************************************************************************************
-//  Program decompression inlet
+// 多样本解压入口：先做输出参数校验，再进入解压主流程。
 int decompress_entry(){
 
     // bool result = true;

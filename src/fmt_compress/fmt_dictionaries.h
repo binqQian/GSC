@@ -9,14 +9,14 @@
 
 namespace fmt_compress {
 
-// Global dictionaries for AD, PL, and PID items
-// Thread-safe with mutex protection for writes
+// 共享字典：把常见 AD / PL / PID 模式收敛成稳定 ID。
+// 写入侧带锁，允许多个线程并发查词典和补新项。
 class FmtDictionaries {
 public:
     FmtDictionaries() = default;
     ~FmtDictionaries() = default;
 
-    // Get or create AD item ID (thread-safe)
+    // 查询或创建 AD 模式 ID。
     uint32_t getADItemId(const ADItem& item) {
         std::lock_guard<std::mutex> lock(ad_mutex_);
         auto it = ad_map_.find(item);
@@ -36,7 +36,7 @@ public:
         return id;
     }
 
-    // Get or create PL item ID (thread-safe)
+    // 查询或创建 PL 模式 ID。
     uint32_t getPLItemId(const PLItem& item) {
         std::lock_guard<std::mutex> lock(pl_mutex_);
         auto it = pl_map_.find(item);
@@ -56,7 +56,7 @@ public:
         return id;
     }
 
-    // Get or create PID item ID (thread-safe)
+    // 查询或创建 PID 模式 ID。
     uint32_t getPIDItemId(const PIDItem& item) {
         std::lock_guard<std::mutex> lock(pid_mutex_);
         auto it = pid_map_.find(item);
@@ -93,7 +93,7 @@ public:
         return (id < pid_offsets_.size()) ? (pid_items_.data() + pid_offsets_[id]) : nullptr;
     }
 
-    // Serialize all dictionaries to output buffer
+    // 把三类字典按顺序序列化到输出缓冲区。
     void serialize(std::vector<uint8_t>& output) const {
         uint8_t buf[16];
 
@@ -113,7 +113,7 @@ public:
         output.insert(output.end(), pid_items_.begin(), pid_items_.end());
     }
 
-    // Deserialize dictionaries from input buffer
+    // 从缓冲区恢复字典内容，并重建 offset 表。
     size_t unserialize(const uint8_t* data, size_t data_len) {
         size_t offset = 0;
         uint64_t size;
@@ -139,7 +139,7 @@ public:
         return offset;
     }
 
-    // Clear all dictionaries
+    // 清空全部字典内容。
     void clear() {
         std::lock_guard<std::mutex> lock1(ad_mutex_);
         std::lock_guard<std::mutex> lock2(pl_mutex_);
@@ -164,7 +164,7 @@ public:
     size_t getPIDCount() const { return pid_offsets_.size(); }
 
 private:
-    // Rebuild AD offsets after deserialization
+    // 反序列化后，重新扫描 AD 条目边界。
     void rebuildADPtrs() {
         ad_offsets_.clear();
         uint32_t offset = 0;
@@ -175,7 +175,7 @@ private:
         }
     }
 
-    // Rebuild PL offsets after deserialization
+    // 反序列化后，重新扫描 PL 条目边界。
     void rebuildPLPtrs() {
         pl_offsets_.clear();
         uint32_t offset = 0;
@@ -186,7 +186,7 @@ private:
         }
     }
 
-    // Rebuild PID offsets after deserialization
+    // 反序列化后，重新扫描 PID 条目边界。
     void rebuildPIDPtrs() {
         pid_offsets_.clear();
         uint32_t offset = 0;

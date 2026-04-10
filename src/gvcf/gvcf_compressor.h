@@ -16,11 +16,11 @@
 
 namespace gvcf {
 
-// Magic number for gVCF compressed format (different from regular GSC)
+// gVCF 独立文件格式的魔数和版本号，与多样本 .gsc 不同。
 constexpr uint32_t GVCF_FILE_MAGIC = 0x47564346; // "GVCF"
 constexpr uint32_t GVCF_FILE_VERSION = 4;  // V4: block index for range query
 
-// Backend selection functions
+// 设置 / 获取 gVCF 模块当前使用的后端压缩器。
 void SetGVCFBackend(compression_backend_t backend);
 compression_backend_t GetGVCFBackend();
 
@@ -28,6 +28,7 @@ compression_backend_t GetGVCFBackend();
  * Block index for range query support.
  * Stores the genomic range covered by each block.
  */
+// 范围查询索引：记录每个块覆盖的区间和文件偏移。
 struct BlockIndex {
     std::string chrom;        // Chromosome name
     uint64_t start_pos;       // Start position (1-based, inclusive)
@@ -40,15 +41,13 @@ struct BlockIndex {
         : chrom(c), start_pos(s), end_pos(e), file_offset(off), variant_count(cnt) {}
 };
 
-/**
- * gVCF Compressor - handles single-sample gVCF file compression
- */
+// gVCF 压缩控制器：按块读取单样本 gVCF，并写成独立压缩格式。
 class GVCFCompressor {
 public:
     explicit GVCFCompressor(const GSC_Params& params);
     ~GVCFCompressor();
 
-    // Main compression entry point
+    // 压缩主入口：完成打开输入、按块压缩和写尾部索引。
     bool Compress();
 
     // Get compression statistics
@@ -71,18 +70,18 @@ public:
     const Statistics& GetStatistics() const { return stats_; }
 
 private:
-    // VCF reading using htslib
+    // 输入读取：从 htslib 读取 header 和一批记录。
     bool OpenInput();
     bool ReadHeader();
     bool ReadBlock(GVCFBlock& block);
     void CloseInput();
 
-    // Compression
+    // 文件写出：头、块数据和尾部索引。
     bool CompressAndWriteBlock(const GVCFBlock& block);
     bool WriteFileHeader();
     bool WriteFileFooter();
 
-    // gVCF detection
+    // 输入识别：判断是否具有典型 gVCF 特征。
     bool DetectGVCFFormat();
 
     // Backend setup
@@ -121,18 +120,16 @@ private:
     bool has_non_ref_;
 };
 
-/**
- * gVCF Decompressor - handles gVCF compressed file decompression
- */
+// gVCF 解压控制器：把独立压缩文件恢复成 VCF/BCF。
 class GVCFDecompressor {
 public:
     explicit GVCFDecompressor(const GSC_Params& params);
     ~GVCFDecompressor();
 
-    // Main decompression entry point
+    // 解压主入口：读取文件头，逐块恢复并写出记录。
     bool Decompress();
 
-    // Query support (deprecated, use GVCFQueryer instead)
+    // 旧接口，范围查询优先走 GVCFQueryer。
     bool DecompressRange(const std::string& chrom, uint64_t start, uint64_t end);
 
 private:
@@ -163,18 +160,16 @@ private:
     std::vector<std::string> sample_names_;
 };
 
-/**
- * gVCF Range Query - supports querying variants by genomic range
- */
+// gVCF 范围查询器：依赖 V4 block index 快速定位候选块。
 class GVCFQueryer {
 public:
     explicit GVCFQueryer(const std::string& input_file);
     ~GVCFQueryer();
 
-    // Open file and read index
+    // 打开文件并加载尾部索引。
     bool Open();
 
-    // Query variants in a range, output to file
+    // 查询指定区间，并把命中的记录输出成 VCF/BCF。
     bool QueryRange(const std::string& chrom, uint64_t start, uint64_t end,
                    const std::string& output_file);
 

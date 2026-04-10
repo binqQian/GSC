@@ -45,12 +45,14 @@
 
 
 
+// 解压总控：负责组织 chunk 读取、GT 重建和最终输出格式转换。
 class Decompressor {
 
 	    
     DecompressionReader decompression_reader;
     static constexpr size_t kPrefetchDepth = 2;
 
+    // 任务参数和解压过程中需要保留的元数据。
     GSC_Params params;
 
     vector<string> v_samples;
@@ -58,7 +60,7 @@ class Decompressor {
     
     // size_t num_chunks;
     vector<block_t> fixed_variants_chunk,fixed_variants_chunk_io;
-	// GT column tiling: 3D structure [row_block][col_block][perm]
+	// GT 列分块下的置换信息，结构为 [row_block][col_block][perm]。
     vector<vector<vector<uint32_t>>> sort_perm, sort_perm_io;
     vector<uint8_t> decompress_gt_indexes,decompress_gt_indexes_io;
     vector<std::pair<uint32_t, uint32_t>> row_block_ranges_io;
@@ -89,13 +91,11 @@ class Decompressor {
     uint32_t cur_chunk_id = 0;
     int64_t range_1,range_2;
 
-    // When fixed fields are decoded for a sub-range, this stores how many variants
-    // were skipped at the beginning of the chunk before the first decoded row_block.
+    // 范围解码时，记录当前 chunk 前面被跳过了多少个变体。
     uint32_t chunk_variant_offset = 0;
     uint32_t chunk_variant_offset_io = 0;
 
-    // Snapshot of per-chunk fixed-fields directory format (set by the decoding pipeline).
-    // Needed because DecompressionReader::readFixedFields() mutates these per chunk.
+    // 保存当前 chunk 的 fixed fields 目录格式信息，避免后续读取下一块时被覆盖。
     bool has_fixed_fields_rb_dir_io = false;
     uint32_t fixed_fields_chunk_version_io = 0;
 
@@ -125,7 +125,7 @@ class Decompressor {
     // Export bookkeeping
     uint32_t export_variant_count_ = 0;
 
-    // Direct conversion lookup tables (initialized after gt_lookup_table is built)
+    // GT 到其他输出格式的查表缓存，减少逐样本字符串拼接。
     alignas(64) uint8_t gsc_to_pgen_lut[256][256];
     alignas(64) uint8_t gsc_to_bgen_ploidy[256][256][4];
     alignas(64) uint8_t gsc_to_bgen_prob[256][256][8];
@@ -214,6 +214,7 @@ class Decompressor {
     // int no_keys;
    
     // bool skip_processing;
+    // 已解码 unique 向量缓存：copy-heavy 数据上能显著减少重复解码。
     std::unordered_map<uint64_t, uint8_t *> done_unique;
 
     std::unordered_map<uint64_t, uint8_t *>::const_iterator got_it;
@@ -255,7 +256,9 @@ class Decompressor {
                                          uint8_t *out_bytes,
                                          uint32_t out_count);
     
+    // 旧格式整块解压路径。
     int decompressAll();
+    // 列分块后的解压路径。
     int decompressAllTiled();
 
     int BedFormatDecompress();

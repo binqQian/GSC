@@ -15,9 +15,7 @@
 
 namespace gvcf {
 
-// ============================================================================
-// Genotype Data (GT field)
-// ============================================================================
+// 单样本 GT 的内部表示；gVCF 模块里很多压缩器都围绕它工作。
 
 struct GenotypeData {
     int8_t allele1;   // First allele (-1 for missing)
@@ -53,9 +51,7 @@ struct GenotypeData {
     static GenotypeData FromString(const std::string& str);
 };
 
-// ============================================================================
-// gVCF Known Fields Block
-// ============================================================================
+// 一个 gVCF block 中已知字段的原始数据容器。
 
 struct GVCFPositionFields {
     std::vector<std::string> chrom;     // CHROM
@@ -87,9 +83,7 @@ struct GVCFSampleFields {
     std::vector<std::vector<int32_t>> ad; // AD (allelic depths)
 };
 
-// ============================================================================
-// gVCF Block
-// ============================================================================
+// 一个 gVCF block 的原始数据视图：压缩前所有字段都先落到这里。
 
 struct GVCFBlock {
     // Known fields
@@ -142,9 +136,7 @@ struct GVCFBlock {
     }
 };
 
-// ============================================================================
-// Compressed Field Storage
-// ============================================================================
+// 单个字段压缩后的统一存储单元。
 
 enum class FieldCompressionMethod : uint8_t {
     NONE = 0,
@@ -181,9 +173,7 @@ struct CompressedField {
     }
 };
 
-// ============================================================================
-// Compressed gVCF Block
-// ============================================================================
+// 一个 block 的完整压缩表示；序列化后会直接写入磁盘。
 
 struct CompressedGVCFBlock {
     // Position fields
@@ -259,20 +249,18 @@ struct CompressedGVCFBlock {
         has_min_dp = false;
     }
 
-    // Calculate total compressed size
+    // 统计这个压缩块内所有字段 payload 的总字节数。
     size_t TotalCompressedSize() const;
 
-    // Serialize to byte buffer
+    // 序列化成可写盘的字节流。
     bool Serialize(std::vector<uint8_t>& buffer) const;
 
-    // Deserialize from byte buffer
+    // 从字节流恢复压缩块结构。
     bool Deserialize(const std::vector<uint8_t>& buffer);
     bool Deserialize(const uint8_t* buffer, size_t size);
 };
 
-// ============================================================================
-// gVCF Block Configuration
-// ============================================================================
+// 每块压缩时使用的可调参数。
 
 struct GVCFBlockConfig {
     uint32_t block_size;           // Number of variants per block
@@ -291,9 +279,7 @@ struct GVCFBlockConfig {
         , default_alt("<NON_REF>") {}
 };
 
-// ============================================================================
-// gVCF Analysis Results
-// ============================================================================
+// 压缩分析结果：用于估算字段特征和推荐编码方式。
 
 struct GVCFFieldAnalysis {
     std::string field_name;

@@ -13,9 +13,7 @@
 
 namespace gvcf {
 
-// ============================================================================
-// Field Decompressor Base
-// ============================================================================
+// 所有字段解压器的基类：先处理后端压缩标记，再交给具体字段恢复。
 
 class FieldDecompressor {
 protected:
@@ -27,7 +25,7 @@ public:
 
     virtual ~FieldDecompressor() = default;
 
-    // Apply backend decompression to compressed data
+    // 读取字段头部的“是否压缩”标记，并在需要时调用后端解压。
     bool ApplyBackendDecompression(const CompressedField& input,
                                    std::vector<uint8_t>& output);
 };
@@ -128,9 +126,7 @@ public:
     bool Decompress(const CompressedField& input, std::vector<std::string>& output);
 };
 
-// ============================================================================
-// GT Field Decompressor
-// ============================================================================
+// GT 解压器：把 mask / patches / phase 三段数据拼回完整基因型。
 
 class GTDecompressor : public FieldDecompressor {
 public:
@@ -164,9 +160,7 @@ public:
     bool Decompress(const CompressedField& input, std::vector<int32_t>& output);
 };
 
-// ============================================================================
-// MIN_DP Field Decompressor
-// ============================================================================
+// MIN_DP 解压器：优先借助 DP 恢复，避免重复存整列数据。
 
 class MinDPDecompressor : public FieldDecompressor {
 public:
@@ -182,9 +176,7 @@ public:
                              std::vector<int32_t>& output);
 };
 
-// ============================================================================
-// GQ Field Decompressor
-// ============================================================================
+// GQ 解压器：优先从 PL 推断，再回填异常值。
 
 class GQDecompressor : public FieldDecompressor {
 public:
@@ -200,9 +192,7 @@ public:
                              std::vector<int32_t>& output);
 };
 
-// ============================================================================
-// PL Field Decompressor
-// ============================================================================
+// PL / AD 解压器负责恢复 sample 级数组字段。
 
 class PLDecompressor : public FieldDecompressor {
 public:
@@ -235,18 +225,16 @@ public:
     bool Decompress(const CompressedField& input, std::vector<std::string>& output);
 };
 
-// ============================================================================
-// gVCF Block Decompressor
-// ============================================================================
+// Block 解压调度器：按字段依赖顺序恢复一个完整的原始块。
 
 class GVCFBlockDecompressor {
 public:
     explicit GVCFBlockDecompressor(std::shared_ptr<CompressionBackend> backend);
 
-    // Decompress entire block
+    // 解整个块，适合正常解压路径。
     bool Decompress(const CompressedGVCFBlock& input, GVCFBlock& output);
 
-    // Decompress specific fields only (for partial decompression)
+    // 只解部分字段，适合范围查询或轻量检查。
     bool DecompressPositionFields(const CompressedGVCFBlock& input, GVCFBlock& output);
     bool DecompressSampleFields(const CompressedGVCFBlock& input, GVCFBlock& output);
 

@@ -18,16 +18,20 @@
 // #include <filesystem>
 using namespace std;
 
+// 压缩总控：负责串联读取、GT 块处理、fixed fields 打包和最终写盘。
 class Compressor
 {
+    // 当前任务的参数快照。
     GSC_Params params;
 
     // CompOtherFields<int,uint8_t,uint8_t> comp_other_fields;
     // CompVarBlockQueue<fixed_field_block> comp_var_block_queue;
+    // 线程和中间队列：GT 处理与 fixed fields 压缩在这里衔接。
     CompVarBlockQueue<fixed_field_block> comp_sort_block_queue;
     vector<thread> part_compress_thread;
     vector<thread> block_process_thread;
 
+    // 输出文件和临时文件句柄。
     FILE *comp = nullptr;
     bool is_stdout = false;
     FILE *temp_file = nullptr;
@@ -40,6 +44,7 @@ class Compressor
     File_Handle_2 * file_handle2 = nullptr;
 
 
+    // zero/copy 位图和 rank 结构，用于解压端快速判断向量类型。
     sdsl::bit_vector zeros_only_bit_vector[2];
     sdsl::bit_vector copy_bit_vector[2];
     sdsl::bit_vector unique;
@@ -59,7 +64,7 @@ class Compressor
     // uint32_t sort_field_block_id = 0;
     uint32_t fixed_field_block_id = 0;
     // sort_field_block sort_field_block_io,sort_field_block_compress,comp_sort_field_block;
-    // Fixed fields: accumulate per chunk as row_blocks + chunk-level GT index.
+    // 每个 chunk 内先按 row_block 聚合 fixed fields，再统一压缩写盘。
     fixed_field_chunk fixed_chunk_io;
     fixed_field_block fixed_field_block_compress;
 
@@ -69,11 +74,11 @@ class Compressor
     uint32_t no_curr_chrom_block =  0;
     vector<int64_t> chunks_min_pos;
     uint32_t cur_chunk_actual_pos = 0;
-    // GT column tiling: 2D permutation map (row_block, col_block) -> perm
+    // GT 列分块后的置换表；旧格式只保留单维映射。
     map<pair<uint32_t, uint32_t>, vector<uint8_t>> vint_last_perm_2d;
     map<uint32_t,vector<uint8_t>> vint_last_perm;  // Legacy format (deprecated)
 
-    // GT column tiling metadata
+    // GT 列分块元数据。
     uint32_t n_col_blocks = 1;
     vector<uint32_t> col_block_sizes;
     vector<uint64_t> col_block_vec_lens;
@@ -86,8 +91,8 @@ class Compressor
     uint32_t used_bits_cp;
     vector<pair<std::string, uint32_t>> where_chrom;
 
-    // Per-row_block GT index accumulation (tiled mode): collect all col_blocks for a row_block
-    // into one buffer, then store into fixed_chunk_io.gt_row_blocks when the row_block completes.
+    // tiled 模式下，先把同一个 row_block 的所有列块 GT 索引拼到一起，
+    // 等这个 row_block 完整后再写入 fixed_chunk_io.gt_row_blocks。
     std::vector<uint8_t> pending_gt_row_block;
     uint32_t pending_gt_row_block_id = 0;
     bool has_pending_gt_row_block = false;
@@ -115,7 +120,7 @@ class Compressor
     uint64_t QUAL_comp_size = 0;
     uint64_t GT_comp_size = 0;
 
-    // Field compression statistics
+    // 字段级统计和 codec 选择，主要服务于 lossless 其他字段压缩。
     CompressionStatistics comp_stats_;
     bool enable_field_stats_ = false;
 
@@ -129,7 +134,7 @@ class Compressor
     vector<key_desc> keys;
     int key_gt_id;
 
-    // FMT field compression
+    // FORMAT 特殊字段的字典与处理器。
     std::unique_ptr<fmt_compress::FmtDictionaries> fmt_dictionaries_;
     std::unique_ptr<fmt_compress::FmtFieldProcessor> fmt_processor_;
     bool isFmtSpecialField(const std::string& name) const;
@@ -184,6 +189,7 @@ public:
         chunks_min_pos.reserve(no_variants_in_buf);
         
     }
+    // 压缩主入口：组织读取、并行处理、临时文件写入和最终封包。
     bool CompressProcess();
 
     // Get compression statistics

@@ -14,7 +14,7 @@
 
 namespace gvcf {
 
-// Global compression strategy for gVCF module
+// gVCF 模块内部共享一个后端策略实例，压缩和解压都通过它访问。
 static std::unique_ptr<CompressionStrategy> g_gvcf_strategy;
 static compression_backend_t g_gvcf_backend = compression_backend_t::bsc;  // Default to bsc for best ratio/speed balance
 
@@ -85,7 +85,7 @@ GVCFCompressor::~GVCFCompressor() {
 bool GVCFCompressor::Compress() {
     auto logger = LogManager::Instance().Logger();
 
-    // Initialize compression backend with user-specified or default backend
+    // 压缩主流程：初始化后端、按块读取单样本 gVCF、压缩并写出块索引。
     SetGVCFBackend(params_.backend);
     InitializeCompressionBackend(params_.backend);
     backend_ = CreateBackend();
@@ -297,6 +297,7 @@ bool GVCFCompressor::ReadBlock(GVCFBlock& block) {
     int* end_arr = nullptr;
     int nend_arr = 0;
 
+    // 连续读取记录，直到凑满一个 block 或到达文件结尾。
     while (block.variant_count < config_.block_size) {
         int ret = bcf_read(fp, hdr, rec);
         if (ret < 0) {
@@ -488,6 +489,7 @@ std::shared_ptr<CompressionBackend> GVCFCompressor::CreateBackend() {
 }
 
 bool GVCFCompressor::WriteFileHeader() {
+    // 文件头写入格式信息、后端、header 文本和样本列表。
     // Write magic number
     fwrite(&GVCF_FILE_MAGIC, sizeof(uint32_t), 1, output_file_);
 
@@ -548,6 +550,7 @@ bool GVCFCompressor::WriteFileHeader() {
 }
 
 bool GVCFCompressor::CompressAndWriteBlock(const GVCFBlock& block) {
+    // 每个 block 都会先记录偏移和范围索引，再压缩字段并写到磁盘。
     // Record block offset
     uint64_t offset = ftell(output_file_);
     block_offsets_.push_back(offset);
@@ -614,6 +617,7 @@ bool GVCFCompressor::CompressAndWriteBlock(const GVCFBlock& block) {
 }
 
 bool GVCFCompressor::WriteFileFooter() {
+    // 尾部写块偏移表、总变体数和范围查询索引。
     // Get footer position
     uint64_t footer_offset = ftell(output_file_);
 
@@ -671,7 +675,8 @@ GVCFDecompressor::~GVCFDecompressor() {
 bool GVCFDecompressor::Decompress() {
     auto logger = LogManager::Instance().Logger();
 
-    // Use GSCBackendAdapter with compression strategy (matches compressor)
+    // 解压主流程：读取文件头，逐块恢复，再输出成 VCF/BCF。
+    // 这里使用和压缩侧相同的后端适配层。
     auto decompress_fn = [](const std::vector<uint8_t>& input, std::vector<uint8_t>& output) -> bool {
         if (input.empty()) {
             output.clear();
@@ -1596,6 +1601,7 @@ bool GVCFQueryer::QueryRange(const std::string& chrom, uint64_t start, uint64_t 
                               const std::string& output_file) {
     auto logger = LogManager::Instance().Logger();
 
+    // 范围查询依赖 V4 block index；先缩小候选块，再在块内逐记录过滤。
     if (file_version_ < 4) {
         logger->error("Range query requires file version 4 or higher (current: {})", file_version_);
         return false;

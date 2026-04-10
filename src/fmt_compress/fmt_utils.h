@@ -10,14 +10,16 @@
 
 namespace fmt_compress {
 
-// PL count lookup table: getplcnt[allele_count] = PL element count
+// FORMAT 特殊字段压缩的基础工具和共享数据结构。
+// PL 个数查表：allele_count -> PL 元素个数。
 // PL elements = (n+1)*n/2 where n = allele_count
 constexpr uint16_t kPlCountTable[12] = {0, 0, 3, 6, 10, 15, 21, 28, 36, 45, 55, 66};
 
-// Missing value marker
+// 缺失值标记。
 constexpr uint32_t kMissingValue = 0xFFFFFFFF;
 constexpr uint16_t kMissingValue16 = 0xFFFE;
 
+// AD / PL / PID 的字典条目都是定长缓冲，便于哈希和复用。
 // AD dictionary item: max 48 bytes
 // data_[0]: data length, data_[1]: type, data_[2~47]: payload
 struct ADItem {
@@ -50,7 +52,7 @@ struct PIDItem {
     }
 };
 
-// Abnormal item for storing exceptions (pos, value)
+// 异常项：记录“位置 + 值”，常用于预测失败的例外情况。
 struct AbnormalItem {
     uint32_t val = 0;
     uint32_t pos = 0;
@@ -59,7 +61,7 @@ struct AbnormalItem {
     AbnormalItem(uint32_t v, uint32_t p) : val(v), pos(p) {}
 };
 
-// Parse comma-separated integers, "." -> kMissingValue
+// 把逗号分隔的整数串解析成数组，"." 视为缺失值。
 inline void splitString2uint(const char* str, int slen, char delimiter,
                              std::vector<uint32_t>& vec) {
     vec.clear();
@@ -90,7 +92,7 @@ inline void splitString2uint(const char* str, int slen, char delimiter,
     }
 }
 
-// Parse and sum comma-separated integers
+// 解析并累加逗号分隔整数；只要遇到 "." 就返回缺失值。
 inline uint32_t splitString2uintSum(const char* str, int slen, char delimiter) {
     if (!str || slen <= 0) return kMissingValue;
 
@@ -120,7 +122,7 @@ inline uint32_t splitString2uintSum(const char* str, int slen, char delimiter) {
     return sum;
 }
 
-// Sum array elements (optimized for small arrays)
+// 小数组求和的快速路径。
 template <typename T>
 inline uint32_t sumArray(uint32_t cnt, const T* arr) {
     uint32_t sum = 0;
@@ -140,6 +142,7 @@ inline uint32_t sumArray(uint32_t cnt, const T* arr) {
     }
 }
 
+// 判断 PL 是否符合常见模式，方便走更紧凑的专用编码。
 // Check PL pattern type:
 // Type 0: all zeros
 // Type 1: [0, a, b, a, b, b, a, b, b, b, ...] pattern
@@ -227,7 +230,7 @@ inline void getMaxAndSecondMin(const T* data, uint32_t cnt, T& max_val, T& secon
     }
 }
 
-// Get second minimum from array
+// 取数组中的第二小值，常用于预测 GQ。
 template <typename T>
 inline T getSecondMin(const T* data, uint32_t cnt) {
     T smallest = data[0];
@@ -245,7 +248,7 @@ inline T getSecondMin(const T* data, uint32_t cnt) {
     return second_min;
 }
 
-// Pack 2-bit tips into byte array
+// 把 tip 位序列打包成紧凑字节流。
 inline uint32_t packTips(const std::vector<uint8_t>& tips, uint8_t* out) {
     uint32_t byte_pos = 0;
     memset(out, 0, (tips.size() + 7) / 8);

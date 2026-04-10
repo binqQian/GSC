@@ -3,6 +3,8 @@
 #include <cstdint>
 #include <cstring>
 
+// 这里的 VintCodec 仅服务于 fmt_compress 模块，
+// 与 src/vint_code.* 使用的编码方案不是同一个实现。
 // EBML Variable Integer (Vint) Codec
 // Big-endian variable-length integer encoding
 // Format:
@@ -28,7 +30,7 @@ constexpr uint64_t kVintMask[10] = {
 
 class VintCodec {
 public:
-    // Get the number of bytes needed to encode a value
+    // 根据数值大小决定需要几个字节。
     static uint8_t getEncodedSize(uint64_t val) {
         uint8_t i = 1;
         while (val > kVintLimit[i]) {
@@ -37,7 +39,7 @@ public:
         return i;
     }
 
-    // Encode a value to buffer, returns number of bytes written
+    // 把一个整数编码到缓冲区，并返回写入字节数。
     static uint8_t encode(uint64_t val, uint8_t* buf) {
         uint8_t len = getEncodedSize(val);
         uint64_t ret = kVintMask[len] | val;
@@ -45,13 +47,13 @@ public:
         return len;
     }
 
-    // Encode with known length
+    // 已知长度时直接编码，省去再次判断大小。
     static void encode(uint64_t val, uint8_t len, uint8_t* buf) {
         uint64_t ret = kVintMask[len] | val;
         toBigEndian(len, ret, buf);
     }
 
-    // Decode from buffer, returns number of bytes read
+    // 从缓冲区解码一个整数，并返回消耗的字节数。
     static uint8_t decode(const uint8_t* buf, uint64_t& val) {
         uint8_t len = 0;
         val = 0;

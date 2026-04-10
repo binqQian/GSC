@@ -17,9 +17,10 @@
 #include <unordered_map>
 #include <stack>
 #include "parallel_vcf_reader.h"
+
+// 压缩端读取器：从 VCF/BCF 中拆出 GT、fixed fields 和 lossless other fields。
 class CompressionReader {
 
-    
 	htsFile* in_file = nullptr;
     vector<htsFile*> merge_files;
     bcf_hdr_t * vcf_hdr= nullptr;
@@ -38,14 +39,14 @@ class CompressionReader {
     uint64_t vec_len;
     uint64_t no_vec;
 
-    // GT column tiling metadata
+    // GT 列分块元数据：用于控制单次处理的列宽和内存占用。
     uint32_t max_block_cols;            // Max haplotypes per column block (from params)
     uint32_t n_col_blocks;              // Number of column blocks
     uint32_t total_haplotypes;          // Total number of haplotypes
     vector<uint32_t> col_block_sizes;   // Haplotypes per column block
     vector<uint64_t> col_block_vec_lens; // vec_len for each column block
 
-    // Tiled mode: per-column-block buffers and counters
+    // tiled 模式下，每个列块都有自己的 GT 缓冲区和写入计数。
     vector<CBitMemory> col_bv_buffers;   // One buffer per column block
     vector<uint32_t> col_vec_read_in_block;  // Vectors read in current block for each column
     bool col_buffers_initialized = false;
@@ -111,7 +112,7 @@ class CompressionReader {
     vector<int64_t> chunks_min_pos;
     bool start_flag;
 
-    // Parallel VCF reading
+    // 并行读取器：仅在多线程且非 merge 模式下启用。
     gsc::ParallelVCFReader* parallel_reader_;
     int num_parse_threads_;
     bool use_parallel_reading_;
@@ -214,12 +215,15 @@ public:
         return no_vec;
     }
 
+    // 打开输入文件或输入文件列表，并准备 header / record 读取。
     bool OpenForReading(string & file_name);
     uint32_t GetSamples(vector<string> &s_list);
     bool GetHeader(string &v_header);
     void InitVarinats(File_Handle_2 *_file_handle2);
+    // 压缩主读取循环：按记录读取并持续向下游队列投递块数据。
 	bool ProcessInVCF();
 	uint32_t setNoVecBlock(GSC_Params & params);
+    // 根据 max_block_cols 决定是否启用 GT 列分块。
     void initializeColumnBlocks(bool create_buffers);
 	void GetWhereChrom(vector<pair<std::string,uint32_t>> &_where_chrom,vector<int64_t> &chunks_min_pos);
     uint32_t GetOtherFieldsBlockSum();

@@ -9,10 +9,7 @@
 
 namespace gvcf {
 
-// ============================================================================
-// VarIntUtil Implementation
-// ============================================================================
-
+// VarIntUtil 负责 gVCF 序列化里的长度、索引和有符号差值编码。
 size_t VarIntUtil::WriteVarUint(uint64_t value, std::vector<uint8_t>& buffer) {
     size_t bytes_written = 0;
     do {
@@ -88,10 +85,7 @@ int64_t VarIntUtil::ReadVarInt(const uint8_t* buffer, size_t size, size_t& pos) 
     return ZigzagDecode(ReadVarUint(buffer, size, pos));
 }
 
-// ============================================================================
-// BitmapUtil Implementation
-// ============================================================================
-
+// BitmapUtil 负责 dominant/mask 类编码需要的位图构造与统计。
 std::vector<uint8_t> BitmapUtil::FromBools(const std::vector<bool>& data) {
     size_t byte_count = (data.size() + 7) / 8;
     std::vector<uint8_t> bitmap(byte_count, 0);
@@ -146,10 +140,7 @@ bool BitmapUtil::CompressRLE(const std::vector<uint8_t>& bitmap, RLEByteResult& 
     return RLEByteEncoder::Compress(bitmap, result);
 }
 
-// ============================================================================
-// RLEEncoder Implementation (String)
-// ============================================================================
-
+// 下面开始是各类基础编码器的具体实现。
 bool RLEEncoder::Compress(const std::vector<std::string>& data, RLEResult& result) {
     result.clear();
     if (data.empty()) {

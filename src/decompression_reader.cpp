@@ -10,6 +10,7 @@
 using namespace std::chrono;
 using namespace std;
 
+// 根据位置和 REF 对变体重新排序，恢复压缩前的输出顺序。
 // *******************************************************************************************************************************
 void DecompressionReader::out_perm(vector<uint32_t> &perm, vector<variant_desc_t> &v_vcf_data_io)
 {
@@ -39,6 +40,8 @@ void DecompressionReader::out_perm(vector<uint32_t> &perm, vector<variant_desc_t
 	}
 }
 
+// 打开 .gsc 主文件，并读取主 archive 区的元数据。
+// 这里会同时识别旧格式和列分块新格式。
 // *******************************************************************************************************************************
 bool DecompressionReader::OpenReading(const string &in_file_name, const bool &_decompression_mode_type)
 {
@@ -240,8 +243,7 @@ bool DecompressionReader::OpenReading(const string &in_file_name, const bool &_d
 		buf_pos = buf_pos + sizeof(uint32_t);
 	}
 
-	// Read GT column tiling metadata (with backward compatibility for old files)
-	// Try to read column block metadata (may not exist in old files)
+	// 尝试读取 GT 列分块元数据；老文件没有这一段，需要回退到旧路径。
 	if (buf_pos + sizeof(uint32_t) <= sdsl_offset)
 	{
 		uint32_t saved_pos = buf_pos;
@@ -294,7 +296,7 @@ bool DecompressionReader::OpenReading(const string &in_file_name, const bool &_d
 	bool legacy_rows = (max_block_rows == total_haplotypes);
 	useLegacyPath = legacy_cols && legacy_rows && (n_col_blocks == 1);
 
-	// Read vint_last_perm (supports both old and new formats)
+	// 读取置换表；新格式按 (row_block, col_block)，旧格式只有 row_block。
 	uint32_t vint_last_perm_size;
 	memcpy(&vint_last_perm_size, buf + buf_pos, sizeof(uint32_t));
 	buf_pos = buf_pos + sizeof(uint32_t);
@@ -334,7 +336,7 @@ bool DecompressionReader::OpenReading(const string &in_file_name, const bool &_d
 	}
 
 	// std::cerr<<"vint_last_perm_size: "<<vint_last_perm_size<<endl;
-	// Optional meta backend marker (new format). Legacy files start directly with comp_size.
+	// 新格式会在 meta 区前放一个 backend 标记；旧格式则直接跟着 comp_size。
 	uint32_t maybe_magic = 0;
 	memcpy(&maybe_magic, buf + buf_pos, sizeof(uint32_t));
 	if (maybe_magic == GSC_META_MAGIC)
@@ -422,6 +424,7 @@ bool DecompressionReader::OpenReadingPart2(const string &in_file_name, bool star
 		delete file_handle2;
 	file_handle2 = new File_Handle_2(true);
 
+	// lossless part2 既可能内嵌在主文件里，也可能来自临时文件。
 	bool open_ok = false;
 	if (part2_in_place)
 	{
@@ -2735,7 +2738,7 @@ uint32_t DecompressionReader::getActualPos(uint32_t chunk_id)
 // read current chunk fixed fields compressed data
 bool DecompressionReader::readFixedFields()
 {
-	// Reset per-chunk state
+	// 先清空上一块的状态，再解析当前 chunk 的 fixed fields。
 	has_fixed_fields_rb_dir = false;
 	fixed_fields_rb_dir.clear();
 	fixed_fields_chunk_start = 0;
@@ -2750,7 +2753,7 @@ bool DecompressionReader::readFixedFields()
 	uint32_t magic_or_no_variants = 0;
 	memcpy(&magic_or_no_variants, buf + buf_pos, sizeof(uint32_t));
 
-	// New per-row_block fixed fields directory format
+	// 新格式：chunk 头里带 row_block 目录，可按范围精确定位需要的块。
 	if (magic_or_no_variants == GSC_FIXED_FIELDS_RB_MAGIC)
 	{
 		buf_pos += sizeof(uint32_t);
@@ -2944,7 +2947,7 @@ bool DecompressionReader::Decoder(std::vector<block_t> &v_blocks, std::vector<st
 							  std::numeric_limits<int64_t>::max(),
 							  variants_before, dummy_ranges);
 	}
-	// Initialize decoder parameters
+	// 旧格式整块解码时，先初始化当前 chunk 的字段游标和输出容器。
 	initDecoderParams();
 	no_variants = legacy_fixed_fields.valid ? legacy_fixed_fields.no_variants : fixed_field_block_compress.no_variants;
 
@@ -2960,7 +2963,7 @@ bool DecompressionReader::Decoder(std::vector<block_t> &v_blocks, std::vector<st
 	v_vcf_sort_data_io.reserve(no_variants_in_buf);
 	std::vector<uint32_t> perm(block_size, 0);
 
-	// Start threads using std::async for better exception handling and cleaner code
+	// fixed fields 的几部分可以并行解码：字符串列、排序列和 GT 索引互不依赖。
 	auto fixedFieldHandle = std::async(std::launch::async, [&]()
 									   {
         // Code from the original fixed field thread
@@ -3208,7 +3211,7 @@ bool DecompressionReader::DecoderByRange(vector<block_t> &v_blocks, vector<vecto
 	no_variants = fixed_fields_total_variants;
 	variants_before = 0;
 
-	// Select row_blocks overlapping [range_1, range_2]
+	// 先找出与查询范围重叠的 row_block，后续只解这些块。
 	bool any = false;
 	uint32_t first_rb = 0;
 	uint32_t last_rb = 0;
@@ -3250,7 +3253,7 @@ bool DecompressionReader::DecoderByRange(vector<block_t> &v_blocks, vector<vecto
 	if (decode_threads > total_rbs)
 		decode_threads = total_rbs;
 
-	// Lambda: decompress GT segment directly from pointer (no intermediate memcpy)
+	// 直接从主文件内存映射区解压 GT 段，避免中间 memcpy。
 	auto decompress_gt_segment = [&](const uint8_t *comp_ptr, uint32_t comp_size, std::vector<uint8_t> &out,
 	                                 CompressionStrategy *gt_codec_bsc,
 	                                 CompressionStrategy *gt_codec_brotli,
@@ -3279,7 +3282,7 @@ bool DecompressionReader::DecoderByRange(vector<block_t> &v_blocks, vector<vecto
 		}
 	};
 
-	// Decode GT index (v1: chunk-level; v2+: per-row_block, only for selected row_blocks)
+	// 解码 GT 索引：v1 是整 chunk 一段，v2+ 则按 row_block 单独保存。
 	if (fixed_fields_chunk_version == GSC_FIXED_FIELDS_RB_VERSION_V1)
 	{
 		auto gt_codec_bsc = MakeCompressionStrategy(compression_backend_t::bsc, p_bsc_fixed_fields);

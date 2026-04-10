@@ -214,11 +214,13 @@ bool Decompressor::analyzeInputRange(uint32_t & start_chunk_id,uint32_t & end_ch
 
     if (range == "")
     {
+        // 没有范围条件时，默认覆盖文件中的所有 chunk。
         // Use the actual chunk count from chunks_min_pos, which is read from the compressed file
         end_chunk_id = static_cast<uint32_t>(decompression_reader.chunks_min_pos.size());
     }
     else
     {
+        // 支持 chr:start,end / chr:start / chr 这几种查询写法。
         std::regex pattern(R"(^([\w.]+)(?::(-?\d+))?(?:,(-?\d+))?:?,?$)");
         std::smatch matches;
         std::string cur_query_chrom;
@@ -340,6 +342,7 @@ bool Decompressor::initDecompression(DecompressionReader &decompression_reader){
     auto logger = LogManager::Instance().Logger();
     logger->debug("initDecompression: entering");
 
+    // 先根据文件元数据算出当前解压路径需要的块大小和缓存预算。
     haplotype_count = decompression_reader.n_samples * (uint32_t)decompression_reader.ploidy;
     row_block_size = decompression_reader.max_block_rows ? decompression_reader.max_block_rows : haplotype_count;
     standard_block_size = row_block_size;
@@ -385,7 +388,7 @@ bool Decompressor::initDecompression(DecompressionReader &decompression_reader){
     rrr_rank_copy_bit_vector[0] = sdsl::rrr_vector<>::rank_1_type(&decompression_reader.rrr_copy_bit_vector[0]);
     rrr_rank_copy_bit_vector[1] = sdsl::rrr_vector<>::rank_1_type(&decompression_reader.rrr_copy_bit_vector[1]);
 
-    // Lossless mode always uses full GT decoding; lossy sample/range paths may not.
+    // lossless 一定要完整重建 GT；lossy 的样本/范围查询则可能只走局部路径。
     bool needs_full_decomp = (params.compress_mode == compress_mode_t::lossless_mode) || params.samples.empty();
     logger->debug("initDecompression: needs_full_decomp={}, params.samples empty={}", needs_full_decomp, params.samples.empty());
     if (needs_full_decomp){
@@ -425,7 +428,7 @@ bool Decompressor::initDecompression(DecompressionReader &decompression_reader){
         }
     }
 
-    // Always set up full_byte_count and trailing_bits (needed for GT reconstruction in tiled mode)
+    // 预先算好完整字节数和尾部残余 bit，方便后续查表恢复 GT。
     if(haplotype_count & 7)//%8)
     {
         full_byte_count = decompression_reader.vec_len - 1;
@@ -494,7 +497,7 @@ bool Decompressor::initDecompression(DecompressionReader &decompression_reader){
     return true;
 }
 //*************************************************************************************************************************************
-// Official Decompress Program Entry
+// 解压主入口：校验模式、准备输出对象，再按 chunk 读取并重建记录。
 bool Decompressor::decompressProcess()
 {
     decompression_reader.SetNoThreads(params.no_threads);
@@ -512,7 +515,7 @@ bool Decompressor::decompressProcess()
         Close();
     });
 
-    // Reject mode mismatches early: on-disk mode is stored in header as `mode_type`.
+    // 文件头里保存了实际模式；这里先拦住 lossy/lossless 不匹配的情况。
     if (decompression_reader.file_mode_type && params.compress_mode == compress_mode_t::lossly_mode)
     {
         auto logger = LogManager::Instance().Logger();
@@ -2379,6 +2382,7 @@ int Decompressor::decompressAllTiled()
     logger->debug("decompressAllTiled: n_col_blocks={}, full_vec_len={}, row_block_variants={}, haplotype_count={}",
                  n_col_blocks, full_vec_len, row_block_variants, haplotype_count);
 
+    // tiled 路径依赖列分块元数据，任何缺失都会导致 GT 无法正确拼回整行。
     if (!n_col_blocks || !row_block_variants)
     {
         logger->error("Invalid tiling metadata (n_col_blocks={}, row_block_variants={})", n_col_blocks, row_block_variants);
@@ -2443,7 +2447,7 @@ int Decompressor::decompressAllTiled()
     logger->debug("decompressAllTiled: fixed_variants_chunk_io.size()={}, sort_perm_io.size()={}, total_variants={}, actual_variants={}",
                  fixed_variants_chunk_io.size(), sort_perm_io.size(), total_variants, actual_variants);
 
-    // Calculate range filtering boundaries if range is specified
+    // 如果当前 chunk 只覆盖查询范围的一部分，这里先算出要输出的起止变体。
     uint32_t no_var = total_variants;
     uint32_t start_var = 0;
     bool has_range = (range != "");
@@ -3139,6 +3143,7 @@ int Decompressor::decompressSampleSmartTiled(const string &range)
 //*****************************************************************************************************************
 int Decompressor::decompressAll(){
 
+    // 新格式统一走 tiled 路径；这里只有旧格式整块解压还会进来。
     if (!decompression_reader.useLegacyPath)
         return decompressAllTiled();
 
@@ -3168,6 +3173,7 @@ int Decompressor::decompressAll(){
 
     size_t cur_var;
 
+    // 旧路径按标准块大小顺序重建 GT，并同步写出当前块对应的记录。
     for (cur_var = start_var; cur_var + standard_block_size <= no_var; cur_var += standard_block_size )
     {
         

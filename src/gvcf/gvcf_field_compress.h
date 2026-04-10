@@ -13,12 +13,8 @@
 
 namespace gvcf {
 
-// Forward declaration for backend compression
+// 后端压缩接口：字段编码结束后，会用它再做一次通用压缩。
 class CompressionBackend;
-
-// ============================================================================
-// Compression Backend Interface
-// ============================================================================
 
 class CompressionBackend {
 public:
@@ -31,9 +27,7 @@ public:
                            std::vector<uint8_t>& output) = 0;
 };
 
-// ============================================================================
-// Field Compressor Base
-// ============================================================================
+// 所有字段压缩器的基类：负责保存后端和公共配置。
 
 class FieldCompressor {
 protected:
@@ -47,7 +41,7 @@ public:
 
     virtual ~FieldCompressor() = default;
 
-    // Apply backend compression to encoded data
+    // 对字段编码结果再做一次后端压缩；如果压不小，会保留原始编码结果。
     bool ApplyBackendCompression(const std::vector<uint8_t>& input,
                                  CompressedField& output);
 };
@@ -178,10 +172,7 @@ public:
     static GVCFFieldAnalysis Analyze(const std::vector<std::string>& data);
 };
 
-// ============================================================================
-// GT Field Compressor (gVCF optimized)
-// Strategy: Mask (dominant 0/0) + RLE bitmask + Patches + Phase
-// ============================================================================
+// GT 压缩器：把主流 0/0 留在 mask 里，其余基因型和 phase 单独存。
 
 class GTCompressor : public FieldCompressor {
 public:
@@ -244,10 +235,7 @@ public:
                                      const std::vector<int32_t>& dp);
 };
 
-// ============================================================================
-// GQ Field Compressor
-// Strategy: Predict from PL + Store exceptions
-// ============================================================================
+// GQ 压缩器：优先从 PL 预测，只存不符合预测的异常值。
 
 class GQCompressor : public FieldCompressor {
 public:
@@ -268,10 +256,7 @@ public:
     static GVCFFieldAnalysis Analyze(const std::vector<int32_t>& data);
 };
 
-// ============================================================================
-// PL Field Compressor
-// Strategy: Pattern dictionary + Adaptive encoding
-// ============================================================================
+// PL 压缩器：优先识别常见模式，不匹配时再退回更通用的编码。
 
 class PLCompressor : public FieldCompressor {
 public:
@@ -292,10 +277,7 @@ private:
     };
 };
 
-// ============================================================================
-// AD Field Compressor
-// Strategy: Adaptive encoding based on allele count
-// ============================================================================
+// AD 压缩器：按等位基因个数和结构选择合适编码。
 
 class ADCompressor : public FieldCompressor {
 public:
@@ -307,10 +289,7 @@ public:
     static GVCFFieldAnalysis Analyze(const std::vector<std::vector<int32_t>>& data);
 };
 
-// ============================================================================
-// Generic/Unknown Field Compressor
-// Strategy: Dictionary + Backend compression
-// ============================================================================
+// 通用字段压缩器：给未知字段一个稳定兜底方案。
 
 class GenericFieldCompressor : public FieldCompressor {
 public:
@@ -321,10 +300,7 @@ public:
     static GVCFFieldAnalysis Analyze(const std::vector<std::string>& data);
 };
 
-// ============================================================================
-// gVCF Block Compressor
-// Orchestrates compression of all fields
-// ============================================================================
+// Block 压缩调度器：按字段顺序调用各自压缩器，组装完整压缩块。
 
 class GVCFBlockCompressor {
 public:
