@@ -1,0 +1,832 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>VCF / gVCF 接入 AVS-G 映射汇报</title>
+  <style>
+    :root {
+      --bg: #f4f7fb;
+      --paper: #ffffff;
+      --text: #1f2937;
+      --muted: #5b6778;
+      --line: #dbe3ee;
+      --blue: #2358d4;
+      --blue-soft: #eaf1ff;
+      --green: #0f9a69;
+      --green-soft: #eafaf3;
+      --orange: #c97a00;
+      --orange-soft: #fff4e6;
+      --purple: #6c49d9;
+      --purple-soft: #f2edff;
+      --red: #c43b3b;
+      --red-soft: #fff1f1;
+      --shadow: 0 12px 30px rgba(23, 38, 74, 0.08);
+      --radius: 18px;
+    }
+
+    * { box-sizing: border-box; }
+    html { scroll-behavior: smooth; }
+    body {
+      margin: 0;
+      background: linear-gradient(180deg, #f8fbff 0%, #eef3f9 100%);
+      color: var(--text);
+      font-family: "Segoe UI", "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", sans-serif;
+      line-height: 1.66;
+    }
+
+    code, pre {
+      font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    }
+
+    a { color: var(--blue); text-decoration: none; }
+    a:hover { text-decoration: underline; }
+
+    .hero {
+      padding: 46px 24px 30px;
+      background:
+        radial-gradient(circle at 95% 10%, rgba(35,88,212,0.16), transparent 26%),
+        radial-gradient(circle at 15% 0%, rgba(15,154,105,0.13), transparent 24%),
+        linear-gradient(135deg, #ffffff 0%, #f4f8ff 100%);
+      border-bottom: 1px solid #e5edf6;
+    }
+
+    .wrap, .nav-inner, .footer-inner {
+      width: min(1240px, calc(100vw - 32px));
+      margin: 0 auto;
+    }
+
+    .eyebrow {
+      display: inline-block;
+      padding: 6px 12px;
+      border-radius: 999px;
+      background: var(--blue-soft);
+      color: var(--blue);
+      font-size: 13px;
+      font-weight: 700;
+      letter-spacing: .02em;
+    }
+
+    h1 {
+      margin: 14px 0 14px;
+      font-size: clamp(30px, 4vw, 48px);
+      line-height: 1.14;
+    }
+
+    .subtitle {
+      margin: 0 0 18px;
+      max-width: 960px;
+      color: var(--muted);
+      font-size: 17px;
+    }
+
+    .meta, .links, .chips {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 10px;
+    }
+
+    .chip, .links a {
+      padding: 8px 12px;
+      border-radius: 999px;
+      background: #fff;
+      border: 1px solid #dce7f2;
+      box-shadow: 0 2px 10px rgba(31, 45, 74, 0.05);
+      color: #3b4a5c;
+      font-size: 14px;
+    }
+
+    .topnav {
+      position: sticky;
+      top: 0;
+      z-index: 20;
+      border-bottom: 1px solid rgba(219,227,238,0.95);
+      background: rgba(248,251,255,0.86);
+      backdrop-filter: blur(12px);
+    }
+
+    .nav-inner {
+      display: flex;
+      gap: 12px;
+      overflow-x: auto;
+      padding: 12px 0;
+    }
+
+    .topnav a {
+      white-space: nowrap;
+      padding: 8px 12px;
+      border-radius: 999px;
+      font-size: 14px;
+      color: #334155;
+    }
+
+    .topnav a:hover {
+      text-decoration: none;
+      background: rgba(35,88,212,0.08);
+    }
+
+    main {
+      padding: 26px 0 58px;
+    }
+
+    section {
+      background: var(--paper);
+      border: 1px solid #e3ebf4;
+      border-radius: var(--radius);
+      box-shadow: var(--shadow);
+      padding: 28px;
+      margin-bottom: 22px;
+    }
+
+    h2 {
+      margin: 0 0 6px;
+      font-size: 28px;
+    }
+
+    h3 {
+      margin: 0 0 10px;
+      font-size: 20px;
+    }
+
+    .lead {
+      margin: 0 0 18px;
+      color: var(--muted);
+    }
+
+    .grid { display: grid; gap: 16px; }
+    .g2 { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+    .g3 { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+    .g4 { grid-template-columns: repeat(4, minmax(0, 1fr)); }
+
+    .card {
+      padding: 18px;
+      border: 1px solid var(--line);
+      border-radius: 16px;
+      background: #fff;
+    }
+
+    .soft-blue { background: #f7faff; }
+    .soft-green { background: #f6fcf8; }
+    .soft-orange { background: #fffaf3; }
+    .soft-purple { background: #f8f5ff; }
+    .soft-red { background: #fff7f7; }
+
+    .score {
+      font-size: 35px;
+      font-weight: 800;
+      line-height: 1;
+      color: var(--blue);
+      margin-bottom: 6px;
+    }
+
+    .muted { color: var(--muted); }
+    .small { font-size: 14px; }
+
+    .callout {
+      margin: 16px 0;
+      padding: 14px 16px;
+      border-radius: 14px;
+      border-left: 5px solid var(--blue);
+      background: var(--blue-soft);
+    }
+
+    .callout.warn {
+      border-left-color: var(--orange);
+      background: var(--orange-soft);
+    }
+
+    .callout.good {
+      border-left-color: var(--green);
+      background: var(--green-soft);
+    }
+
+    .callout.bad {
+      border-left-color: var(--red);
+      background: var(--red-soft);
+    }
+
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      border: 1px solid var(--line);
+      border-radius: 14px;
+      overflow: hidden;
+      font-size: 14px;
+    }
+
+    th, td {
+      padding: 11px 12px;
+      border-bottom: 1px solid var(--line);
+      vertical-align: top;
+      text-align: left;
+    }
+
+    thead th {
+      background: #f6f9fd;
+      color: #334155;
+      font-weight: 700;
+    }
+
+    tbody tr:nth-child(even) td { background: #fbfdff; }
+
+    ul.tight, ol.tight {
+      margin: 8px 0 0 18px;
+      padding: 0;
+    }
+
+    .ref {
+      display: inline-block;
+      margin: 5px 6px 0 0;
+      padding: 4px 8px;
+      border-radius: 999px;
+      background: #f1f5fb;
+      border: 1px solid #d8e1ee;
+      color: #44556b;
+      font-size: 12px;
+      font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    }
+
+    .svg-wrap {
+      border: 1px solid var(--line);
+      border-radius: 16px;
+      overflow: hidden;
+      background: linear-gradient(180deg, #fcfdff 0%, #f6f9fd 100%);
+      margin: 14px 0 18px;
+    }
+
+    svg {
+      width: 100%;
+      height: auto;
+      display: block;
+    }
+
+    pre {
+      margin: 0;
+      padding: 16px;
+      background: #0f172a;
+      color: #dbeafe;
+      border-radius: 14px;
+      overflow-x: auto;
+      font-size: 13px;
+      line-height: 1.55;
+    }
+
+    .footer {
+      padding: 0 24px 42px;
+    }
+
+    .footer-inner {
+      color: var(--muted);
+      font-size: 14px;
+    }
+
+    @media (max-width: 980px) {
+      .g4, .g3, .g2 { grid-template-columns: 1fr; }
+      section { padding: 22px; }
+    }
+
+    @media print {
+      body { background: white; }
+      .topnav { display: none; }
+      section { box-shadow: none; break-inside: avoid; }
+    }
+  </style>
+</head>
+<body>
+  <header class="hero">
+    <div class="wrap">
+      <div class="eyebrow">AVS-G 封装 · VCF / gVCF 接入设计汇报</div>
+      <h1>VCF / gVCF 接入 AVS-G 映射草案评估与说明</h1>
+      <p class="subtitle">
+        按你当前整理口径，本文把 <code>GSC多样本二进制格式结构表-260413.xlsx</code> 视为较标准的 AVS-G 封装参考表达，
+        把 <code>VCF_gVCF接入AVS映射草案-260413.xlsx</code> 视为当前项目从 native <code>.gsc / gVCF</code> 迁移到 AVS 体系的桥接设计，
+        重点说明“这个草案为什么是合理的、它到底解决了什么、还有哪些关键决策没有闭环”。
+      </p>
+      <div class="meta">
+        <span class="chip">整理日期：2026-04-16</span>
+        <span class="chip">用途：组会 / 导师汇报</span>
+        <span class="chip">主题：封装边界、映射策略、落地路线</span>
+      </div>
+      <div class="links" style="margin-top:14px">
+        <a href="./GSC多样本二进制格式结构表-260413.xlsx">参考封装表</a>
+        <a href="./VCF_gVCF接入AVS映射草案-260413.xlsx">映射草案</a>
+        <a href="./基因比对压缩封装格式规范.md">AVS-G 规范说明</a>
+      </div>
+    </div>
+  </header>
+
+  <nav class="topnav">
+    <div class="nav-inner">
+      <a href="#judgement">总体评价</a>
+      <a href="#layers">三层关系</a>
+      <a href="#why-good">为什么这份草案好</a>
+      <a href="#vcf">VCF 映射主线</a>
+      <a href="#gvcf">gVCF 映射主线</a>
+      <a href="#gaps">关键差距与问题</a>
+      <a href="#plan">建议落地顺序</a>
+      <a href="#refs">依据与锚点</a>
+    </div>
+  </nav>
+
+  <main class="wrap">
+    <section id="judgement">
+      <h2>一、总体评价：我觉得这份草案是“方向对、边界清、可分阶段落地”的</h2>
+      <p class="lead">如果把目标定义为“不是重写压缩算法，而是把现有 VCF / gVCF 业务 payload 重新装进 AVS-G 容器语义里”，那你这份草案的路线是相当稳的。</p>
+
+      <div class="grid g4">
+        <div class="card soft-blue">
+          <div class="score">A</div>
+          <div><strong>抽象层次是对的</strong></div>
+          <div class="muted small">先区分 AVS 外层容器与内部业务 payload，不混写。</div>
+        </div>
+        <div class="card soft-green">
+          <div class="score">A</div>
+          <div><strong>迁移成本可控</strong></div>
+          <div class="muted small">VCF 保 chunk 粒度，gVCF 保 native block，避免一次性推倒重来。</div>
+        </div>
+        <div class="card soft-purple">
+          <div class="score">A-</div>
+          <div><strong>术语统一得比较好</strong></div>
+          <div class="muted small">HEADER / COMP_DATA / TAILER 树和现有 GSC 元素能基本对齐。</div>
+        </div>
+        <div class="card soft-orange">
+          <div class="score">B+</div>
+          <div><strong>剩余问题集中</strong></div>
+          <div class="muted small">主要卡在 other-fields 块内化、GT 索引归属、backend id 统一。</div>
+        </div>
+      </div>
+
+      <div class="callout good">
+        <strong>一句话判断：</strong>
+        这不是“把现有 <code>.gsc</code> 机械翻译成 AVS 字段名”，而是在做一层真正的<strong>封装重构</strong>：
+        现有压缩 payload 尽量保留，外部组织方式切换到 AVS 的 HEADER / COMP_DATA / TAILER 语义，这个思路非常合理。
+      </div>
+
+      <div class="grid g2">
+        <div class="card">
+          <h3>我最认可的 4 个点</h3>
+          <ol class="tight">
+            <li>把 <strong>外层容器</strong> 和 <strong>内部 codec</strong> 分开讨论，而不是混成一个问题。</li>
+            <li>VCF 先按 <strong>chunk 对齐 AVS block</strong>，避免直接下钻到 row_block 粒度。</li>
+            <li>gVCF 先保留 <strong>native V4 block codec</strong>，只替换外层封装，迁移风险最小。</li>
+            <li>把 header/sample/ploidy/n_samples 等全局信息从 <code>.gsc main archive</code> 上移到 HEADER，很符合 AVS 语义。</li>
+          </ol>
+        </div>
+        <div class="card">
+          <h3>这份草案的核心价值</h3>
+          <ul class="tight">
+            <li>把“现状是什么”与“未来怎么封”分开了。</li>
+            <li>把“块数据”和“全局索引/参数”重新归位了。</li>
+            <li>把现有 <code>bool / size_t / 尾部匿名位图</code> 这类实现细节，从未来协议层里剥离出来了。</li>
+            <li>为后续 writer/reader 分阶段改造提供了清晰施工图。</li>
+          </ul>
+        </div>
+      </div>
+    </section>
+
+    <section id="layers">
+      <h2>二、先把三层关系讲清楚</h2>
+      <p class="lead">这次讨论最重要的不是某个字段叫啥，而是要明确：<strong>标准 AVS-G 是封装框架，现有 .gsc / gVCF 是业务 payload，映射草案是二者之间的桥</strong>。</p>
+
+      <div class="svg-wrap">
+        <svg viewBox="0 0 1240 370" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="AVS standard, native payload, and mapping draft relationship">
+          <defs>
+            <linearGradient id="b1" x1="0" y1="0" x2="1" y2="1">
+              <stop offset="0%" stop-color="#e9f1ff" />
+              <stop offset="100%" stop-color="#dbe7ff" />
+            </linearGradient>
+            <linearGradient id="b2" x1="0" y1="0" x2="1" y2="1">
+              <stop offset="0%" stop-color="#eefbf5" />
+              <stop offset="100%" stop-color="#dcf6e9" />
+            </linearGradient>
+            <linearGradient id="b3" x1="0" y1="0" x2="1" y2="1">
+              <stop offset="0%" stop-color="#f5f0ff" />
+              <stop offset="100%" stop-color="#e8deff" />
+            </linearGradient>
+          </defs>
+
+          <rect x="50" y="80" width="330" height="220" rx="22" fill="url(#b1)" stroke="#a8bcec" />
+          <rect x="455" y="80" width="330" height="220" rx="22" fill="url(#b2)" stroke="#a7d6bb" />
+          <rect x="860" y="80" width="330" height="220" rx="22" fill="url(#b3)" stroke="#bca9ef" />
+
+          <text x="215" y="118" text-anchor="middle" font-size="26" font-weight="700" fill="#244c97">标准 AVS-G</text>
+          <text x="215" y="152" text-anchor="middle" font-size="17" fill="#325d9a">Magic = avsg</text>
+          <text x="215" y="178" text-anchor="middle" font-size="17" fill="#325d9a">HEADER / COMP_DATA / TAILER</text>
+          <text x="215" y="204" text-anchor="middle" font-size="17" fill="#325d9a">层次化节点 + 参数区 + 索引区</text>
+          <text x="215" y="230" text-anchor="middle" font-size="17" fill="#325d9a">更像“容器协议”</text>
+
+          <text x="620" y="118" text-anchor="middle" font-size="26" font-weight="700" fill="#1d6b49">现有 native payload</text>
+          <text x="620" y="152" text-anchor="middle" font-size="17" fill="#2d7d58">多样本 .gsc</text>
+          <text x="620" y="178" text-anchor="middle" font-size="17" fill="#2d7d58">单样本 gVCF v4</text>
+          <text x="620" y="204" text-anchor="middle" font-size="17" fill="#2d7d58">已经实现的 chunk / GT / part2 / index codec</text>
+          <text x="620" y="230" text-anchor="middle" font-size="17" fill="#2d7d58">更像“业务负载”</text>
+
+          <text x="1025" y="118" text-anchor="middle" font-size="26" font-weight="700" fill="#6343c0">映射草案</text>
+          <text x="1025" y="152" text-anchor="middle" font-size="17" fill="#7958d3">把 VCF / gVCF 重表达为</text>
+          <text x="1025" y="178" text-anchor="middle" font-size="17" fill="#7958d3">AVS 的树形节点</text>
+          <text x="1025" y="204" text-anchor="middle" font-size="17" fill="#7958d3">尽量保留内部 codec</text>
+          <text x="1025" y="230" text-anchor="middle" font-size="17" fill="#7958d3">更像“迁移桥接层”</text>
+
+          <line x1="380" y1="190" x2="455" y2="190" stroke="#7c8ca3" stroke-width="4" />
+          <polygon points="455,190 442,182 442,198" fill="#7c8ca3" />
+          <line x1="785" y1="190" x2="860" y2="190" stroke="#7c8ca3" stroke-width="4" />
+          <polygon points="860,190 847,182 847,198" fill="#7c8ca3" />
+
+          <text x="620" y="42" text-anchor="middle" font-size="24" font-weight="700" fill="#344256">问题的本质不是“改算法”，而是“换外层封装语义”</text>
+        </svg>
+      </div>
+
+      <div class="grid g3">
+        <div class="card soft-blue">
+          <h3>AVS-G 标准更关心什么</h3>
+          <ul class="tight">
+            <li>有全局 Magic <code>avsg</code></li>
+            <li>有固定的 HEADER / COMP_DATA / TAILER 三段树</li>
+            <li>索引与参数放在显式节点里表达</li>
+          </ul>
+          <div class="ref">docs/0_avsStructure/基因比对压缩封装格式规范.md:29-35</div>
+          <div class="ref">docs/0_avsStructure/基因比对压缩封装格式规范.md:171-215</div>
+        </div>
+        <div class="card soft-green">
+          <h3>现有 GSC / gVCF 更关心什么</h3>
+          <ul class="tight">
+            <li>压缩算法如何跑通</li>
+            <li>chunk / row_block / col_block 的实际组织</li>
+            <li>范围查询、样本查询、GT 恢复路径</li>
+          </ul>
+          <div class="ref">src/compressor.cpp:109-229</div>
+          <div class="ref">src/decompression_reader.cpp:101-148</div>
+          <div class="ref">src/gvcf/gvcf_compressor.h:20-21</div>
+        </div>
+        <div class="card soft-purple">
+          <h3>映射草案在做什么</h3>
+          <ul class="tight">
+            <li>把现有 payload 重新放进 AVS 节点树</li>
+            <li>把当前协议细节改写成显式全局参数/索引</li>
+            <li>尽量不碰现有压缩主算法本体</li>
+          </ul>
+        </div>
+      </div>
+    </section>
+
+    <section id="why-good">
+      <h2>三、为什么我认为这份映射草案是好的</h2>
+      <p class="lead">它最大的优点不是“字段列得全”，而是<strong>决策边界划得清</strong>。</p>
+
+      <div class="grid g3">
+        <div class="card soft-blue">
+          <h3>1. 明确新增 <code>STD_TYPE=vcf / gvcf</code></h3>
+          <p class="small">这让 VCF / gVCF 进入 AVS 术语体系时不必伪装成 fq/fa/sam；同时你还把 BCF 放到 <code>RAW_STD_SUBTYPE</code>，这个判断也很合理，因为 BCF 更像载体差异，不是标准类型差异。</p>
+        </div>
+        <div class="card soft-green">
+          <h3>2. VCF 先按 chunk 粒度对齐 block</h3>
+          <p class="small">这个非常关键。当前 <code>.gsc</code> 已经有 chunk offset / min_pos / chrom 边界索引，直接拿 chunk 做 <code>VCF_BLOCK_INDIV</code> 是改动最小、收益最大的方案。</p>
+        </div>
+        <div class="card soft-purple">
+          <h3>3. gVCF 先保 native block</h3>
+          <p class="small">不把现有 gVCF 的 RLE / Delta / Mask / Dict 整体拆碎，而是先 opaque 包装为 <code>BLOCK_CORE_FIELDS</code> / <code>BLOCK_INDEX</code>，这是最现实的路线。</p>
+        </div>
+        <div class="card soft-orange">
+          <h3>4. HEADER 上移是对的</h3>
+          <p class="small">把 <code>comp_v_header</code>、<code>comp_v_samples</code>、<code>ploidy</code>、<code>n_samples</code> 从 main archive 前导区上移到 HEADER/VARIANT_BASIC，语义更干净，也更符合通用 reader 的理解。</p>
+        </div>
+        <div class="card soft-blue">
+          <h3>5. GT 和索引归位了</h3>
+          <p class="small">你把 fixed fields / GT / other fields 放进 block payload，把 permutation、zero/copy、copy-origin map 放进 <code>PARAM_GT</code>，这正是“数据”和“全局解码辅助参数”的合理分层。</p>
+        </div>
+        <div class="card soft-green">
+          <h3>6. 显式 <code>LOSS_MODE</code> 优于 bool</h3>
+          <p class="small">当前 <code>.gsc</code> 的 <code>mode_type</code> 在语义上有使用门槛；改成 AVS 枚举字段后更直观，也减少读写两端误解。</p>
+        </div>
+      </div>
+
+      <div class="callout good">
+        <strong>总结：</strong>
+        你这份草案不是在把当前文件“套壳”，而是在做一次真正的<strong>协议层去实现细节化</strong>：
+        现有压缩结果尽量保留，当前 <code>.gsc</code> 中那些临时性、ABI 相关、位置耦合的组织方式，则被替换成 AVS 的显式节点与参数表达。
+      </div>
+    </section>
+
+    <section id="vcf">
+      <h2>四、VCF 映射主线：这部分已经很成型</h2>
+      <p class="lead">VCF 这条线是整份草案里最成熟的部分。它几乎已经把“现有 .gsc 的哪些东西属于 HEADER、哪些属于块数据、哪些属于 TAILER 参数区”说清楚了。</p>
+
+      <div class="card">
+        <h3>VCF：现有元素 → 建议 AVS 节点</h3>
+        <table>
+          <thead>
+            <tr>
+              <th>现有 GSC 元素</th>
+              <th>建议 AVS 节点</th>
+              <th>我对这条映射的评价</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td><code>mode_type</code></td>
+              <td><code>HEADER / COMP_INFO / LOSS_MODE</code></td>
+              <td>非常对，显式枚举优于沿用 bool。</td>
+            </tr>
+            <tr>
+              <td><code>comp_v_header</code></td>
+              <td><code>HEADER / VARIANT_BASIC / HEADER_TEXT</code></td>
+              <td>语义自然，header 本来就不该埋在 payload 前导区。</td>
+            </tr>
+            <tr>
+              <td><code>comp_v_samples</code></td>
+              <td><code>HEADER / VARIANT_BASIC / SAMPLE_LIST</code></td>
+              <td>非常合适，sample list 明确是全局元数据。</td>
+            </tr>
+            <tr>
+              <td><code>ploidy</code> / <code>n_samples</code></td>
+              <td><code>HEADER / VARIANT_BASIC</code></td>
+              <td>上移后 reader 也更直观。</td>
+            </tr>
+            <tr>
+              <td><code>fixed-fields chunk (GSCF V2)</code></td>
+              <td><code>COMP_DATA / VCF_BLOCK_INDIV / BLOCK_FIXED_FIELDS</code></td>
+              <td>这是最接近现有实现的映射，保留 chunk 粒度是对的。</td>
+            </tr>
+            <tr>
+              <td><code>gt_row_blocks + codec marker</code></td>
+              <td><code>COMP_DATA / VCF_BLOCK_INDIV / BLOCK_GT</code></td>
+              <td>很好，保住 GT 主算法，不急着重写编码体。</td>
+            </tr>
+            <tr>
+              <td><code>File_Handle_2 part2 payload</code></td>
+              <td><code>COMP_DATA / VCF_BLOCK_INDIV / BLOCK_OTHERFIELDS</code></td>
+              <td>这是最关键也最难的一条，方向正确，但实施细节还要再收一轮。</td>
+            </tr>
+            <tr>
+              <td><code>chunks_streams</code></td>
+              <td><code>TAILER / BLOCK_INFO / BLOCK_COMPOFFSET_L</code></td>
+              <td>非常合适，把当前偏移表翻译成标准块偏移列表。</td>
+            </tr>
+            <tr>
+              <td><code>chunks_min_pos</code></td>
+              <td><code>TAILER / BLOCK_INFO / BLOCK_POS_START_L</code></td>
+              <td>自然，直接服务范围查询。</td>
+            </tr>
+            <tr>
+              <td><code>where_chrom</code></td>
+              <td><code>BLOCK_CHR_L + PARAM_INDEX / CHROM_BOUNDARY_L</code></td>
+              <td>也对，拆成块染色体列表和边界列表更清晰。</td>
+            </tr>
+            <tr>
+              <td>排列向量、zero/copy 位图、copy-origin map</td>
+              <td><code>TAILER / ENCODER_PARAM / PARAM_GT</code></td>
+              <td>这是 AVS 化后最合理的位置，不应继续作为匿名尾区存在。</td>
+            </tr>
+            <tr>
+              <td><code>part2_params.keys[]</code>、FMT dict blob</td>
+              <td><code>PARAM_OTHER_FIELDS</code></td>
+              <td>很对，这些本质上都是 other-fields 的全局解码参数。</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+
+      <div class="svg-wrap">
+        <svg viewBox="0 0 1240 300" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="VCF mapping path">
+          <rect x="50" y="90" width="250" height="120" rx="18" fill="#eef5ff" stroke="#a9bfeb"/>
+          <rect x="360" y="90" width="250" height="120" rx="18" fill="#eefcf4" stroke="#abd8bd"/>
+          <rect x="670" y="90" width="250" height="120" rx="18" fill="#fff8eb" stroke="#e2c98d"/>
+          <rect x="980" y="90" width="210" height="120" rx="18" fill="#f5f0ff" stroke="#bba9ee"/>
+
+          <text x="175" y="128" text-anchor="middle" font-size="22" font-weight="700" fill="#2b5398">现有 .gsc</text>
+          <text x="175" y="156" text-anchor="middle" font-size="15" fill="#3d5e95">top header + main archive</text>
+          <text x="175" y="178" text-anchor="middle" font-size="15" fill="#3d5e95">+ part2 + sdsl tail</text>
+
+          <text x="485" y="128" text-anchor="middle" font-size="22" font-weight="700" fill="#1f7a52">逻辑重分层</text>
+          <text x="485" y="156" text-anchor="middle" font-size="15" fill="#2d865d">全局信息上移 HEADER</text>
+          <text x="485" y="178" text-anchor="middle" font-size="15" fill="#2d865d">块载荷进入 COMP_DATA</text>
+
+          <text x="795" y="128" text-anchor="middle" font-size="22" font-weight="700" fill="#9a6a0a">索引与参数归尾</text>
+          <text x="795" y="156" text-anchor="middle" font-size="15" fill="#9a6a0a">offset / pos / perm / GT params</text>
+          <text x="795" y="178" text-anchor="middle" font-size="15" fill="#9a6a0a">进入 TAILER</text>
+
+          <text x="1085" y="128" text-anchor="middle" font-size="22" font-weight="700" fill="#6644c2">AVS-VCF</text>
+          <text x="1085" y="156" text-anchor="middle" font-size="15" fill="#7a5bd0">HEADER / COMP_DATA</text>
+          <text x="1085" y="178" text-anchor="middle" font-size="15" fill="#7a5bd0">/ TAILER</text>
+
+          <line x1="300" y1="150" x2="360" y2="150" stroke="#7f8ba1" stroke-width="4" />
+          <polygon points="360,150 347,142 347,158" fill="#7f8ba1" />
+          <line x1="610" y1="150" x2="670" y2="150" stroke="#7f8ba1" stroke-width="4" />
+          <polygon points="670,150 657,142 657,158" fill="#7f8ba1" />
+          <line x1="920" y1="150" x2="980" y2="150" stroke="#7f8ba1" stroke-width="4" />
+          <polygon points="980,150 967,142 967,158" fill="#7f8ba1" />
+        </svg>
+      </div>
+
+      <div class="callout good">
+        <strong>我对 VCF 线的结论：</strong>
+        这部分已经不只是“想法”，而是很接近实施草图了。真正要补的不是大方向，而是 <code>BLOCK_OTHERFIELDS</code> 的组织方式和 GT 参数区的具体编码约束。
+      </div>
+    </section>
+
+    <section id="gvcf">
+      <h2>五、gVCF 映射主线：你的“先外包，不强拆”判断很稳</h2>
+      <p class="lead">gVCF 这条线最大的风险，是为了追求 AVS 结构统一而把已经自洽的 native block codec 过早拆碎。你的草案没有这么做，我认为这是正确的。</p>
+
+      <div class="grid g2">
+        <div class="card soft-green">
+          <h3>你这条路线为什么对</h3>
+          <ul class="tight">
+            <li>现有 gVCF 模块已经有独立 magic / version / block index 体系。</li>
+            <li>它最大的价值是范围查询能力，不是节点名字漂不漂亮。</li>
+            <li>短期最应该保的，是 <strong>native block + index 能力</strong>，而不是 AVS 形态上的完全对称。</li>
+          </ul>
+          <div class="ref">src/gvcf/gvcf_compressor.h:20-21</div>
+        </div>
+        <div class="card soft-purple">
+          <h3>你草案里的映射也合理</h3>
+          <ul class="tight">
+            <li><code>BLOCK_CORE_FIELDS</code>：保留 native block codec</li>
+            <li><code>BLOCK_SAMPLE_FIELDS</code>：对应现有 field hybrid 编码体系</li>
+            <li><code>BLOCK_INDEX</code>：保留块级范围查询索引</li>
+            <li><code>PARAM_GVCF</code>：承接内部版本号和块配置</li>
+          </ul>
+        </div>
+      </div>
+
+      <div class="card" style="margin-top:16px">
+        <h3>gVCF：我建议继续坚持的原则</h3>
+        <table>
+          <thead>
+            <tr>
+              <th>问题</th>
+              <th>建议</th>
+              <th>原因</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td>是否把 gVCF 拆成和 VCF 完全平行的 fixed/core/sample 多个细节点？</td>
+              <td>短期不要完全拆散。</td>
+              <td>现有 gVCF codec 已自洽，强拆会放大迁移成本。</td>
+            </tr>
+            <tr>
+              <td>gVCF 自身 magic/version 怎么处理？</td>
+              <td>外层交给 AVS，内部版本号写到 <code>PARAM_GVCF</code>。</td>
+              <td>避免 AVS 外层和 native 内层双重 magic 并列。</td>
+            </tr>
+            <tr>
+              <td>块内索引是否保留？</td>
+              <td>必须保留。</td>
+              <td>范围查询是 gVCF 线最关键的能力。</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+
+      <div class="callout warn">
+        <strong>我的建议：</strong>
+        gVCF 接入 AVS 的成功标准，不是“长得和 VCF 一样”，而是“外层封装一致、内部 native 能力不丢”。你现在的草案正好符合这个原则。
+      </div>
+    </section>
+
+    <section id="gaps">
+      <h2>六、关键差距与尚未闭环的问题</h2>
+      <p class="lead">大方向没问题，剩下的问题已经从“概念问题”收敛到了“工程设计问题”。这是好事，说明草案已经接近可实施状态。</p>
+
+      <div class="grid g3">
+        <div class="card soft-orange">
+          <h3>1. BLOCK_OTHERFIELDS 要不要块内化</h3>
+          <p class="small">这是 lossless VCF 接入 AVS 的最大决策点。短期整体打包成一个 block payload 最省事，但中长期按块组织更符合 AVS 的 COMP_DATA 语义。</p>
+          <strong class="small">我的建议：</strong>
+          <div class="small muted">先允许两种实现路径并存，优先把接口语义定下来。</div>
+        </div>
+        <div class="card soft-orange">
+          <h3>2. GT zero/copy 放哪</h3>
+          <p class="small">当前 <code>.gsc</code> 是 main archive + 匿名尾区混放；AVS 下显然更适合进入 <code>PARAM_GT</code>，但需要把编码模式写清楚。</p>
+          <strong class="small">我的建议：</strong>
+          <div class="small muted">在 PARAM_GT 中显式定义 <code>ZERO_COPY_STORE_MODE</code> 和 codec id map。</div>
+        </div>
+        <div class="card soft-orange">
+          <h3>3. backend id 是否统一</h3>
+          <p class="small">HEADER_TEXT、SAMPLE_LIST、BLOCK_FIXED_FIELDS、BLOCK_GT、BLOCK_OTHERFIELDS 是否共享同一 backend registry，关系到 reader 复用程度。</p>
+          <strong class="small">我的建议：</strong>
+          <div class="small muted">统一。你草案里的这个判断是对的。</div>
+        </div>
+        <div class="card soft-red">
+          <h3>4. 当前 ABI 字段不能直接透传</h3>
+          <p class="small"><code>bool</code>、<code>size_t</code>、匿名文件尾位图这些，都是实现层细节，不能原样升级成对外协议字段。</p>
+          <div class="ref">src/compressor.cpp:320-322</div>
+          <div class="ref">src/compressor.cpp:113-115</div>
+        </div>
+        <div class="card soft-red">
+          <h3>5. current .gsc 的 offset 观念要被 AVS 接管</h3>
+          <p class="small">现在的 <code>other_fields_offset</code> / <code>sdsl_offset</code> 是扁平容器下的定位方式；AVS 外层既然已经有 BLOCK_INFO，就不应再把这两个值当协议字段暴露。</p>
+        </div>
+        <div class="card soft-red">
+          <h3>6. 需要把“块粒度”彻底固定下来</h3>
+          <p class="small">你已经建议首版按 chunk，这个建议非常重要。若这里不固定，后面 BLOCK_INFO、参数区和 reader 接口都会飘。</p>
+        </div>
+      </div>
+
+      <div class="callout">
+        <strong>换句话说：</strong>
+        现在最大的风险不再是“这条路对不对”，而是“如果不先定块粒度、参数归属和 other-fields 的组织方式，后面每个人会按自己的理解实现，最终又会长出新的格式歧义”。
+      </div>
+    </section>
+
+    <section id="plan">
+      <h2>七、我建议的落地顺序</h2>
+      <p class="lead">如果接下来真的要做实现，我建议不要从最难的地方开始，而是先把“外层能包起来”的部分做通。</p>
+
+      <div class="grid g4">
+        <div class="card soft-blue">
+          <h3>Phase 1</h3>
+          <p><strong>先把 HEADER 迁上去</strong></p>
+          <ul class="tight small">
+            <li>STD_TYPE / RAW_STD_SUBTYPE</li>
+            <li>LOSS_MODE</li>
+            <li>HEADER_TEXT / SAMPLE_LIST</li>
+            <li>PLOIDY / N_SAMPLES</li>
+          </ul>
+        </div>
+        <div class="card soft-green">
+          <h3>Phase 2</h3>
+          <p><strong>按 chunk 封装 COMP_DATA</strong></p>
+          <ul class="tight small">
+            <li>VCF_BLOCK_INDIV 对齐 chunk</li>
+            <li>BLOCK_FIXED_FIELDS</li>
+            <li>BLOCK_GT</li>
+            <li>lossless 时先允许 whole-blob BLOCK_OTHERFIELDS</li>
+          </ul>
+        </div>
+        <div class="card soft-orange">
+          <h3>Phase 3</h3>
+          <p><strong>把索引和参数迁入 TAILER</strong></p>
+          <ul class="tight small">
+            <li>BLOCK_INFO：offset / pos / chr / count</li>
+            <li>PARAM_GT：perm / zero-copy / codec map</li>
+            <li>PARAM_OTHER_FIELDS：keys / fmt dict</li>
+          </ul>
+        </div>
+        <div class="card soft-purple">
+          <h3>Phase 4</h3>
+          <p><strong>再优化块内化与统一 backend</strong></p>
+          <ul class="tight small">
+            <li>BLOCK_OTHERFIELDS 块内化</li>
+            <li>统一 encoder registry</li>
+            <li>补完整 reader / writer 协议测试</li>
+          </ul>
+        </div>
+      </div>
+
+      <div class="card" style="margin-top:16px">
+        <h3>为什么这个顺序更稳</h3>
+        <pre>先包外层语义  →  再迁 payload  →  再迁索引/参数  →  最后做块内细化
+
+原因：
+1. 先把协议框架定住，避免一边改 writer 一边改接口定义。
+2. 现有 codec 尽量后置改动，先保住功能。
+3. 范围查询/样本查询等能力不会因为“为了套 AVS”而先被打碎。</pre>
+      </div>
+    </section>
+
+    <section id="refs">
+      <h2>八、判断依据与可追溯锚点</h2>
+      <p class="lead">下面这些文档和代码位置，支撑了上面的判断。</p>
+
+      <div class="grid g2">
+        <div class="card">
+          <h3>AVS-G 参考侧</h3>
+          <ul class="tight">
+            <li><code>docs/0_avsStructure/基因比对压缩封装格式规范.md:29-35</code>：AVS-G 顶层结构 <code>avsg + HEADER + COMP_DATA + TAILER</code></li>
+            <li><code>docs/0_avsStructure/基因比对压缩封装格式规范.md:171-215</code>：TAILER 中的 BLOCK_INFO 与 ENCODER_PARAM 思路</li>
+            <li><code>VCF_gVCF接入AVS映射草案-260413.xlsx</code> 的 <strong>结构</strong>、<strong>现有GSC到AVS映射</strong>、<strong>开放问题</strong> sheet：接入设计主干</li>
+          </ul>
+        </div>
+        <div class="card">
+          <h3>现有实现侧</h3>
+          <ul class="tight">
+            <li><code>src/compressor.cpp:456-479</code>：<code>.gsc</code> 顶层头占位写法</li>
+            <li><code>src/compressor.cpp:109-229</code>：main archive 实际写序</li>
+            <li><code>src/compressor.cpp:290-323</code>：回填 <code>other_fields_offset</code> / <code>sdsl_offset</code></li>
+            <li><code>src/compressor.cpp:2897-2923</code>：GT row-block payload + marker</li>
+            <li><code>src/compressor.cpp:1343-1395</code>：<code>part2_params</code> 生成</li>
+            <li><code>src/decompression_reader.cpp:101-148</code>：reader 先读头、再读 SDSL 尾区</li>
+            <li><code>src/decompression_reader.cpp:551-625</code>：reader 读取 <code>part2_params</code></li>
+            <li><code>src/gvcf/gvcf_compressor.h:20-21</code>：gVCF native magic/version</li>
+          </ul>
+        </div>
+      </div>
+
+      <div class="callout good">
+        <strong>适合组会最后一句收束：</strong>
+        我认为这份映射草案最大的成功，不是把现有字段“对号入座”，而是把问题重新分解成了：
+        <strong>AVS 负责封装、现有 GSC / gVCF 负责 payload、映射层负责桥接</strong>。
+        只要后续把块粒度、other-fields 组织方式和 GT 参数区定义再钉牢，这条路线完全可以落地。
+      </div>
+    </section>
+  </main>
+
+  <footer class="footer">
+    <div class="footer-inner">
+      本 HTML 已按 AVS-G 映射汇报重新生成，可直接用浏览器打开，或打印为 PDF 用于组会展示。
+    </div>
+  </footer>
+</body>
+</html>

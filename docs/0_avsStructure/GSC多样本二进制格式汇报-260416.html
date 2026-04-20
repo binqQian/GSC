@@ -1,0 +1,1114 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>GSC 多样本 .gsc 二进制格式整理汇报</title>
+  <style>
+    :root {
+      --bg: #f5f7fb;
+      --paper: #ffffff;
+      --text: #1f2937;
+      --muted: #5f6b7a;
+      --line: #d9e2ec;
+      --primary: #2457d6;
+      --primary-soft: #eaf1ff;
+      --green: #0f9f6e;
+      --green-soft: #e9fbf3;
+      --orange: #c97800;
+      --orange-soft: #fff4e5;
+      --red: #c53b3b;
+      --red-soft: #fff1f1;
+      --shadow: 0 10px 30px rgba(20, 36, 80, 0.08);
+      --radius: 18px;
+    }
+
+    * { box-sizing: border-box; }
+    html { scroll-behavior: smooth; }
+    body {
+      margin: 0;
+      font-family: "Segoe UI", "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", sans-serif;
+      color: var(--text);
+      background: linear-gradient(180deg, #f7f9fc 0%, #eef3fa 100%);
+      line-height: 1.65;
+    }
+
+    a { color: var(--primary); text-decoration: none; }
+    a:hover { text-decoration: underline; }
+
+    .hero {
+      padding: 48px 24px 30px;
+      background:
+        radial-gradient(circle at top right, rgba(36,87,214,0.13), transparent 32%),
+        radial-gradient(circle at left top, rgba(15,159,110,0.11), transparent 26%),
+        linear-gradient(135deg, #ffffff 0%, #f4f8ff 100%);
+      border-bottom: 1px solid #e3eaf5;
+    }
+
+    .hero-inner,
+    main,
+    .footer-inner {
+      width: min(1200px, calc(100vw - 32px));
+      margin: 0 auto;
+    }
+
+    .eyebrow {
+      display: inline-block;
+      padding: 6px 12px;
+      border-radius: 999px;
+      background: var(--primary-soft);
+      color: var(--primary);
+      font-weight: 700;
+      font-size: 13px;
+      letter-spacing: .02em;
+    }
+
+    h1 {
+      font-size: clamp(30px, 4vw, 46px);
+      line-height: 1.16;
+      margin: 14px 0 16px;
+    }
+
+    .subtitle {
+      max-width: 920px;
+      font-size: 17px;
+      color: var(--muted);
+      margin-bottom: 22px;
+    }
+
+    .meta-row,
+    .quick-links,
+    .mini-tags {
+      display: flex;
+      gap: 10px;
+      flex-wrap: wrap;
+    }
+
+    .tag,
+    .quick-links a {
+      padding: 8px 12px;
+      border-radius: 999px;
+      background: #fff;
+      border: 1px solid #dde7f3;
+      box-shadow: 0 2px 10px rgba(30, 55, 90, 0.05);
+      color: #364152;
+      font-size: 14px;
+    }
+
+    .topnav {
+      position: sticky;
+      top: 0;
+      z-index: 20;
+      backdrop-filter: blur(12px);
+      background: rgba(245,247,251,0.86);
+      border-bottom: 1px solid rgba(217,226,236,0.9);
+    }
+
+    .topnav .inner {
+      width: min(1200px, calc(100vw - 32px));
+      margin: 0 auto;
+      display: flex;
+      gap: 12px;
+      overflow-x: auto;
+      padding: 12px 0;
+    }
+
+    .topnav a {
+      white-space: nowrap;
+      font-size: 14px;
+      color: #314155;
+      padding: 8px 12px;
+      border-radius: 999px;
+    }
+
+    .topnav a:hover {
+      background: rgba(36,87,214,0.08);
+      text-decoration: none;
+    }
+
+    main {
+      padding: 26px 0 56px;
+    }
+
+    section {
+      background: var(--paper);
+      border: 1px solid #e5ebf3;
+      border-radius: var(--radius);
+      box-shadow: var(--shadow);
+      padding: 28px;
+      margin-bottom: 22px;
+    }
+
+    h2 {
+      font-size: 28px;
+      margin: 0 0 6px;
+    }
+
+    h3 {
+      font-size: 20px;
+      margin: 0 0 10px;
+    }
+
+    .section-lead {
+      color: var(--muted);
+      margin: 0 0 18px;
+    }
+
+    .grid {
+      display: grid;
+      gap: 16px;
+    }
+
+    .grid-2 { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+    .grid-3 { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+    .grid-4 { grid-template-columns: repeat(4, minmax(0, 1fr)); }
+
+    .card {
+      border: 1px solid var(--line);
+      border-radius: 16px;
+      background: #fff;
+      padding: 18px;
+    }
+
+    .card.soft-blue { background: #f7faff; }
+    .card.soft-green { background: #f5fcf8; }
+    .card.soft-orange { background: #fffaf2; }
+    .card.soft-red { background: #fff7f7; }
+
+    .kpi {
+      font-size: 34px;
+      font-weight: 800;
+      line-height: 1;
+      margin-bottom: 6px;
+      color: var(--primary);
+    }
+
+    .muted { color: var(--muted); }
+    .small { font-size: 14px; }
+
+    .ref {
+      display: inline-block;
+      padding: 3px 8px;
+      margin: 4px 6px 0 0;
+      border-radius: 999px;
+      background: #f0f4fa;
+      border: 1px solid #d8e2ee;
+      font-size: 12px;
+      color: #42536a;
+      font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    }
+
+    .callout {
+      border-left: 5px solid var(--primary);
+      padding: 14px 16px;
+      border-radius: 12px;
+      background: var(--primary-soft);
+      margin: 16px 0;
+    }
+
+    .callout.warn {
+      border-left-color: var(--orange);
+      background: var(--orange-soft);
+    }
+
+    .callout.danger {
+      border-left-color: var(--red);
+      background: var(--red-soft);
+    }
+
+    .callout.success {
+      border-left-color: var(--green);
+      background: var(--green-soft);
+    }
+
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      font-size: 14px;
+      overflow: hidden;
+      border-radius: 14px;
+      border: 1px solid var(--line);
+    }
+
+    th, td {
+      padding: 11px 12px;
+      border-bottom: 1px solid var(--line);
+      vertical-align: top;
+      text-align: left;
+    }
+
+    thead th {
+      background: #f6f9fd;
+      font-weight: 700;
+      color: #334155;
+    }
+
+    tbody tr:nth-child(even) td {
+      background: #fbfcfe;
+    }
+
+    code, pre {
+      font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    }
+
+    pre {
+      margin: 0;
+      padding: 16px;
+      border-radius: 14px;
+      background: #0f172a;
+      color: #dbe7ff;
+      overflow-x: auto;
+      font-size: 13px;
+      line-height: 1.55;
+    }
+
+    .diagram-boxes {
+      display: grid;
+      grid-template-columns: repeat(4, minmax(0, 1fr));
+      gap: 12px;
+      align-items: stretch;
+      margin-top: 14px;
+    }
+
+    .diagram-box {
+      border-radius: 16px;
+      padding: 16px;
+      color: #10233f;
+      min-height: 150px;
+      border: 1px solid rgba(18, 44, 84, 0.08);
+      position: relative;
+    }
+
+    .diagram-box h4 {
+      margin: 0 0 8px;
+      font-size: 17px;
+    }
+
+    .diagram-box small {
+      display: block;
+      color: #46607f;
+      font-size: 12px;
+      margin-top: 10px;
+    }
+
+    .b1 { background: #e9f0ff; }
+    .b2 { background: #eef8ff; }
+    .b3 { background: #f5f6ff; }
+    .b4 { background: #edf9f3; }
+
+    .flow {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 10px;
+      align-items: center;
+    }
+
+    .step {
+      flex: 1 1 180px;
+      min-height: 92px;
+      padding: 16px;
+      border-radius: 15px;
+      border: 1px solid var(--line);
+      background: linear-gradient(180deg, #ffffff 0%, #f7faff 100%);
+    }
+
+    .arrow {
+      font-size: 24px;
+      color: #7b8aa0;
+      font-weight: 700;
+    }
+
+    .pill {
+      display: inline-block;
+      padding: 4px 9px;
+      border-radius: 999px;
+      font-size: 12px;
+      font-weight: 700;
+      letter-spacing: .01em;
+      margin-bottom: 8px;
+    }
+
+    .pill.blue { background: #eaf1ff; color: #2457d6; }
+    .pill.green { background: #e9fbf3; color: #0f9f6e; }
+    .pill.orange { background: #fff4e5; color: #c97800; }
+    .pill.red { background: #fff1f1; color: #c53b3b; }
+
+    .svg-wrap {
+      border: 1px solid var(--line);
+      border-radius: 16px;
+      overflow: hidden;
+      background: linear-gradient(180deg, #fbfdff 0%, #f6f9fd 100%);
+      margin: 12px 0 16px;
+    }
+
+    svg { width: 100%; height: auto; display: block; }
+
+    .two-col {
+      display: grid;
+      grid-template-columns: 1.15fr .85fr;
+      gap: 18px;
+      align-items: start;
+    }
+
+    ul.tight, ol.tight {
+      margin: 8px 0 0 18px;
+      padding: 0;
+    }
+
+    .footer {
+      padding: 0 24px 42px;
+    }
+
+    .footer-inner {
+      color: var(--muted);
+      font-size: 14px;
+    }
+
+    @media (max-width: 980px) {
+      .grid-4, .grid-3, .grid-2, .diagram-boxes, .two-col {
+        grid-template-columns: 1fr;
+      }
+      section { padding: 22px; }
+    }
+
+    @media print {
+      body { background: white; }
+      .topnav { display: none; }
+      section { break-inside: avoid; box-shadow: none; }
+      .hero { border-bottom: none; }
+    }
+  </style>
+</head>
+<body>
+  <header class="hero">
+    <div class="hero-inner">
+      <div class="eyebrow">GSC 项目 · 多样本 .gsc 格式汇报</div>
+      <h1>GSC 多样本 <code>.gsc</code> 二进制格式整理汇报</h1>
+      <p class="subtitle">
+        面向组会汇报的单文件 HTML 版本。内容以当前仓库源码为准，结合
+        <code>GSC多样本二进制格式结构表-260413.xlsx</code> 与现有 Markdown 说明，重点回答
+        “文件从头到尾怎么组织、哪些字段怎么定位、GT 与 lossless part2 如何理解”。
+      </p>
+      <div class="meta-row">
+        <span class="tag">整理日期：2026-04-16</span>
+        <span class="tag">汇报对象：导师 / 课题组</span>
+        <span class="tag">形式：单文件 HTML，可直接浏览或打印 PDF</span>
+      </div>
+      <div class="quick-links" style="margin-top:14px">
+        <a href="./GSC多样本二进制格式结构表-260413.xlsx">结构表 Excel</a>
+        <a href="./GSC多样本二进制格式说明.md">配套 Markdown 说明</a>
+      </div>
+    </div>
+  </header>
+
+  <nav class="topnav">
+    <div class="inner">
+      <a href="#summary">整理结论</a>
+      <a href="#sources">来源与范围</a>
+      <a href="#overall">总体文件布局</a>
+      <a href="#archive">Main Archive</a>
+      <a href="#chunk">Fixed-Fields Chunk</a>
+      <a href="#gt">GT Payload</a>
+      <a href="#part2">Lossless Part2</a>
+      <a href="#sdsl">SDSL Tail</a>
+      <a href="#risks">风险与建议</a>
+    </div>
+  </nav>
+
+  <main>
+    <section id="summary">
+      <h2>一、整理结论</h2>
+      <p class="section-lead">这次整理已经把“多样本 <code>.gsc</code> 文件的层次结构、关键偏移、chunk 子格式、GT 负载语义、lossless other-fields 容器”全部落到可追溯的代码锚点上。</p>
+      <div class="grid grid-4">
+        <div class="card soft-blue">
+          <div class="kpi">4 段</div>
+          <div><strong>顶层结构已澄清</strong></div>
+          <div class="muted small">top header / main archive / lossless part2 / sdsl tail</div>
+        </div>
+        <div class="card soft-green">
+          <div class="kpi">V2</div>
+          <div><strong>当前 fixed-fields chunk</strong></div>
+          <div class="muted small">writer 使用 <code>GSCF</code> + <code>V2</code> 目录格式</div>
+        </div>
+        <div class="card soft-orange">
+          <div class="kpi">3 个</div>
+          <div><strong>顶层关键字段</strong></div>
+          <div class="muted small"><code>mode_type</code>、<code>other_fields_offset</code>、<code>sdsl_offset</code></div>
+        </div>
+        <div class="card soft-red">
+          <div class="kpi">2 类</div>
+          <div><strong>主要工程风险</strong></div>
+          <div class="muted small">顶层无 magic/version；格式含 <code>bool</code> 与 <code>size_t</code></div>
+        </div>
+      </div>
+
+      <div class="callout success">
+        <strong>适合组会汇报的一句话：</strong>
+        当前多样本 <code>.gsc</code> 不是 AVS 外层封装，而是项目内部业务 payload 格式；其二进制组织方式已经可以按源码拆解为
+        “顶层头 + 主 archive + 可选 other-fields 多流容器 + 尾部 zero/copy 位图”。
+      </div>
+
+      <div class="grid grid-3">
+        <div class="card">
+          <span class="pill blue">已从代码确认</span>
+          <ul class="tight">
+            <li>顶层头写入、回填与读取逻辑</li>
+            <li>Main archive 字段顺序与 chunk 定位方式</li>
+            <li><code>GSCF</code> V2 row-block 目录布局</li>
+            <li>GT 压缩 payload 尾部 backend marker</li>
+            <li>lossless part2 的 footer 反序列化方式</li>
+            <li>SDSL 尾区四个 <code>rrr_vector</code> 的顺序</li>
+          </ul>
+        </div>
+        <div class="card">
+          <span class="pill orange">本轮整理价值</span>
+          <ul class="tight">
+            <li>把 Excel 从“结构表”提升为“可落地的代码级格式说明”</li>
+            <li>把 GT 和 other-fields 两条存储链分开讲清楚</li>
+            <li>明确了 final <code>.gsc</code> 中 chunk 没有独立长度前缀</li>
+            <li>明确了 current writer/reader 的兼容边界</li>
+          </ul>
+        </div>
+        <div class="card">
+          <span class="pill red">仍建议后续补强</span>
+          <ul class="tight">
+            <li>用一个真实样例做偏移级十六进制核验</li>
+            <li>再补一轮 legacy chunk 老文件实测</li>
+            <li>若要协议化对外发布，应引入固定宽度 + 顶层 magic/version</li>
+          </ul>
+        </div>
+      </div>
+    </section>
+
+    <section id="sources">
+      <h2>二、来源与适用范围</h2>
+      <p class="section-lead">本页汇报只针对当前仓库中 <strong>多样本</strong> <code>gsc compress / gsc decompress</code> 的实际 on-disk 格式，不覆盖单样本 gVCF 独立格式，也不等同于 AVS 外层封装。</p>
+
+      <div class="grid grid-2">
+        <div class="card soft-blue">
+          <h3>主要材料</h3>
+          <ul class="tight">
+            <li><code>docs/0_avsStructure/GSC多样本二进制格式结构表-260413.xlsx</code></li>
+            <li><code>docs/0_avsStructure/GSC多样本二进制格式说明.md</code></li>
+            <li>源码：<code>src/compressor.cpp</code>、<code>src/decompression_reader.cpp</code>、<code>src/file_handle.cpp</code>、<code>src/decompressor.cpp</code>、<code>src/variant.h</code></li>
+          </ul>
+        </div>
+        <div class="card soft-orange">
+          <h3>不在本页范围内</h3>
+          <ul class="tight">
+            <li><code>gsc gvcf</code> 产生的单样本 GVCF 独立格式</li>
+            <li>AVS <code>avsg</code> 外层容器规范本身</li>
+            <li>算法论文式性能分析</li>
+          </ul>
+        </div>
+      </div>
+
+      <div class="card" style="margin-top:16px">
+        <h3>Excel 与本报告的对应关系</h3>
+        <table>
+          <thead>
+            <tr>
+              <th>Excel Sheet</th>
+              <th>本报告中对应内容</th>
+              <th>对应代码锚点</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td>说明</td>
+              <td>文件范围、顶层结构、ABI 限制</td>
+              <td><span class="ref">src/compressor.cpp:456-479</span><span class="ref">src/decompression_reader.cpp:101-148</span></td>
+            </tr>
+            <tr>
+              <td>结构</td>
+              <td>top header → archive → part2 → sdsl 的全局层次</td>
+              <td><span class="ref">src/compressor.cpp:290-323</span><span class="ref">src/compressor.cpp:356-379</span></td>
+            </tr>
+            <tr>
+              <td>主Archive字段总表</td>
+              <td>Main archive 的顺序布局和字段含义</td>
+              <td><span class="ref">src/compressor.cpp:109-229</span></td>
+            </tr>
+            <tr>
+              <td>FixedFieldsChunk结构</td>
+              <td><code>GSCF</code> V2 chunk 头、目录与数据区</td>
+              <td><span class="ref">src/variant.h:356-361</span><span class="ref">src/compressor.cpp:2983-3028</span><span class="ref">src/decompression_reader.cpp:2866-2979</span></td>
+            </tr>
+            <tr>
+              <td>GT与Part2补充</td>
+              <td>GT bitplane/LUT、marker、part2 多流容器</td>
+              <td><span class="ref">src/decompressor.cpp:1005-1044</span><span class="ref">src/compressor.cpp:2897-2923</span><span class="ref">src/file_handle.cpp:141-178</span></td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+    </section>
+
+    <section id="overall">
+      <h2>三、总体文件布局</h2>
+      <p class="section-lead">先把 <code>.gsc</code> 看成四段式容器，后面所有细节都只是这四段的内部展开。</p>
+
+      <div class="svg-wrap">
+        <svg viewBox="0 0 1200 270" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="GSC file overall layout">
+          <defs>
+            <linearGradient id="g1" x1="0" y1="0" x2="1" y2="1">
+              <stop offset="0%" stop-color="#e8f0ff" />
+              <stop offset="100%" stop-color="#d8e7ff" />
+            </linearGradient>
+            <linearGradient id="g2" x1="0" y1="0" x2="1" y2="1">
+              <stop offset="0%" stop-color="#eaf8ff" />
+              <stop offset="100%" stop-color="#d8f0ff" />
+            </linearGradient>
+            <linearGradient id="g3" x1="0" y1="0" x2="1" y2="1">
+              <stop offset="0%" stop-color="#f6f3ff" />
+              <stop offset="100%" stop-color="#e7e1ff" />
+            </linearGradient>
+            <linearGradient id="g4" x1="0" y1="0" x2="1" y2="1">
+              <stop offset="0%" stop-color="#eafaf1" />
+              <stop offset="100%" stop-color="#d7f5e4" />
+            </linearGradient>
+          </defs>
+          <rect x="50" y="92" width="150" height="88" rx="18" fill="url(#g1)" stroke="#9bb7f1"/>
+          <rect x="220" y="92" width="430" height="88" rx="18" fill="url(#g2)" stroke="#9cd3ea"/>
+          <rect x="670" y="92" width="260" height="88" rx="18" fill="url(#g3)" stroke="#b7aef0"/>
+          <rect x="950" y="92" width="200" height="88" rx="18" fill="url(#g4)" stroke="#9fd7b4"/>
+          <text x="125" y="127" text-anchor="middle" font-size="24" font-weight="700" fill="#17335f">TOP_HEADER</text>
+          <text x="125" y="153" text-anchor="middle" font-size="16" fill="#2c4c78">mode_type</text>
+          <text x="125" y="173" text-anchor="middle" font-size="16" fill="#2c4c78">other_fields_offset</text>
+          <text x="125" y="193" text-anchor="middle" font-size="16" fill="#2c4c78">sdsl_offset</text>
+
+          <text x="435" y="127" text-anchor="middle" font-size="24" font-weight="700" fill="#12485f">MAIN_ARCHIVE</text>
+          <text x="435" y="153" text-anchor="middle" font-size="16" fill="#24586f">索引 / 参数 / meta / fixed-fields chunks</text>
+          <text x="435" y="175" text-anchor="middle" font-size="16" fill="#24586f">真正的主体区域</text>
+
+          <text x="800" y="127" text-anchor="middle" font-size="24" font-weight="700" fill="#4a3a7b">LOSSLESS PART2</text>
+          <text x="800" y="153" text-anchor="middle" font-size="16" fill="#5e4d94">仅 mode_type = true 存在</text>
+          <text x="800" y="175" text-anchor="middle" font-size="16" fill="#5e4d94">File_Handle_2 多流容器</text>
+
+          <text x="1050" y="127" text-anchor="middle" font-size="24" font-weight="700" fill="#1b6640">SDSL TAIL</text>
+          <text x="1050" y="153" text-anchor="middle" font-size="16" fill="#2b7d50">4 × rrr_vector</text>
+          <text x="1050" y="175" text-anchor="middle" font-size="16" fill="#2b7d50">zeros / copies</text>
+
+          <line x1="200" y1="136" x2="220" y2="136" stroke="#7e8ea5" stroke-width="3" />
+          <polygon points="220,136 210,130 210,142" fill="#7e8ea5" />
+          <line x1="650" y1="136" x2="670" y2="136" stroke="#7e8ea5" stroke-width="3" />
+          <polygon points="670,136 660,130 660,142" fill="#7e8ea5" />
+          <line x1="930" y1="136" x2="950" y2="136" stroke="#7e8ea5" stroke-width="3" />
+          <polygon points="950,136 940,130 940,142" fill="#7e8ea5" />
+
+          <text x="50" y="58" font-size="18" fill="#41556f">offset 0</text>
+          <text x="230" y="58" font-size="18" fill="#41556f">offset = header_size</text>
+          <text x="675" y="58" font-size="18" fill="#41556f">offset = other_fields_offset</text>
+          <text x="950" y="58" font-size="18" fill="#41556f">offset = sdsl_offset</text>
+        </svg>
+      </div>
+
+      <div class="two-col">
+        <div>
+          <h3>源码里的真实写法</h3>
+          <div class="flow">
+            <div class="step">
+              <span class="pill blue">Step 1</span>
+              <strong>先写占位头部</strong>
+              <div class="small muted">先写 <code>mode_type=false</code> 与两个 offset 占位值。</div>
+              <div class="ref">src/compressor.cpp:456-479</div>
+            </div>
+            <div class="arrow">→</div>
+            <div class="step">
+              <span class="pill blue">Step 2</span>
+              <strong>写 main archive</strong>
+              <div class="small muted">依次写 chunk 索引、基础参数、meta、fixed-fields chunks。</div>
+              <div class="ref">src/compressor.cpp:109-229</div>
+            </div>
+            <div class="arrow">→</div>
+            <div class="step">
+              <span class="pill blue">Step 3</span>
+              <strong>追加 lossless part2</strong>
+              <div class="small muted">若存在 other fields，则把临时 part2 文件拼进最终输出。</div>
+              <div class="ref">src/compressor.cpp:290-314</div>
+            </div>
+            <div class="arrow">→</div>
+            <div class="step">
+              <span class="pill blue">Step 4</span>
+              <strong>回填 offset，再追加 SDSL</strong>
+              <div class="small muted">回到文件头写入真实 offset，然后把 4 个 <code>rrr_vector</code> 追加到尾部。</div>
+              <div class="ref">src/compressor.cpp:316-379</div>
+            </div>
+          </div>
+        </div>
+        <div>
+          <h3>源码里的读取顺序</h3>
+          <ol class="tight">
+            <li>读取顶层头部：<code>mode_type</code>、<code>other_fields_offset</code>、<code>sdsl_offset</code></li>
+            <li>先跳到 <code>sdsl_offset</code> 加载尾部 4 个 <code>rrr_vector</code></li>
+            <li>再回到 <code>header_size</code> 位置读取 main archive</li>
+            <li>若 <code>mode_type=true</code>，把 <code>[other_fields_offset, sdsl_offset)</code> 作为 part2 容器区间使用</li>
+          </ol>
+          <div class="ref">src/decompression_reader.cpp:101-148</div>
+          <div class="callout warn">
+            <strong>汇报时值得强调：</strong>
+            当前顶层没有全局 magic/version，文件识别高度依赖双方代码约定。
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <section id="archive">
+      <h2>四、Main Archive：文件主体的字段顺序</h2>
+      <p class="section-lead">Main archive 从头部后开始，到 <code>other_fields_offset</code> 为止。它是解压时最核心的一段。</p>
+
+      <div class="diagram-boxes">
+        <div class="diagram-box b1">
+          <h4>1. chunk 定位表</h4>
+          <div><code>chunks_streams_size</code></div>
+          <div><code>chunks_streams[]</code></div>
+          <small>用来定位每个 fixed-fields chunk 的边界。</small>
+        </div>
+        <div class="diagram-box b2">
+          <h4>2. 基础参数</h4>
+          <div><code>ploidy</code> / <code>max_block_rows</code></div>
+          <div><code>max_block_cols</code> / <code>vec_len</code></div>
+          <div><code>no_vec</code> / <code>copy_no</code> / <code>n_samples</code></div>
+          <small>决定 GT 维度和块划分。</small>
+        </div>
+        <div class="diagram-box b3">
+          <h4>3. 索引与 meta</h4>
+          <div><code>chunks_min_pos[]</code></div>
+          <div><code>where_chrom[]</code></div>
+          <div><code>n_col_blocks</code> / permutation / meta</div>
+          <small>支持范围查询、列分块和 header/sample 恢复。</small>
+        </div>
+        <div class="diagram-box b4">
+          <h4>4. fixed-fields chunk 串</h4>
+          <div>各 chunk payload 直接顺序拼接</div>
+          <div>final 文件中无 per-chunk size 前缀</div>
+          <small>必须依赖 <code>chunks_streams[].offset</code> 定位。</small>
+        </div>
+      </div>
+
+      <div class="card" style="margin-top:18px">
+        <h3>主 archive 的关键字段组</h3>
+        <table>
+          <thead>
+            <tr>
+              <th>字段组</th>
+              <th>代表字段</th>
+              <th>作用</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td>chunk 边界索引</td>
+              <td><code>chunks_streams_size</code>、<code>chunks_stream_item</code></td>
+              <td>定位每个 chunk 在 final <code>.gsc</code> 中的绝对位置</td>
+            </tr>
+            <tr>
+              <td>GT 基础参数</td>
+              <td><code>ploidy</code>、<code>max_block_rows</code>、<code>max_block_cols</code>、<code>no_vec</code></td>
+              <td>解释 GT 行/列分块和向量数量</td>
+            </tr>
+            <tr>
+              <td>copy/zero 辅助信息</td>
+              <td><code>copy_no</code>、<code>used_bits_cp</code>、<code>bm_comp_copy_orgl_id</code></td>
+              <td>恢复 copy 行引用的 origin unique 行</td>
+            </tr>
+            <tr>
+              <td>范围查询索引</td>
+              <td><code>chunks_min_pos[]</code>、<code>where_chrom[]</code></td>
+              <td>辅助根据染色体和 POS 定位 chunk</td>
+            </tr>
+            <tr>
+              <td>列分块与排列</td>
+              <td><code>n_col_blocks</code>、<code>col_block_item</code>、permutation entries</td>
+              <td>恢复 tiled 模式下每个列块的单倍体范围与排列</td>
+            </tr>
+            <tr>
+              <td>元数据</td>
+              <td><code>meta_magic</code>、<code>meta_backend</code>、header/sample payload</td>
+              <td>重建 VCF header 和 sample 名列表</td>
+            </tr>
+          </tbody>
+        </table>
+        <div style="margin-top:12px">
+          <span class="ref">src/compressor.cpp:109-201</span>
+          <span class="ref">src/decompression_reader.cpp:210-226 之后的 archive 解析</span>
+        </div>
+      </div>
+
+      <div class="callout warn">
+        <strong>本轮整理中最关键的澄清点之一：</strong>
+        final <code>.gsc</code> 的 chunk payload 前没有长度前缀；临时文件里有 <code>uint64 size</code>，但写入最终文件时只保留 payload 本体，边界完全依赖 <code>chunks_streams[].offset</code>。
+      </div>
+
+      <div class="grid grid-2">
+        <div class="card soft-blue">
+          <h3>一个很值得讲的实现细节</h3>
+          <p>writer 在写完整个主体之后，会回到文件头重写真实的 <code>other_fields_offset</code> 和 <code>sdsl_offset</code>，并且再跳到 <code>21</code> 字节处回填 chunk 的绝对偏移。</p>
+          <pre>fseek(comp, 0, SEEK_SET);
+fwrite(&mode_type, ...);
+fwrite(&other_fields_offset, ...);
+fwrite(&sdsl_offset, ...);
+
+fseek(comp, 21, SEEK_SET);
+for (auto cur_chunk : chunks_streams) {
+    fwrite(&cur_chunk.second.cur_chunk_actual_pos, ...);
+    fwrite(&cur_chunk.second.offset, ...);
+}</pre>
+          <div class="ref">src/compressor.cpp:319-329</div>
+        </div>
+        <div class="card soft-red">
+          <h3>协议层面的隐患</h3>
+          <ul class="tight">
+            <li>顶层头部使用 <code>bool</code></li>
+            <li><code>chunk_stream_item</code>、<code>where_chrom</code> 中使用 <code>size_t</code></li>
+            <li>这意味着当前格式默认假定 64-bit little-endian + ABI 一致</li>
+          </ul>
+          <div class="ref">src/compressor.cpp:113-115</div>
+          <div class="ref">src/compressor.cpp:140-143</div>
+          <div class="ref">src/decompression_reader.cpp:104-123</div>
+        </div>
+      </div>
+    </section>
+
+    <section id="chunk">
+      <h2>五、Fixed-Fields Chunk：当前 writer 实际输出的是 <code>GSCF V2</code></h2>
+      <p class="section-lead">Main archive 内部并不是平铺的“字段流”，而是一个个 fixed-fields chunk。每个 chunk 目前都带有 row-block 目录，便于范围查询与按块解码。</p>
+
+      <div class="svg-wrap">
+        <svg viewBox="0 0 1200 420" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="GSCF V2 fixed fields chunk layout">
+          <rect x="40" y="50" width="1120" height="320" rx="20" fill="#fbfdff" stroke="#d8e2ee" stroke-width="2"/>
+          <rect x="80" y="95" width="240" height="230" rx="18" fill="#eaf1ff" stroke="#a3b8eb"/>
+          <rect x="350" y="95" width="320" height="230" rx="18" fill="#eef7ff" stroke="#a9d2ea"/>
+          <rect x="700" y="95" width="410" height="230" rx="18" fill="#f5fcf8" stroke="#a7d9bc"/>
+
+          <text x="200" y="132" text-anchor="middle" font-size="24" font-weight="700" fill="#234d92">CHUNK HEADER</text>
+          <text x="200" y="164" text-anchor="middle" font-size="17" fill="#355b9b">magic = GSCF</text>
+          <text x="200" y="189" text-anchor="middle" font-size="17" fill="#355b9b">version = 2</text>
+          <text x="200" y="214" text-anchor="middle" font-size="17" fill="#355b9b">total_variants</text>
+          <text x="200" y="239" text-anchor="middle" font-size="17" fill="#355b9b">row_block_count</text>
+          <text x="200" y="264" text-anchor="middle" font-size="17" fill="#355b9b">flags</text>
+
+          <text x="510" y="132" text-anchor="middle" font-size="24" font-weight="700" fill="#16617b">ROW-BLOCK DIRECTORY</text>
+          <text x="510" y="164" text-anchor="middle" font-size="16" fill="#2f7289">每个目录项包含</text>
+          <text x="510" y="189" text-anchor="middle" font-size="16" fill="#2f7289">variant_count / first_pos / last_pos</text>
+          <text x="510" y="214" text-anchor="middle" font-size="16" fill="#2f7289">chrom/pos/id/ref/alt/qual 的 off/size</text>
+          <text x="510" y="239" text-anchor="middle" font-size="16" fill="#2f7289">以及 V2 新增的 gt_off / gt_size</text>
+          <text x="510" y="266" text-anchor="middle" font-size="16" fill="#2f7289">offset 相对 chunk 起点</text>
+
+          <text x="905" y="132" text-anchor="middle" font-size="24" font-weight="700" fill="#25704b">DATA REGION</text>
+          <text x="905" y="165" text-anchor="middle" font-size="16" fill="#307d57">按 row-block 顺序拼接</text>
+          <text x="905" y="193" text-anchor="middle" font-size="16" fill="#307d57">chrom → pos → id → ref → alt → qual → gt</text>
+          <text x="905" y="221" text-anchor="middle" font-size="16" fill="#307d57">reader 主要依赖目录项 off/size 定位</text>
+          <text x="905" y="249" text-anchor="middle" font-size="16" fill="#307d57">而不是靠固定顺序硬编码偏移</text>
+          <text x="905" y="277" text-anchor="middle" font-size="16" fill="#307d57">V2 可按 row-block 精确取 GT segment</text>
+        </svg>
+      </div>
+
+      <div class="grid grid-2">
+        <div class="card">
+          <h3>关键常量</h3>
+          <ul class="tight">
+            <li><code>GSC_FIXED_FIELDS_RB_MAGIC = 0x46435347</code>，按 little-endian 可视为 <code>"GSCF"</code></li>
+            <li><code>GSC_FIXED_FIELDS_RB_VERSION_V1 = 1</code></li>
+            <li><code>GSC_FIXED_FIELDS_RB_VERSION_V2 = 2</code></li>
+            <li>当前 writer 使用 <code>GSC_FIXED_FIELDS_RB_VERSION_LATEST</code>，即 V2</li>
+          </ul>
+          <div class="ref">src/variant.h:356-361</div>
+        </div>
+        <div class="card">
+          <h3>reader 的兼容逻辑</h3>
+          <ul class="tight">
+            <li>先看 chunk 起点 4 字节是不是 <code>GSCF</code></li>
+            <li>若是，则读取 version、目录项并建立 <code>fixed_fields_rb_dir</code></li>
+            <li>若不是，则回退到旧的 legacy 平铺格式</li>
+          </ul>
+          <div class="ref">src/decompression_reader.cpp:2862-2987</div>
+        </div>
+      </div>
+
+      <div class="card" style="margin-top:16px">
+        <h3>为什么这部分重要</h3>
+        <ol class="tight">
+          <li>它解释了为什么当前解压器可以在新文件上做更精细的范围查询。</li>
+          <li>它解释了 fixed fields 和 GT 在 chunk 内部其实已经分段管理，而不是一坨连续未标注字节。</li>
+          <li>它是从“结构表”进入“可写解析器”的关键一环。</li>
+        </ol>
+        <div style="margin-top:8px">
+          <span class="ref">src/compressor.cpp:2983-3028</span>
+          <span class="ref">src/decompression_reader.cpp:3404-3459</span>
+        </div>
+      </div>
+    </section>
+
+    <section id="gt">
+      <h2>六、GT Payload：不是文本 GT，而是变换后的索引流</h2>
+      <p class="section-lead">这一部分通常最容易被误解。GT 在 <code>.gsc</code> 中不是直接保存 <code>0/0</code>、<code>0/1</code> 之类字符串，而是两条 bitplane 及其变换结果。</p>
+
+      <div class="grid grid-2">
+        <div class="card soft-blue">
+          <h3>GT 两条 bitplane 的恢复语义</h3>
+          <table>
+            <thead>
+              <tr><th>MSB</th><th>LSB</th><th>恢复字符</th></tr>
+            </thead>
+            <tbody>
+              <tr><td>0</td><td>0</td><td><code>0</code></td></tr>
+              <tr><td>0</td><td>1</td><td><code>1</code></td></tr>
+              <tr><td>1</td><td>0</td><td><code>.</code></td></tr>
+              <tr><td>1</td><td>1</td><td><code>2</code></td></tr>
+            </tbody>
+          </table>
+          <div style="margin-top:10px">
+            <span class="ref">src/decompressor.cpp:1005-1044</span>
+          </div>
+        </div>
+        <div class="card soft-green">
+          <h3>汇报时建议这样解释</h3>
+          <ul class="tight">
+            <li><code>no_vec</code> 通常约等于 <code>2 × 变体数</code></li>
+            <li>GT payload 本质上更接近“位平面编码 + 稀疏索引流”</li>
+            <li>因此它与 other fields 的存储方式完全不同</li>
+            <li>也因此需要额外的 zero/copy 位图辅助恢复</li>
+          </ul>
+        </div>
+      </div>
+
+      <div class="card" style="margin-top:16px">
+        <h3>GT 的文件内落盘链路</h3>
+        <div class="flow">
+          <div class="step">
+            <span class="pill blue">Phase A</span>
+            <strong>两条 bitplane</strong>
+            <div class="small muted">以 haplotype 为单位编码 0 / 1 / . / 2 四态。</div>
+          </div>
+          <div class="arrow">→</div>
+          <div class="step">
+            <span class="pill blue">Phase B</span>
+            <strong>块内处理</strong>
+            <div class="small muted">经过排列、差分/XOR、稀疏化和 zero/copy 抽取。</div>
+          </div>
+          <div class="arrow">→</div>
+          <div class="step">
+            <span class="pill blue">Phase C</span>
+            <strong>压缩为 GT row-block</strong>
+            <div class="small muted">每个 row-block 的 GT 索引流单独压缩。</div>
+          </div>
+          <div class="arrow">→</div>
+          <div class="step">
+            <span class="pill blue">Phase D</span>
+            <strong>尾部追加 marker</strong>
+            <div class="small muted">最后追加 1 byte backend marker，reader 先取 marker 再解压。</div>
+          </div>
+        </div>
+      </div>
+
+      <div class="grid grid-2" style="margin-top:16px">
+        <div class="card">
+          <h3>GT codec marker</h3>
+          <table>
+            <thead>
+              <tr><th>marker</th><th>backend</th><th>代码位置</th></tr>
+            </thead>
+            <tbody>
+              <tr><td><code>0</code></td><td>BSC</td><td><code>case compression_backend_t::bsc</code></td></tr>
+              <tr><td><code>1</code></td><td>Zstd</td><td><code>case compression_backend_t::zstd</code></td></tr>
+              <tr><td><code>2</code></td><td>Brotli</td><td><code>case compression_backend_t::brotli</code></td></tr>
+            </tbody>
+          </table>
+          <div style="margin-top:10px">
+            <span class="ref">src/compressor.cpp:2897-2923</span>
+            <span class="ref">src/compressor.cpp:2825-2844</span>
+          </div>
+        </div>
+        <div class="card">
+          <h3>reader 侧对应理解</h3>
+          <ul class="tight">
+            <li>V2 chunk 中 GT 是按 row-block 分段存的</li>
+            <li>解压时可直接用目录项的 <code>gt_off</code> / <code>gt_size</code> 取出对应 segment</li>
+            <li>这让固定字段与 GT 的局部解码更自然</li>
+          </ul>
+          <div class="ref">src/decompression_reader.cpp:3456-3459</div>
+        </div>
+      </div>
+
+      <div class="callout warn">
+        <strong>汇报时可特别强调：</strong>
+        GT payload 的最后 1 个字节不是数据正文，而是 codec marker；如果忽略这一点，手写 reader 很容易把解压输入流读错。
+      </div>
+    </section>
+
+    <section id="part2">
+      <h2>七、Lossless Part2：other fields 不是顺序字段，而是多流容器</h2>
+      <p class="section-lead">当 <code>mode_type = true</code> 时，<code>[other_fields_offset, sdsl_offset)</code> 区间会保存 FILTER / INFO / FORMAT 等 other fields。这里不是 main archive 那种顺序布局，而是 <code>File_Handle_2</code> 管理的多流容器。</p>
+
+      <div class="svg-wrap">
+        <svg viewBox="0 0 1200 280" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="part2 multistream container layout">
+          <rect x="50" y="90" width="620" height="110" rx="18" fill="#eef7ff" stroke="#a8cfe6"/>
+          <rect x="700" y="90" width="290" height="110" rx="18" fill="#fff8e8" stroke="#e3c789"/>
+          <rect x="1010" y="90" width="140" height="110" rx="18" fill="#f5f3ff" stroke="#c6b8eb"/>
+          <text x="360" y="128" text-anchor="middle" font-size="24" font-weight="700" fill="#1b5c7b">STREAM PAYLOAD PARTS</text>
+          <text x="360" y="158" text-anchor="middle" font-size="16" fill="#31738b">part2_params / key_i_size / key_i_data / ...</text>
+          <text x="360" y="182" text-anchor="middle" font-size="16" fill="#31738b">每个 stream 由多个 part 组成</text>
+
+          <text x="845" y="128" text-anchor="middle" font-size="24" font-weight="700" fill="#8a5a00">FOOTER</text>
+          <text x="845" y="158" text-anchor="middle" font-size="16" fill="#9a6a0a">记录 stream 名称、part 数量</text>
+          <text x="845" y="182" text-anchor="middle" font-size="16" fill="#9a6a0a">以及每个 part 的 offset / size</text>
+
+          <text x="1080" y="128" text-anchor="middle" font-size="24" font-weight="700" fill="#5a45a3">FOOTER_SIZE</text>
+          <text x="1080" y="158" text-anchor="middle" font-size="16" fill="#6f5ab2">固定 8 bytes</text>
+          <text x="1080" y="182" text-anchor="middle" font-size="16" fill="#6f5ab2">从尾部倒读</text>
+        </svg>
+      </div>
+
+      <div class="grid grid-2">
+        <div class="card soft-blue">
+          <h3>stream 是怎么注册出来的</h3>
+          <ul class="tight">
+            <li>每个 key 会注册 <code>key_i_size</code> 和 <code>key_i_data</code> 两个 stream</li>
+            <li>整体参数则注册为 <code>part2_params</code></li>
+          </ul>
+          <div class="ref">src/compression_reader.cpp:357-364</div>
+          <div class="ref">src/compressor.cpp:1343-1395</div>
+        </div>
+        <div class="card soft-green">
+          <h3>footer 是怎么读回来的</h3>
+          <ul class="tight">
+            <li>先从尾部读固定 8-byte <code>footer_size</code></li>
+            <li>再跳到 footer 起点，恢复 <code>n_streams</code> 和每个 stream 的 parts</li>
+            <li>最后按 stream 名反查对应逻辑流</li>
+          </ul>
+          <div class="ref">src/file_handle.cpp:141-178</div>
+          <div class="ref">src/file_handle.cpp:178-255</div>
+        </div>
+      </div>
+
+      <div class="card" style="margin-top:16px">
+        <h3><code>part2_params</code> 流中到底装了什么</h3>
+        <ol class="tight">
+          <li>先放 1 byte backend id，表示本参数块本身用什么 backend 压缩。</li>
+          <li>然后放压缩后的参数描述体。</li>
+          <li>解开后依次能读到：<code>actual_variants[]</code>、<code>no_keys</code>、<code>key_gt_id</code>、<code>keys[]</code>、<code>backend</code>、FORMAT dictionaries blob。</li>
+        </ol>
+        <div style="margin-top:10px">
+          <span class="ref">src/compressor.cpp:1343-1395</span>
+          <span class="ref">src/decompression_reader.cpp:551-625</span>
+        </div>
+      </div>
+
+      <div class="callout success">
+        <strong>组会上建议这样概括：</strong>
+        lossless 模式下，GT 仍在 main archive 的 fixed-fields chunk 中；FILTER/INFO/FORMAT 等 other fields 则被拆到 part2 多流容器中。二者是并列的两条存储链，而不是都混在同一个顺序结构里。
+      </div>
+    </section>
+
+    <section id="sdsl">
+      <h2>八、SDSL Tail：zero/copy 位图在文件尾</h2>
+      <p class="section-lead">SDSL 尾区是 GT 恢复链上不可忽略的一段。reader 会优先跳到 <code>sdsl_offset</code>，把四个 <code>rrr_vector</code> 先加载进来。</p>
+
+      <div class="grid grid-2">
+        <div class="card">
+          <h3>尾区顺序</h3>
+          <ol class="tight">
+            <li><code>zeros parity 0</code></li>
+            <li><code>zeros parity 1</code></li>
+            <li><code>copies parity 0</code></li>
+            <li><code>copies parity 1</code></li>
+          </ol>
+          <div style="margin-top:10px">
+            <span class="ref">src/compressor.cpp:340-379</span>
+            <span class="ref">src/decompression_reader.cpp:142-147</span>
+          </div>
+        </div>
+        <div class="card">
+          <h3>它的作用</h3>
+          <ul class="tight">
+            <li>帮助判断某个 GT 行是否为全零行</li>
+            <li>帮助判断某个 GT 行是否为 copy 行</li>
+            <li>与 <code>bm_comp_copy_orgl_id</code> 一起恢复 copy 行的 origin unique 行</li>
+          </ul>
+        </div>
+      </div>
+    </section>
+
+    <section id="risks">
+      <h2>九、适合向导师汇报的风险点与下一步建议</h2>
+      <p class="section-lead">除了结构本身，这些“格式工程风险”也值得在汇报里带出来，因为它们决定了文档今后能否演进为更稳定的对外规范。</p>
+
+      <div class="grid grid-3">
+        <div class="card soft-red">
+          <h3>风险 1：顶层无 magic/version</h3>
+          <p class="small">当前 reader 依赖固定读法和上下文约定来解释文件，不是强约束的自描述格式。</p>
+          <div class="ref">src/decompression_reader.cpp:101-123</div>
+        </div>
+        <div class="card soft-red">
+          <h3>风险 2：含 ABI 敏感类型</h3>
+          <p class="small">顶层头使用 <code>bool</code>，archive 中多处使用 <code>size_t</code>，跨平台稳定性不足。</p>
+          <div class="ref">src/compressor.cpp:113-115</div>
+          <div class="ref">src/compressor.cpp:140-143</div>
+        </div>
+        <div class="card soft-red">
+          <h3>风险 3：chunk 边界外显但不自包含</h3>
+          <p class="small">final <code>.gsc</code> 中 chunk 没有独立长度头；一旦边界索引损坏，局部恢复会更困难。</p>
+          <div class="ref">src/compressor.cpp:203-229</div>
+        </div>
+      </div>
+
+      <div class="grid grid-3" style="margin-top:16px">
+        <div class="card soft-green">
+          <h3>建议 1：做样例 hexdump</h3>
+          <p class="small">用一个极小 toy 文件，把 header、archive、part2、tail 的真实偏移打印出来，与 Excel 和本报告逐项比对。</p>
+        </div>
+        <div class="card soft-green">
+          <h3>建议 2：补 legacy 实测</h3>
+          <p class="small">当前 reader 兼容 legacy chunk，但汇报时可说明：新旧两条路径已读过代码，下一步建议用老样例再跑一轮验证。</p>
+        </div>
+        <div class="card soft-green">
+          <h3>建议 3：若对外协议化，先版本化</h3>
+          <p class="small">优先引入顶层 magic/version、去掉 <code>size_t</code>/<code>bool</code>，再考虑与 AVS 容器做更正式的映射。</p>
+        </div>
+      </div>
+
+      <div class="callout">
+        <strong>向导师汇报时的推荐收束语：</strong>
+        目前这份整理已经把多样本 <code>.gsc</code> 从“仅能靠源码理解”推进到“可以按区段、字段、偏移、子格式分层讲清楚”的程度；下一步如果需要继续工程化，重点不是再补散乱说明，而是做样例核验和协议稳定化。
+      </div>
+    </section>
+
+    <section>
+      <h2>附：本次汇报可直接引用的关键代码锚点</h2>
+      <div class="grid grid-2">
+        <div class="card">
+          <h3>写路径</h3>
+          <ul class="tight">
+            <li><span class="ref">src/compressor.cpp:456-479</span> 写顶层头部占位值</li>
+            <li><span class="ref">src/compressor.cpp:109-229</span> 写 main archive 主体</li>
+            <li><span class="ref">src/compressor.cpp:290-323</span> 回填 <code>other_fields_offset</code> / <code>sdsl_offset</code></li>
+            <li><span class="ref">src/compressor.cpp:340-379</span> 追加 SDSL 尾区</li>
+            <li><span class="ref">src/compressor.cpp:2983-3028</span> 构造 <code>GSCF V2</code> chunk payload</li>
+            <li><span class="ref">src/compressor.cpp:2897-2923</span> GT row-block 压缩后追加 marker</li>
+            <li><span class="ref">src/compressor.cpp:1343-1395</span> 生成 <code>part2_params</code></li>
+          </ul>
+        </div>
+        <div class="card">
+          <h3>读路径</h3>
+          <ul class="tight">
+            <li><span class="ref">src/decompression_reader.cpp:101-148</span> 读顶层头并先加载 SDSL 尾区</li>
+            <li><span class="ref">src/decompression_reader.cpp:2866-2979</span> 解析 <code>GSCF</code> 新格式目录</li>
+            <li><span class="ref">src/decompression_reader.cpp:3456-3459</span> V2 row-block GT segment 解压入口</li>
+            <li><span class="ref">src/decompression_reader.cpp:551-625</span> 读取 <code>part2_params</code></li>
+            <li><span class="ref">src/file_handle.cpp:141-178</span> 序列化 part2 footer</li>
+            <li><span class="ref">src/file_handle.cpp:178-255</span> 反序列化 part2 footer</li>
+            <li><span class="ref">src/decompressor.cpp:1005-1044</span> GT bitplane 恢复 LUT</li>
+          </ul>
+        </div>
+      </div>
+    </section>
+  </main>
+
+  <footer class="footer">
+    <div class="footer-inner">
+      本文件为单文件静态 HTML，已放置于 <code>docs/0_avsStructure/</code>，可直接浏览器打开，或打印为 PDF 用于组会汇报。
+    </div>
+  </footer>
+</body>
+</html>
