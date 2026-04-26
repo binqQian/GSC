@@ -1,0 +1,296 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="2400" height="1700" viewBox="0 0 2400 1700">
+  <defs>
+    <style>
+      /* 学术风格字体 */
+      text { font-family: 'PingFang SC', 'Microsoft YaHei', Helvetica, Arial, sans-serif; fill: #000000; }
+      .mono { font-family: 'Courier New', Courier, monospace; }
+      
+      .title { font-size: 42px; font-weight: bold; fill: #000000; }
+      .subtitle { font-size: 20px; font-weight: normal; fill: #333333; }
+      
+      .panel-title { font-size: 28px; font-weight: bold; fill: #000000; }
+      .panel-desc { font-size: 16px; font-weight: normal; font-style: italic; fill: #555555; }
+      
+      .box-title { font-size: 20px; font-weight: bold; fill: #000000; }
+      .box-text { font-size: 15px; font-weight: normal; fill: #333333; }
+      .box-tiny { font-size: 13px; font-weight: normal; fill: #333333; }
+      .box-tiny-bold { font-size: 13px; font-weight: bold; fill: #000000; }
+      .box-mono { font-size: 14px; font-weight: bold; fill: #000000; }
+      
+      .tag-text { font-size: 12px; font-weight: bold; text-transform: uppercase; }
+      
+      /* 流程线 - 纯黑 */
+      .flow-line { stroke: #000000; stroke-width: 2; fill: none; }
+      .flow-arrow { stroke: #000000; stroke-width: 2; fill: none; marker-end: url(#arrow-solid); stroke-linecap: round; stroke-linejoin: round; }
+      .flow-dashed { stroke: #666666; stroke-width: 1.5; fill: none; stroke-dasharray: 6 4; marker-end: url(#arrow-dashed); stroke-linecap: round; stroke-linejoin: round; }
+      
+      /* 结构框 */
+      .base-bg { fill: #ffffff; }
+      .panel-border { stroke: #000000; stroke-width: 2.5; fill: none; }
+      
+      .box-border { fill: #ffffff; stroke: #000000; stroke-width: 1.5; }
+      .box-gray { fill: #f5f5f5; stroke: #000000; stroke-width: 1.5; }
+      .box-dark-gray { fill: #e0e0e0; stroke: #000000; stroke-width: 1.5; }
+      
+    </style>
+
+    <marker id="arrow-solid" markerWidth="14" markerHeight="12" refX="11" refY="6" orient="auto" markerUnits="userSpaceOnUse">
+      <path d="M1,1 L12,6 L1,11 L4.5,6 z" fill="#000000" />
+    </marker>
+    <marker id="arrow-dashed" markerWidth="14" markerHeight="12" refX="11" refY="6" orient="auto" markerUnits="userSpaceOnUse">
+      <path d="M1,1 L12,6 L1,11 L4.5,6 z" fill="#666666" />
+    </marker>
+  </defs>
+
+  <rect width="2400" height="1700" fill="#ffffff" />
+
+  <rect x="80" y="60" width="2240" height="120" fill="#ffffff" stroke="#000000" stroke-width="2"/>
+  <text x="140" y="115" class="title">GSC二进制封装格式</text>
+  <text x="140" y="150" class="subtitle">磁盘字节布局对比：多样本 .gsc 格式 (左) vs. 单样本原生 GVCF 文件 (右)</text>
+
+  <rect x="2000" y="95" width="280" height="40" fill="#ffffff" stroke="#000000" stroke-width="1.5"/>
+  <circle cx="2020" cy="115" r="5" fill="#000000"/>
+  <text x="2035" y="120" class="box-tiny">必选字段</text>
+  <circle cx="2140" cy="115" r="5" fill="#ffffff" stroke="#000000" stroke-width="2"/>
+  <text x="2155" y="120" class="box-tiny">条件字段</text>
+
+  <rect x="80" y="210" width="1100" height="1430" class="base-bg panel-border"/>
+  
+  <rect x="120" y="250" width="16" height="40" fill="#000000"/>
+  <text x="150" y="280" class="panel-title">多样本 .gsc 格式</text>
+  <text x="150" y="310" class="panel-desc">无全局魔数/版本。核心流：主归档区 + GSCF v2 块 + SDSL 尾部。</text>
+
+  <rect x="120" y="350" width="1020" height="110" class="box-border"/>
+  <text x="150" y="390" class="box-title">1. 顶层文件头 (17 字节)</text>
+  <text x="150" y="415" class="box-text">位于文件起始，指示压缩模式和主要部分的偏移量。</text>
+  
+  <rect x="420" y="370" width="200" height="70" class="box-dark-gray"/>
+  <text x="520" y="398" class="box-mono" text-anchor="middle">mode_type</text>
+  <text x="520" y="420" class="box-tiny" text-anchor="middle">布尔值 (true=无损)</text>
+  
+  <rect x="640" y="370" width="220" height="70" class="box-dark-gray"/>
+  <text x="750" y="398" class="box-mono" text-anchor="middle">other_fields_offset</text>
+  <text x="750" y="420" class="box-tiny" text-anchor="middle">uint64_t (其他字段)</text>
+  
+  <rect x="880" y="370" width="230" height="70" class="box-dark-gray"/>
+  <text x="995" y="398" class="box-mono" text-anchor="middle">sdsl_offset</text>
+  <text x="995" y="420" class="box-tiny" text-anchor="middle">uint64_t (尾部偏移)</text>
+
+  <rect x="120" y="490" width="1020" height="340" class="box-border"/>
+  <text x="150" y="530" class="box-title">2. 主归档区 (Main Archive)</text>
+  <text x="150" y="555" class="box-text">占据大部分空间。包含基础参数、元数据和序列化的变异块。</text>
+
+  <rect x="150" y="580" width="280" height="100" class="box-gray"/>
+  <text x="170" y="610" class="box-mono">chunk_streams</text>
+  <text x="170" y="635" class="box-tiny">1. chunk_streams_size (uint32)</text>
+  <text x="170" y="655" class="box-tiny">2. [实际位置, 文件偏移] × N</text>
+  <circle cx="410" cy="605" r="5" fill="#000000"/>
+
+  <rect x="450" y="580" width="320" height="100" class="box-gray"/>
+  <text x="470" y="610" class="box-mono">基础参数 (basic_params)</text>
+  <text x="470" y="635" class="box-tiny">倍性, 最大块行列数</text>
+  <text x="470" y="655" class="box-tiny">向量长度, 拷贝数, 最小位置</text>
+
+  <rect x="790" y="580" width="320" height="100" class="box-gray"/>
+  <text x="810" y="610" class="box-mono">列平铺与排列</text>
+  <text x="810" y="635" class="box-tiny">列块数, [起始单倍体, 块大小]</text>
+  <text x="810" y="655" class="box-tiny">排列总数, [行, 列, 大小, 字节]</text>
+  
+  <rect x="150" y="700" width="280" height="100" class="box-gray"/>
+  <text x="170" y="730" class="box-mono">元数据 (头与样本)</text>
+  <text x="170" y="755" class="box-tiny">魔数: 0x4D435347, 后端ID</text>
+  <text x="170" y="775" class="box-tiny">压缩 VCF 头, 压缩样本列表</text>
+
+  <rect x="450" y="700" width="660" height="100" class="box-dark-gray"/>
+  <text x="470" y="730" class="box-mono">固定字段块 (拼接负载)</text>
+  <text x="470" y="755" class="box-tiny">各块按顺序序列化，不带长度前缀。</text>
+  <text x="470" y="775" class="box-tiny-bold">随机访问必须依赖从 chunk_streams 解析的文件偏移量。</text>
+
+  <path d="M 780 800 L 780 830 L 630 830 L 630 860" class="flow-dashed" />
+  
+  <rect x="120" y="860" width="1020" height="340" class="box-border"/>
+  <rect x="120" y="860" width="1020" height="50" class="box-dark-gray"/>
+  <text x="150" y="892" class="box-title">3. 固定字段块结构 (GSCF V2)</text>
+  
+  <rect x="150" y="930" width="250" height="120" class="box-gray"/>
+  <text x="170" y="960" class="box-mono">块头部</text>
+  <text x="170" y="985" class="box-tiny">1. 魔数 (0x46435347)</text>
+  <text x="170" y="1005" class="box-tiny">2. 版本 (当前为 2)</text>
+  <text x="170" y="1025" class="box-tiny">3. 总变异数, 行块数</text>
+  
+  <path d="M 400 990 L 430 990" class="flow-arrow"/>
+
+  <rect x="440" y="930" width="310" height="250" class="box-gray"/>
+  <text x="460" y="960" class="box-mono">行块目录 (Directory)</text>
+  <text x="460" y="985" class="box-tiny">每个行块重复记录：</text>
+  <text x="460" y="1015" class="box-tiny">• 变异数, 起始位置, 结束位置</text>
+  <text x="460" y="1035" class="box-tiny">• chrom 偏移与大小</text>
+  <text x="460" y="1055" class="box-tiny">• pos 偏移与大小</text>
+  <text x="460" y="1075" class="box-tiny">• id/ref/alt/qual 偏移与大小</text>
+  <text x="460" y="1095" class="box-tiny-bold">• gt 偏移与大小 (V2 新增)</text>
+  <text x="460" y="1135" class="box-tiny">支持细粒度的范围查询。</text>
+
+  <path d="M 750 1055 L 780 1055" class="flow-arrow"/>
+
+  <rect x="790" y="930" width="320" height="250" class="box-gray"/>
+  <text x="810" y="960" class="box-mono">数据区域</text>
+  <text x="810" y="985" class="box-tiny">按行块序列化的字段。</text>
+  <rect x="810" y="1005" width="280" height="80" fill="#ffffff" stroke="#000000"/>
+  <text x="825" y="1025" class="box-mono">负载顺序：</text>
+  <text x="825" y="1045" class="box-tiny">chrom -> pos -> id -> ref -></text>
+  <text x="825" y="1065" class="box-tiny">alt -> qual -> gt_索引字节</text>
+  <text x="810" y="1115" class="box-tiny-bold">* POS 序列化为十进制差分 ASCII + \0。</text>
+  <text x="810" y="1135" class="box-tiny-bold">* 字符串以 \0 结尾。</text>
+  <text x="810" y="1155" class="box-tiny-bold">* GT 负载包含尾部编解码器标记。</text>
+
+  <path d="M 750 440 L 750 470 L 100 470 L 100 1230 L 120 1230" class="flow-dashed"/>
+  
+  <rect x="120" y="1230" width="1020" height="180" class="box-border"/>
+  <text x="150" y="1270" class="box-title">4. 无损 Part2 区域</text>
+  <text x="150" y="1295" class="box-text">条件区域 (mode_type=true)。由 File_Handle_2 管理的多流字段容器。</text>
+
+  <rect x="150" y="1315" width="260" height="75" class="box-gray"/>
+  <text x="170" y="1340" class="box-mono">part2_params 流</text>
+  <text x="170" y="1365" class="box-tiny">变异数, 字典, 键列表</text>
+  <circle cx="390" cy="1335" r="5" fill="#ffffff" stroke="#000000" stroke-width="2"/>
+
+  <rect x="430" y="1315" width="360" height="75" class="box-gray"/>
+  <text x="450" y="1340" class="box-mono">key_&lt;i&gt;_size &amp; data</text>
+  <text x="450" y="1365" class="box-tiny">INFO/FORMAT 字段拆分为大小流和数据流。</text>
+
+  <rect x="810" y="1315" width="300" height="75" class="box-dark-gray"/>
+  <text x="830" y="1340" class="box-mono">Part2 尾部</text>
+  <text x="830" y="1365" class="box-tiny">目录：名称, 分段, 偏移, 大小</text>
+  <text x="830" y="1380" class="box-tiny-bold">* 以 8 字节的 footer_size 结尾。</text>
+
+  <path d="M 1110 405 L 1150 405 L 1150 1440 L 1120 1440" class="flow-dashed"/>
+  
+  <rect x="120" y="1440" width="1020" height="160" class="box-border"/>
+  <text x="150" y="1480" class="box-title">5. SDSL 尾部区域</text>
+  <text x="150" y="1505" class="box-text">通过 sdsl::rrr_vector 序列化的全局位图，用于 GT 零值/拷贝恢复。</text>
+
+  <rect x="150" y="1525" width="460" height="55" class="box-gray"/>
+  <text x="170" y="1555" class="box-mono">零值位图 (zeros_bit_vector) [2]</text>
+  <text x="400" y="1555" class="box-tiny">偶数(0)/奇数(1) 分位位图</text>
+
+  <rect x="630" y="1525" width="480" height="55" class="box-gray"/>
+  <text x="650" y="1555" class="box-mono">拷贝位图 (copy_bit_vector) [2]</text>
+  <text x="850" y="1555" class="box-tiny">偶数(0)/奇数(1) 分位位图</text>
+
+
+  <rect x="1220" y="210" width="1100" height="1430" class="base-bg panel-border"/>
+
+  <rect x="1260" y="250" width="16" height="40" fill="#000000"/>
+  <text x="1290" y="280" class="panel-title">单样本 GVCF 格式</text>
+  <text x="1290" y="310" class="panel-desc">标准文件协议：文件头 + 块负载 * N + 尾部 + 偏移量。</text>
+
+  <rect x="1260" y="350" width="1020" height="170" class="box-border"/>
+  <text x="1290" y="390" class="box-title">1. 文件头 (File Header)</text>
+  <text x="1290" y="415" class="box-text">包含显式的魔数 (Magic) 和版本声明。</text>
+
+  <rect x="1290" y="435" width="150" height="65" class="box-dark-gray"/>
+  <text x="1365" y="462" class="box-mono" text-anchor="middle">magic</text>
+  <text x="1365" y="482" class="box-tiny" text-anchor="middle">"GVCF"</text>
+  <circle cx="1425" cy="450" r="5" fill="#000000"/>
+
+  <rect x="1460" y="435" width="150" height="65" class="box-dark-gray"/>
+  <text x="1535" y="462" class="box-mono" text-anchor="middle">version</text>
+  <text x="1535" y="482" class="box-tiny" text-anchor="middle">uint32_t (4)</text>
+
+  <rect x="1630" y="435" width="220" height="65" class="box-gray"/>
+  <text x="1650" y="462" class="box-mono">后端与样本数</text>
+  <text x="1650" y="482" class="box-tiny">uint8_t + uint32_t</text>
+
+  <rect x="1870" y="435" width="240" height="65" class="box-gray"/>
+  <text x="1890" y="462" class="box-mono">头文本与样本列表</text>
+  <text x="1890" y="482" class="box-tiny">V3+ 版本支持 header_flag</text>
+
+  <rect x="1260" y="550" width="1020" height="710" class="box-border"/>
+  <rect x="1260" y="550" width="1020" height="50" class="box-dark-gray"/>
+  <text x="1290" y="582" class="box-title">2. 数据块区域 (Block Area)</text>
+  
+  <text x="1290" y="625" class="box-text">逻辑块由长度前缀和 CompressedGVCFBlock 对象组成，重复 N 次。</text>
+
+  <rect x="1290" y="640" width="960" height="60" class="box-border" stroke-width="2"/>
+  <text x="1320" y="675" class="box-mono">block_size (uint32_t)</text>
+  <text x="1520" y="675" class="box-tiny">表示后续负载的字节长度。</text>
+  <circle cx="2220" cy="670" r="5" fill="#000000"/>
+
+  <rect x="1290" y="720" width="960" height="510" class="box-gray"/>
+  <text x="1310" y="755" class="box-mono">CompressedGVCFBlock 负载 (内部视图)</text>
+  
+  <rect x="1310" y="775" width="240" height="120" class="box-dark-gray"/>
+  <text x="1330" y="805" class="box-mono">块头部</text>
+  <text x="1330" y="830" class="box-tiny">魔数: GVCF</text>
+  <text x="1330" y="850" class="box-tiny">块版本: 1</text>
+  <text x="1330" y="870" class="box-tiny">变异数, 样本数</text>
+  <text x="1330" y="890" class="box-tiny">标志位 (END, MIN_DP)</text>
+
+  <path d="M 1550 835 L 1580 835" class="flow-arrow"/>
+
+  <rect x="1590" y="775" width="640" height="230" class="box-border"/>
+  <text x="1610" y="805" class="box-mono">已知字段 (Known Fields)</text>
+  <text x="1610" y="830" class="box-tiny">按顺序序列化。每个字段都是一个独立的 CompressedField：</text>
+  
+  <rect x="1610" y="845" width="290" height="70" class="box-gray"/>
+  <text x="1625" y="865" class="tag-text">位置与序列</text>
+  <text x="1625" y="895" class="box-tiny">chrom, pos, id, ref, alt</text>
+
+  <rect x="1920" y="845" width="290" height="70" class="box-gray"/>
+  <text x="1935" y="865" class="tag-text">质量与信息</text>
+  <text x="1935" y="895" class="box-tiny">qual, filter, info_end (条件)</text>
+
+  <rect x="1610" y="925" width="600" height="70" class="box-gray"/>
+  <text x="1625" y="945" class="tag-text">样本数据</text>
+  <text x="1625" y="975" class="box-tiny">gt_mask, gt_patches, gt_phase, dp, gq, min_dp, pl, ad</text>
+
+  <rect x="1310" y="915" width="240" height="90" class="box-gray"/>
+  <text x="1330" y="940" class="box-mono">未知 INFO / FORMAT</text>
+  <text x="1330" y="965" class="box-tiny">动态字段序列化：</text>
+  <text x="1330" y="985" class="box-tiny">[名称长度, 名称, CompressedField]</text>
+  
+  <path d="M 1750 1005 L 1750 1045" class="flow-arrow"/>
+
+  <rect x="1310" y="1055" width="920" height="155" class="box-dark-gray"/>
+  <text x="1330" y="1085" class="box-title">底层：CompressedField 包装器</text>
+  <text x="1330" y="1110" class="box-tiny">通用的磁盘字段层包装（从 chrom 到 dp 均使用）。</text>
+  
+  <rect x="1330" y="1130" width="200" height="60" class="box-border"/>
+  <text x="1430" y="1155" class="box-mono" text-anchor="middle">method (uint8)</text>
+  <text x="1430" y="1175" class="box-tiny" text-anchor="middle">编码器 (RLE/Delta 等)</text>
+  
+  <rect x="1550" y="1130" width="200" height="60" class="box-border"/>
+  <text x="1650" y="1155" class="box-mono" text-anchor="middle">original_count</text>
+  <text x="1650" y="1175" class="box-tiny" text-anchor="middle">VarUint (元素计数)</text>
+
+  <rect x="1770" y="1130" width="200" height="60" class="box-border"/>
+  <text x="1870" y="1155" class="box-mono" text-anchor="middle">data_size</text>
+  <text x="1870" y="1175" class="box-tiny" text-anchor="middle">VarUint (负载长度)</text>
+
+  <rect x="1990" y="1130" width="220" height="60" class="box-border"/>
+  <text x="2100" y="1155" class="box-mono" text-anchor="middle">data 字节</text>
+  <text x="2100" y="1175" class="box-tiny" text-anchor="middle">编码器特定字节</text>
+
+  <rect x="1260" y="1290" width="1020" height="310" class="box-border"/>
+  <text x="1290" y="1330" class="box-title">3. 文件尾部 (File Footer)</text>
+  <text x="1290" y="1355" class="box-text">汇总索引以便反向查找。解析器读取 EOF 偏移量并跳转至此。</text>
+
+  <rect x="1290" y="1380" width="300" height="110" class="box-gray"/>
+  <text x="1310" y="1410" class="box-mono">块目录 (Directory)</text>
+  <text x="1310" y="1435" class="box-tiny">1. num_blocks (uint32_t)</text>
+  <text x="1310" y="1455" class="box-tiny">2. block_offsets[] (uint64_t)</text>
+  <text x="1310" y="1475" class="box-tiny">3. total_variants (uint64_t)</text>
+  <circle cx="1560" cy="1405" r="5" fill="#000000"/>
+
+  <rect x="1620" y="1380" width="620" height="110" class="box-dark-gray"/>
+  <text x="1640" y="1410" class="box-mono">块索引区 (Index Area V4+)</text>
+  <text x="1640" y="1435" class="box-tiny">索引条目总数 (uint32)</text>
+  <text x="1640" y="1455" class="box-tiny">索引条目: [chrom长度+名称+起始位+结束位+偏移+计数]</text>
+  <text x="1640" y="1475" class="box-tiny-bold">通过候选过滤大幅提升 GVCF 范围查询性能。</text>
+  <circle cx="2210" cy="1405" r="5" fill="#ffffff" stroke="#000000" stroke-width="2"/>
+
+  <rect x="1290" y="1520" width="950" height="50" class="box-border" stroke-width="2"/>
+  <text x="1765" y="1550" class="box-mono" text-anchor="middle">footer_offset (文件末尾的 uint64_t)</text>
+  <text x="2100" y="1550" class="box-tiny-bold">固定在最后 8 字节。</text>
+
+</svg>

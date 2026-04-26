@@ -1,0 +1,207 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="2400" height="1700" viewBox="0 0 2400 1700">
+  <defs>
+    <style>
+      text { font-family: 'PingFang SC', 'Microsoft YaHei', Helvetica, Arial, sans-serif; fill: #000000; }
+      .mono { font-family: 'Courier New', Courier, monospace; }
+      .title { font-size: 42px; font-weight: bold; }
+      .subtitle { font-size: 20px; fill: #333333; }
+      .panel-title { font-size: 28px; font-weight: bold; }
+      .panel-desc { font-size: 16px; font-style: italic; fill: #555555; }
+      .box-title { font-size: 21px; font-weight: bold; }
+      .box-text { font-size: 15px; fill: #333333; }
+      .box-tiny { font-size: 13px; fill: #333333; }
+      .box-tiny-bold { font-size: 13px; font-weight: bold; }
+      .box-mono { font-size: 14px; font-weight: bold; }
+      .tag-text { font-size: 12px; font-weight: bold; text-transform: uppercase; }
+      .flow-arrow { stroke: #000000; stroke-width: 2; fill: none; marker-end: url(#arrow-solid); stroke-linecap: round; stroke-linejoin: round; }
+      .flow-dashed { stroke: #666666; stroke-width: 1.5; fill: none; stroke-dasharray: 7 5; marker-end: url(#arrow-dashed); stroke-linecap: round; stroke-linejoin: round; }
+      .panel-border { stroke: #000000; stroke-width: 2.5; fill: #ffffff; }
+      .box-border { fill: #ffffff; stroke: #000000; stroke-width: 1.5; }
+      .box-gray { fill: #f5f5f5; stroke: #000000; stroke-width: 1.5; }
+      .box-dark-gray { fill: #e0e0e0; stroke: #000000; stroke-width: 1.5; }
+      .lane-label { font-size: 12px; fill: #555555; }
+    </style>
+    <marker id="arrow-solid" markerWidth="14" markerHeight="12" refX="11" refY="6" orient="auto" markerUnits="userSpaceOnUse">
+      <path d="M1,1 L12,6 L1,11 L4.5,6 z" fill="#000000" />
+    </marker>
+    <marker id="arrow-dashed" markerWidth="14" markerHeight="12" refX="11" refY="6" orient="auto" markerUnits="userSpaceOnUse">
+      <path d="M1,1 L12,6 L1,11 L4.5,6 z" fill="#666666" />
+    </marker>
+  </defs>
+
+  <rect width="2400" height="1700" fill="#ffffff"/>
+
+  <rect x="80" y="60" width="2240" height="120" fill="#ffffff" stroke="#000000" stroke-width="2"/>
+  <text x="140" y="114" class="title">VCF/BCF 多样本 .gsc 二进制结构</text>
+  <text x="140" y="150" class="subtitle">对应 Excel：VCF层次结构 / VCF_gsc二进制结构。左侧是文件物理区段，右侧展开关键字段与定位关系。</text>
+  <rect x="1970" y="94" width="310" height="44" fill="#ffffff" stroke="#000000" stroke-width="1.5"/>
+  <circle cx="1992" cy="116" r="5" fill="#000000"/>
+  <text x="2008" y="121" class="box-tiny">必选</text>
+  <circle cx="2090" cy="116" r="5" fill="#ffffff" stroke="#000000" stroke-width="2"/>
+  <text x="2106" y="121" class="box-tiny">条件/兼容</text>
+  <line x1="2190" y1="116" x2="2240" y2="116" class="flow-dashed"/>
+  <text x="2250" y="121" class="box-tiny">引用/跳转</text>
+
+  <rect x="80" y="220" width="580" height="1390" class="panel-border"/>
+  <rect x="120" y="260" width="16" height="40" fill="#000000"/>
+  <text x="150" y="290" class="panel-title">文件物理布局</text>
+  <text x="150" y="320" class="panel-desc">从文件起点到 EOF 的真实字节顺序；.gsc 没有顶层 magic/version。</text>
+
+  <rect x="130" y="365" width="480" height="125" class="box-dark-gray"/>
+  <text x="160" y="402" class="box-title">1. TOP_HEADER</text>
+  <text x="160" y="430" class="box-text">固定 17 bytes：模式与两个主偏移。</text>
+  <text x="160" y="456" class="box-mono">bool + uint64_t + uint64_t</text>
+  <circle cx="588" cy="395" r="5" fill="#000000"/>
+
+  <path d="M370 500 L370 545" class="flow-arrow"/>
+
+  <rect x="130" y="555" width="480" height="380" class="box-border"/>
+  <text x="160" y="592" class="box-title">2. MAIN_ARCHIVE</text>
+  <text x="160" y="620" class="box-text">主归档区：从 offset 17 到 other_fields_offset。</text>
+  <text x="160" y="648" class="box-tiny">包含 chunk 定位、GT 全局参数、排列、meta 和 fixed chunks。</text>
+  <rect x="160" y="680" width="420" height="52" class="box-gray"/>
+  <text x="180" y="713" class="box-mono">chunk_streams / basic params</text>
+  <rect x="160" y="750" width="420" height="52" class="box-gray"/>
+  <text x="180" y="783" class="box-mono">column tiling / permutations</text>
+  <rect x="160" y="820" width="420" height="52" class="box-gray"/>
+  <text x="180" y="853" class="box-mono">meta + fixed-fields chunk payloads</text>
+  <circle cx="588" cy="745" r="5" fill="#000000"/>
+
+  <path d="M370 945 L370 990" class="flow-arrow"/>
+
+  <rect x="130" y="1000" width="480" height="240" class="box-border"/>
+  <text x="160" y="1038" class="box-title">3. LOSSLESS_PART2</text>
+  <text x="160" y="1066" class="box-text">仅 lossless 文件存在。</text>
+  <text x="160" y="1094" class="box-mono">[other_fields_offset, sdsl_offset)</text>
+  <rect x="160" y="1124" width="420" height="52" class="box-gray"/>
+  <text x="180" y="1157" class="box-mono">part2_params + key_i_size/data</text>
+  <circle cx="588" cy="1030" r="5" fill="#ffffff" stroke="#000000" stroke-width="2"/>
+
+  <path d="M370 1250 L370 1295" class="flow-arrow"/>
+
+  <rect x="130" y="1305" width="480" height="165" class="box-dark-gray"/>
+  <text x="160" y="1343" class="box-title">4. SDSL_TAIL</text>
+  <text x="160" y="1371" class="box-text">从 sdsl_offset 开始的 GT zero/copy 位图。</text>
+  <text x="160" y="1398" class="box-mono">zeros[2] + copies[2]</text>
+  <text x="160" y="1425" class="box-tiny">每项均为 sdsl::rrr_vector&lt;&gt;</text>
+  <circle cx="588" cy="1335" r="5" fill="#000000"/>
+
+  <rect x="690" y="220" width="40" height="1390" fill="#ffffff"/>
+  <text x="710" y="250" text-anchor="middle" class="lane-label" transform="rotate(90 710 250)">arrow lane: physical section to detail panel</text>
+
+  <rect x="760" y="220" width="1560" height="1390" class="panel-border"/>
+  <rect x="800" y="260" width="16" height="40" fill="#000000"/>
+  <text x="830" y="290" class="panel-title">结构展开</text>
+  <text x="830" y="320" class="panel-desc">箭头只走左右留白通道，不穿过字段框；字段顺序与 Excel 明细 sheet 对齐。</text>
+
+  <path d="M610 427 L735 427 L735 390 L800 390" class="flow-arrow"/>
+  <path d="M610 745 L735 745 L735 615 L800 615" class="flow-arrow"/>
+  <path d="M610 1120 L735 1120 L735 1090 L800 1090" class="flow-arrow"/>
+  <path d="M610 1387 L735 1387 L735 1380 L800 1380" class="flow-arrow"/>
+
+  <rect x="800" y="355" width="1480" height="135" class="box-border"/>
+  <text x="830" y="392" class="box-title">TOP_HEADER：文件入口字段</text>
+  <text x="830" y="420" class="box-text">解压端首先读取这 3 个字段，并据此定位主 archive、part2 与 SDSL tail。</text>
+  <rect x="1070" y="438" width="230" height="34" class="box-dark-gray"/>
+  <text x="1185" y="461" text-anchor="middle" class="box-mono">mode_type</text>
+  <rect x="1330" y="438" width="310" height="34" class="box-dark-gray"/>
+  <text x="1485" y="461" text-anchor="middle" class="box-mono">other_fields_offset</text>
+  <rect x="1670" y="438" width="250" height="34" class="box-dark-gray"/>
+  <text x="1795" y="461" text-anchor="middle" class="box-mono">sdsl_offset</text>
+  <text x="1950" y="461" class="box-tiny-bold">lossless/lossy 解压模式必须匹配 mode_type。</text>
+
+  <rect x="800" y="535" width="1480" height="330" class="box-border"/>
+  <text x="830" y="574" class="box-title">MAIN_ARCHIVE：定位表 + GT 参数 + meta + fixed chunks</text>
+  <text x="830" y="602" class="box-text">该区域是 `.gsc` 的主体。最终 fixed chunk 不带长度前缀，必须靠 chunk_streams.offset 定位。</text>
+
+  <rect x="830" y="635" width="300" height="92" class="box-gray"/>
+  <text x="850" y="664" class="box-mono">chunk_streams</text>
+  <text x="850" y="690" class="box-tiny">chunks_streams_size</text>
+  <text x="850" y="710" class="box-tiny">[cur_chunk_actual_pos, offset] × N</text>
+
+  <rect x="1160" y="635" width="300" height="92" class="box-gray"/>
+  <text x="1180" y="664" class="box-mono">basic / copy origin</text>
+  <text x="1180" y="690" class="box-tiny">ploidy, max rows/cols, vec_len</text>
+  <text x="1180" y="710" class="box-tiny">used_bits_cp + copy-origin bitstream</text>
+
+  <rect x="1490" y="635" width="300" height="92" class="box-gray"/>
+  <text x="1510" y="664" class="box-mono">range / chrom index</text>
+  <text x="1510" y="690" class="box-tiny">chunks_min_pos[]</text>
+  <text x="1510" y="710" class="box-tiny">where_chrom[]</text>
+
+  <rect x="1820" y="635" width="420" height="92" class="box-gray"/>
+  <text x="1840" y="664" class="box-mono">column tiling + permutations</text>
+  <text x="1840" y="690" class="box-tiny">n_col_blocks, [start_haplotype, block_size]</text>
+  <text x="1840" y="710" class="box-tiny">[row_block_id, col_block_id, data_size, vint bytes]</text>
+
+  <rect x="830" y="755" width="440" height="76" class="box-dark-gray"/>
+  <text x="850" y="785" class="box-mono">meta</text>
+  <text x="850" y="810" class="box-tiny">GSC_META_MAGIC + backend + compressed header/sample names</text>
+
+  <rect x="1300" y="755" width="940" height="76" class="box-dark-gray"/>
+  <text x="1320" y="785" class="box-mono">fixed-fields chunk payloads</text>
+  <text x="1320" y="810" class="box-tiny-bold">按 chunk 顺序拼接；无长度前缀；chunk 内部见下方 GSCF V2。</text>
+
+  <path d="M1770 831 L1770 880" class="flow-dashed"/>
+
+  <rect x="800" y="900" width="1480" height="430" class="box-border"/>
+  <rect x="800" y="900" width="1480" height="50" class="box-dark-gray"/>
+  <text x="830" y="933" class="box-title">GSCF V2：Fixed Fields Chunk 内部</text>
+
+  <rect x="830" y="980" width="300" height="138" class="box-gray"/>
+  <text x="850" y="1010" class="box-mono">chunk_header</text>
+  <text x="850" y="1036" class="box-tiny">magic = 0x46435347 ("GSCF")</text>
+  <text x="850" y="1056" class="box-tiny">version = 2</text>
+  <text x="850" y="1076" class="box-tiny">total_variants</text>
+  <text x="850" y="1096" class="box-tiny">row_block_count, flags</text>
+
+  <path d="M1130 1049 L1185 1049" class="flow-arrow"/>
+
+  <rect x="1195" y="980" width="415" height="250" class="box-gray"/>
+  <text x="1215" y="1010" class="box-mono">row_block_directory</text>
+  <text x="1215" y="1036" class="box-tiny">每个 row_block 一个目录项：</text>
+  <text x="1215" y="1064" class="box-tiny">variant_count / first_pos / last_pos</text>
+  <text x="1215" y="1086" class="box-tiny">chrom_off / chrom_size</text>
+  <text x="1215" y="1108" class="box-tiny">pos_off / pos_size</text>
+  <text x="1215" y="1130" class="box-tiny">id/ref/alt/qual off+size</text>
+  <text x="1215" y="1152" class="box-tiny-bold">gt_off / gt_size (V2)</text>
+  <text x="1215" y="1190" class="box-tiny">范围查询直接按 first_pos/last_pos 选 row_block。</text>
+
+  <path d="M1610 1105 L1665 1105" class="flow-arrow"/>
+
+  <rect x="1675" y="980" width="565" height="250" class="box-gray"/>
+  <text x="1695" y="1010" class="box-mono">data_region</text>
+  <text x="1695" y="1036" class="box-tiny">按目录 off/size 指向各字段 payload。</text>
+  <rect x="1695" y="1060" width="510" height="62" class="box-border"/>
+  <text x="1710" y="1084" class="box-mono">payload order</text>
+  <text x="1710" y="1106" class="box-tiny">CHROM -> POS -> ID -> REF -> ALT -> QUAL -> GT</text>
+  <text x="1695" y="1150" class="box-tiny-bold">字符串列：append_str()，NUL 结尾。</text>
+  <text x="1695" y="1174" class="box-tiny-bold">POS：append(int64 delta)，十进制 ASCII + NUL。</text>
+  <text x="1695" y="1198" class="box-tiny-bold">GT：稀疏索引 payload + 1-byte codec marker。</text>
+
+  <rect x="830" y="1250" width="1410" height="52" class="box-border"/>
+  <text x="850" y="1283" class="box-tiny-bold">兼容分支：旧 fixed-fields chunk 不以 GSCF magic 起始，而是 [no_variants] + 7 个 [size,payload]；无 row_block 目录。</text>
+
+  <rect x="800" y="1355" width="900" height="185" class="box-border"/>
+  <text x="830" y="1392" class="box-title">LOSSLESS_PART2：FILTER / INFO / FORMAT 多流容器</text>
+  <rect x="830" y="1420" width="240" height="78" class="box-gray"/>
+  <text x="850" y="1450" class="box-mono">part2_params</text>
+  <text x="850" y="1476" class="box-tiny">actual_variants, key table, backend, fmt dict</text>
+  <rect x="1100" y="1420" width="260" height="78" class="box-gray"/>
+  <text x="1120" y="1450" class="box-mono">key_i_size / key_i_data</text>
+  <text x="1120" y="1476" class="box-tiny">每个 FILTER/INFO/FORMAT key 的 size/data 子流</text>
+  <rect x="1390" y="1420" width="280" height="78" class="box-dark-gray"/>
+  <text x="1410" y="1450" class="box-mono">File_Handle_2 footer</text>
+  <text x="1410" y="1476" class="box-tiny">stream_name, part offset/size, footer_size</text>
+
+  <rect x="1730" y="1355" width="510" height="185" class="box-border"/>
+  <text x="1760" y="1392" class="box-title">SDSL_TAIL：GT zero/copy 位图</text>
+  <rect x="1760" y="1420" width="210" height="48" class="box-gray"/>
+  <text x="1780" y="1450" class="box-mono">zeros_only[0/1]</text>
+  <rect x="2000" y="1420" width="210" height="48" class="box-gray"/>
+  <text x="2020" y="1450" class="box-mono">copies[0/1]</text>
+  <text x="1760" y="1500" class="box-tiny-bold">copy origin 差值位流位于 MAIN_ARCHIVE，不在 SDSL tail。</text>
+
+  <rect x="80" y="1640" width="2240" height="34" fill="#ffffff" stroke="#000000" stroke-width="1"/>
+  <text x="110" y="1663" class="box-tiny">源码依据：src/compressor.cpp::writeCompressFlie(), src/decompression_reader.cpp::OpenReading()/readFixedFields(), src/file_handle.cpp, src/variant.h</text>
+</svg>
